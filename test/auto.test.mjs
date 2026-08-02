@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   installCornerfillAuto,
   transportCornerShapeDeclarations,
-} from "../src/auto-runtime.mjs";
+} from "../dist/auto-runtime.mjs";
 
 test("automatic CSS transport changes declarations without touching selectors, values, or conditions", () => {
   const source = `

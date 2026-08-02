@@ -1,4 +1,4 @@
-import { qualifyNativeCornerShape } from "../src/native.mjs";
+import { qualifyNativeCornerShape } from "../dist/native.mjs";
 
 const backend = new URL(location.href).searchParams.get("backend") ?? "static-data-url";
 const results = [];
@@ -152,7 +152,7 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   escaped.className = "cornerfill:escaped";
   document.body.append(toggle);
   document.body.append(element, dynamic, inline, focus, media);
-  const { cornerfill: auto } = await import("../src/auto.mjs");
+  const { cornerfill: auto } = await import("../dist/auto.mjs");
   await auto.ready;
   rootImportResources = Object.freeze(performance.getEntriesByType("resource")
     .map(({ name }) => new URL(name).pathname));
@@ -334,8 +334,8 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   link.remove();
 });
 
-({ installCornerfill } = await import("../src/index.mjs"));
-({ installCornerfillAuto } = await import("../src/auto-runtime.mjs"));
+({ installCornerfill } = await import("../dist/runtime.mjs"));
+({ installCornerfillAuto } = await import("../dist/auto-runtime.mjs"));
 
 await test("automatic stylesheet refresh is serialized, stale-safe, and retryable", async () => {
   globalThis.__CORNERFILL_TEST_STAGE__ = "stylesheet setup";

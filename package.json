@@ -1,20 +1,38 @@
 {
   "name": "cornerfill",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Native-first paint polyfill for CSS corner-shape in Safari and Firefox",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
-    "./src/auto.mjs"
+    "./dist/auto.mjs"
   ],
   "files": [
-    "src/"
+    "dist/*.d.mts",
+    "dist/*.mjs"
   ],
+  "types": "./dist/auto.d.mts",
   "exports": {
-    ".": "./src/auto.mjs",
-    "./runtime": "./src/runtime.mjs",
-    "./geometry": "./src/geometry.mjs",
-    "./values": "./src/values.mjs"
+    ".": {
+      "types": "./dist/auto.d.mts",
+      "import": "./dist/auto.mjs",
+      "default": "./dist/auto.mjs"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.mts",
+      "import": "./dist/runtime.mjs",
+      "default": "./dist/runtime.mjs"
+    },
+    "./geometry": {
+      "types": "./dist/geometry.d.mts",
+      "import": "./dist/geometry.mjs",
+      "default": "./dist/geometry.mjs"
+    },
+    "./values": {
+      "types": "./dist/values.d.mts",
+      "import": "./dist/values.mjs",
+      "default": "./dist/values.mjs"
+    }
   },
   "repository": {
     "type": "git",
@@ -38,7 +56,13 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test": "node --test",
-    "test:browser:runtime": "node scripts/runtime-regressions.mjs"
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { force: true, recursive: true });\"",
+    "build": "npm run clean && tsc -p tsconfig.json && tsc -p tsconfig.types.json",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test",
+    "test:browser:runtime": "npm run build && node scripts/runtime-regressions.mjs"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

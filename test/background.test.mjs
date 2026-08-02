@@ -6,7 +6,7 @@ import {
   parseBackgroundPosition,
   parseBackgroundRepeat,
   resolvePaintForBox,
-} from "../src/background.mjs";
+} from "../dist/background.mjs";
 
 const image = Object.freeze({ width: 30, height: 15 });
 

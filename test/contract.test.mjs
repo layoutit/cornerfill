@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CORNERFILL_ORACLE_QUALIFICATION } from "../src/native.mjs";
+import { CORNERFILL_ORACLE_QUALIFICATION } from "../dist/native.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test("production sources contain none of the prohibited CSS renderers", () => {
   const source = readdirSync(join(root, "src"))
-    .filter((name) => name.endsWith(".mjs"))
+    .filter((name) => name.endsWith(".mjs") || name.endsWith(".mts"))
     .map((name) => readFileSync(join(root, "src", name), "utf8"))
     .join("\n");
   for (const prohibited of ["clip-path", "mask-image", "-webkit-mask", "data:image/svg", "<svg"]) {

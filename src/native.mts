@@ -14,7 +14,47 @@ export const CORNERFILL_ORACLE_QUALIFICATION = Object.freeze({
   }),
 });
 
-const CACHE = new WeakMap();
+export interface CornerfillNativeSyntaxProbes {
+  readonly shorthand: boolean;
+  readonly longhand: boolean;
+  readonly convexSuperellipse: boolean;
+  readonly concaveSuperellipse: boolean;
+}
+
+export interface CornerfillNativeRequirement {
+  readonly supported: boolean;
+  readonly observable?: boolean;
+  readonly probes?: Readonly<CornerfillNativeSyntaxProbes>;
+  readonly shorthand?: string;
+  readonly longhands?: readonly string[];
+  readonly bevelExcludes?: boolean;
+  readonly roundIncludes?: boolean;
+}
+
+export interface CornerfillNativeRequirements {
+  readonly syntax: Readonly<CornerfillNativeRequirement>;
+  readonly computedValues: Readonly<CornerfillNativeRequirement>;
+  readonly shapedBehavior: Readonly<CornerfillNativeRequirement>;
+}
+
+export interface CornerfillNativeQualification {
+  readonly schema: typeof CORNERFILL_NATIVE_QUALIFICATION_SCHEMA;
+  readonly qualified: boolean;
+  readonly requirements: Readonly<CornerfillNativeRequirements>;
+  readonly unresolved: readonly (keyof CornerfillNativeRequirements)[];
+  readonly reason: string;
+  readonly error?: string;
+}
+
+type CssSupportWindow = Window & {
+  CSS?: {
+    supports?: (property: string, value: string) => boolean;
+  };
+};
+
+type RequirementDetails = Omit<CornerfillNativeRequirement, "supported">;
+
+const CACHE = new WeakMap<Document, Readonly<CornerfillNativeQualification>>();
 const LONGHANDS = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
@@ -23,17 +63,24 @@ const LONGHANDS = Object.freeze([
 ]);
 const EXPECTED_LONGHANDS = Object.freeze(["bevel", "scoop", "round", "notch"]);
 
-function requirement(supported, details = {}) {
+function requirement(
+  supported: boolean,
+  details: RequirementDetails = {},
+): Readonly<CornerfillNativeRequirement> {
   return Object.freeze({ supported, ...details });
 }
 
-function unresolvedRequirements(requirements) {
-  return Object.freeze(Object.entries(requirements)
-    .filter(([, value]) => !value.supported)
-    .map(([name]) => name));
+function unresolvedRequirements(
+  requirements: CornerfillNativeRequirements,
+): readonly (keyof CornerfillNativeRequirements)[] {
+  return Object.freeze((Object.keys(requirements) as (keyof CornerfillNativeRequirements)[])
+    .filter((name) => !requirements[name].supported));
 }
 
-function qualification(requirements, error = null) {
+function qualification(
+  requirements: CornerfillNativeRequirements,
+  error: unknown = null,
+): Readonly<CornerfillNativeQualification> {
   const unresolved = unresolvedRequirements(requirements);
   const qualified = unresolved.length === 0;
   return Object.freeze({
@@ -48,17 +95,18 @@ function qualification(requirements, error = null) {
   });
 }
 
-function syntaxRequirement(view) {
+function syntaxRequirement(view: Window): Readonly<CornerfillNativeRequirement> {
+  const css = (view as CssSupportWindow).CSS;
   const probes = Object.freeze({
-    shorthand: Boolean(view.CSS?.supports?.("corner-shape", "bevel scoop round notch")),
-    longhand: Boolean(view.CSS?.supports?.("corner-top-left-shape", "notch")),
-    convexSuperellipse: Boolean(view.CSS?.supports?.("corner-shape", "superellipse(2)")),
-    concaveSuperellipse: Boolean(view.CSS?.supports?.("corner-shape", "superellipse(-1)")),
+    shorthand: Boolean(css?.supports?.("corner-shape", "bevel scoop round notch")),
+    longhand: Boolean(css?.supports?.("corner-top-left-shape", "notch")),
+    convexSuperellipse: Boolean(css?.supports?.("corner-shape", "superellipse(2)")),
+    concaveSuperellipse: Boolean(css?.supports?.("corner-shape", "superellipse(-1)")),
   });
   return requirement(Object.values(probes).every(Boolean), { probes });
 }
 
-function probeElement(document) {
+function probeElement(document: Document): HTMLDivElement {
   const element = document.createElement("div");
   element.setAttribute("aria-hidden", "true");
   Object.assign(element.style, {
@@ -77,9 +125,12 @@ function probeElement(document) {
   return element;
 }
 
-function computedRequirement(document, element) {
+function computedRequirement(
+  document: Document,
+  element: HTMLElement,
+): Readonly<CornerfillNativeRequirement> {
   element.style.setProperty("corner-shape", EXPECTED_LONGHANDS.join(" "));
-  const computed = document.defaultView.getComputedStyle(element);
+  const computed = document.defaultView!.getComputedStyle(element);
   const shorthand = computed.getPropertyValue("corner-shape").trim();
   const longhands = Object.freeze(LONGHANDS.map((property) => (
     computed.getPropertyValue(property).trim()
@@ -91,8 +142,11 @@ function computedRequirement(document, element) {
   );
 }
 
-function behaviorRequirement(document, element) {
-  const view = document.defaultView;
+function behaviorRequirement(
+  document: Document,
+  element: HTMLElement,
+): Readonly<CornerfillNativeRequirement> {
+  const view = document.defaultView!;
   const available = Math.floor(Math.min(view.innerWidth ?? 0, view.innerHeight ?? 0) - 8);
   if (available < 32 || typeof document.elementFromPoint !== "function") {
     return requirement(false, { observable: false });
@@ -110,10 +164,10 @@ function behaviorRequirement(document, element) {
   const x = left + Math.round(size * 0.15);
   const y = top + Math.round(size * 0.2);
   element.style.setProperty("corner-shape", "bevel");
-  document.defaultView.getComputedStyle(element).getPropertyValue("corner-shape");
+  view.getComputedStyle(element).getPropertyValue("corner-shape");
   const bevelExcludes = document.elementFromPoint(x, y) !== element;
   element.style.setProperty("corner-shape", "round");
-  document.defaultView.getComputedStyle(element).getPropertyValue("corner-shape");
+  view.getComputedStyle(element).getPropertyValue("corner-shape");
   const roundIncludes = document.elementFromPoint(x, y) === element;
   return requirement(bevelExcludes && roundIncludes, {
     observable: true,
@@ -122,7 +176,10 @@ function behaviorRequirement(document, element) {
   });
 }
 
-function isolatedProbeDocument(document) {
+function isolatedProbeDocument(document: Document): Readonly<{
+  document: Document;
+  frame: HTMLIFrameElement;
+}> {
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   Object.assign(frame.style, {
@@ -145,7 +202,9 @@ function isolatedProbeDocument(document) {
   return Object.freeze({ document: isolated, frame });
 }
 
-export function qualifyNativeCornerShape(document = globalThis.document) {
+export function qualifyNativeCornerShape(
+  document: Document | undefined = globalThis.document,
+): Readonly<CornerfillNativeQualification> {
   if (!document?.defaultView || !document.documentElement) {
     throw new TypeError("native corner-shape qualification requires an active browser document");
   }
@@ -162,9 +221,9 @@ export function qualifyNativeCornerShape(document = globalThis.document) {
     return result;
   }
 
-  let frame = null;
-  let element = null;
-  let result;
+  let frame: HTMLIFrameElement | null = null;
+  let element: HTMLElement | null = null;
+  let result: Readonly<CornerfillNativeQualification>;
   try {
     const isolated = isolatedProbeDocument(document);
     frame = isolated.frame;

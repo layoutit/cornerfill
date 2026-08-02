@@ -2,22 +2,115 @@ import { nextDocumentId } from "./identity.mjs";
 
 export const CORNERFILL_SURFACE_SCHEMA = "cornerfill-live-surface@2";
 
-const hiddenRoots = new WeakMap();
-const webkitSurfacePools = new WeakMap();
-const mozRegistrationCounts = new WeakMap();
+export type SurfaceBackend = "auto" | ConcreteSurfaceBackend;
+export type ConcreteSurfaceBackend = "webkit-canvas" | "moz-element" | "static-data-url";
+type SelectedSurfaceBackend = SurfaceBackend | "none";
+
+export interface SurfaceCreateOptions {
+  readonly allowStatic?: boolean;
+  readonly backend?: SurfaceBackend;
+  readonly cssHeight: number;
+  readonly cssWidth: number;
+  readonly dpr?: number;
+  readonly idPrefix?: string;
+  readonly maxSurfacePixels?: number;
+  readonly maxWebkitPoolEntries?: number;
+  readonly maxWebkitPoolPrefixes?: number;
+}
+
+export interface SurfaceSize {
+  readonly backingHeight: number;
+  readonly backingWidth: number;
+  readonly cssHeight: number;
+  readonly cssWidth: number;
+  readonly dpr: number;
+}
+
+export interface CornerfillSurface {
+  readonly backend: ConcreteSurfaceBackend;
+  readonly context: CanvasRenderingContext2D;
+  readonly cssImage: string;
+  readonly id: string;
+  readonly schema: typeof CORNERFILL_SURFACE_SCHEMA;
+  readonly size: Readonly<SurfaceSize>;
+  commit(): void;
+  dispose(): void;
+  resize(cssWidth: number, cssHeight: number, dpr: number): boolean;
+}
+
+export interface SurfaceCapabilities {
+  readonly schema: "cornerfill-surface-capabilities@1";
+  readonly webkitCanvas: boolean;
+  readonly mozElement: boolean;
+  readonly mozRegistration: boolean;
+  readonly staticImage: boolean;
+  readonly preferredBackend: "webkit-canvas" | "moz-element" | "none";
+}
+
+interface ResolvedSurfaceOptions {
+  readonly cssHeight: number;
+  readonly cssWidth: number;
+  readonly dpr: number;
+  readonly idPrefix: string;
+  readonly maxSurfacePixels: number;
+  readonly maxWebkitPoolEntries: number;
+  readonly maxWebkitPoolPrefixes: number;
+}
+
+interface WebkitPoolEntry {
+  readonly id: string;
+  readonly pixels: number;
+}
+
+interface WebkitPoolState {
+  activeCanvases: number;
+  pooledCanvases: number;
+  pooledPixels: number;
+  retiredCanvases: number;
+  retiredPixels: number;
+  shrinkFailures: number;
+  readonly pools: Map<string, WebkitPoolEntry[]>;
+}
+
+interface WebkitReleaseOptions {
+  readonly maxPoolEntries: number;
+  readonly maxPoolPrefixes: number;
+  readonly pixels: number;
+  readonly shrunk: boolean;
+}
+
+type CssSupportHost = typeof globalThis & {
+  CSS?: {
+    supports?: (property: string, value: string) => boolean;
+  };
+};
+
+type SurfaceDocument = Document & {
+  getCSSCanvasContext?: (
+    contextId: "2d",
+    name: string,
+    width: number,
+    height: number,
+  ) => CanvasRenderingContext2D | null;
+  mozSetImageElement?: (id: string, element: Element | null) => void;
+};
+
+const hiddenRoots = new WeakMap<Document, HTMLDivElement>();
+const webkitSurfacePools = new WeakMap<Document, WebkitPoolState>();
+const mozRegistrationCounts = new WeakMap<Document, number>();
 
 const DEFAULT_MAX_WEBKIT_POOL_ENTRIES = 256;
 const DEFAULT_MAX_WEBKIT_POOL_PREFIXES = 16;
 
-function nextSurfaceId(document, prefix = "cornerfill") {
+function nextSurfaceId(document: Document, prefix = "cornerfill"): string {
   return nextDocumentId(document, "surface", prefix);
 }
 
-function normalizedPrefix(prefix = "cornerfill") {
+function normalizedPrefix(prefix = "cornerfill"): string {
   return prefix.replace(/[^a-z0-9_-]/giu, "-");
 }
 
-function webkitPoolState(document) {
+function webkitPoolState(document: Document): WebkitPoolState {
   let state = webkitSurfacePools.get(document);
   if (!state) {
     state = {
@@ -34,7 +127,7 @@ function webkitPoolState(document) {
   return state;
 }
 
-function acquireWebkitSurfaceId(document, prefix) {
+function acquireWebkitSurfaceId(document: Document, prefix: string): string {
   const key = normalizedPrefix(prefix);
   const state = webkitPoolState(document);
   const available = state.pools.get(key);
@@ -42,7 +135,7 @@ function acquireWebkitSurfaceId(document, prefix) {
   if (retained) {
     state.pooledCanvases -= 1;
     state.pooledPixels -= retained.pixels;
-    if (available.length === 0) state.pools.delete(key);
+    if (available!.length === 0) state.pools.delete(key);
     state.activeCanvases += 1;
     return retained.id;
   }
@@ -50,12 +143,12 @@ function acquireWebkitSurfaceId(document, prefix) {
   return nextSurfaceId(document, key);
 }
 
-function releaseWebkitSurfaceId(document, prefix, id, {
+function releaseWebkitSurfaceId(document: Document, prefix: string, id: string, {
   pixels,
   shrunk,
   maxPoolEntries,
   maxPoolPrefixes,
-}) {
+}: WebkitReleaseOptions): void {
   const key = normalizedPrefix(prefix);
   const state = webkitPoolState(document);
   state.activeCanvases = Math.max(0, state.activeCanvases - 1);
@@ -77,7 +170,12 @@ function releaseWebkitSurfaceId(document, prefix, id, {
   state.retiredPixels += retainedPixels;
 }
 
-function backingDimensions(cssWidth, cssHeight, dpr, maxSurfacePixels) {
+function backingDimensions(
+  cssWidth: number,
+  cssHeight: number,
+  dpr: number,
+  maxSurfacePixels: number,
+): Readonly<{ width: number; height: number }> {
   if (![cssWidth, cssHeight].every((value) => Number.isFinite(value) && value > 0)) {
     throw new TypeError("surface CSS dimensions must be finite and positive");
   }
@@ -90,7 +188,7 @@ function backingDimensions(cssWidth, cssHeight, dpr, maxSurfacePixels) {
   return Object.freeze({ width, height });
 }
 
-function getHiddenRoot(document) {
+function getHiddenRoot(document: Document): HTMLDivElement {
   let root = hiddenRoots.get(document);
   if (root?.isConnected) return root;
   root = document.createElement("div");
@@ -111,7 +209,7 @@ function getHiddenRoot(document) {
   return root;
 }
 
-function maybeRemoveHiddenRoot(document) {
+function maybeRemoveHiddenRoot(document: Document): void {
   const root = hiddenRoots.get(document);
   if (root && root.childElementCount === 0) {
     root.remove();
@@ -119,11 +217,11 @@ function maybeRemoveHiddenRoot(document) {
   }
 }
 
-export function detectSurfaceCapabilities(document) {
-  const view = document?.defaultView ?? globalThis;
+export function detectSurfaceCapabilities(document: Document): Readonly<SurfaceCapabilities> {
+  const view = (document?.defaultView ?? globalThis) as CssSupportHost;
   const cssSupports = view.CSS?.supports?.bind(view.CSS);
-  const webkitCanvas = typeof document?.getCSSCanvasContext === "function";
-  const mozRegistration = typeof document?.mozSetImageElement === "function";
+  const webkitCanvas = typeof (document as SurfaceDocument)?.getCSSCanvasContext === "function";
+  const mozRegistration = typeof (document as SurfaceDocument)?.mozSetImageElement === "function";
   const mozElement = mozRegistration || Boolean(cssSupports?.("background-image", "-moz-element(#cornerfill-probe)"));
   return Object.freeze({
     schema: "cornerfill-surface-capabilities@1",
@@ -135,7 +233,7 @@ export function detectSurfaceCapabilities(document) {
   });
 }
 
-export function getSurfaceResourceStats(document) {
+export function getSurfaceResourceStats(document: Document) {
   const webkit = webkitSurfacePools.get(document);
   return Object.freeze({
     schema: "cornerfill-surface-resources@1",
@@ -156,16 +254,19 @@ export function getSurfaceResourceStats(document) {
   });
 }
 
-function createWebkitSurface(document, options) {
+function createWebkitSurface(
+  document: SurfaceDocument,
+  options: Readonly<ResolvedSurfaceOptions>,
+): CornerfillSurface {
   const id = acquireWebkitSurfaceId(document, options.idPrefix);
-  let context = null;
+  let context: CanvasRenderingContext2D | null = null;
   let cssWidth = 0;
   let cssHeight = 0;
   let dpr = 1;
   let backingWidth = 0;
   let backingHeight = 0;
   let disposed = false;
-  const surface = {
+  const surface: CornerfillSurface = {
     schema: CORNERFILL_SURFACE_SCHEMA,
     backend: "webkit-canvas",
     id,
@@ -182,7 +283,7 @@ function createWebkitSurface(document, options) {
       const backing = backingDimensions(nextWidth, nextHeight, nextDpr, options.maxSurfacePixels);
       if (backing.width === backingWidth && backing.height === backingHeight
         && nextWidth === cssWidth && nextHeight === cssHeight && nextDpr === dpr) return false;
-      const nextContext = document.getCSSCanvasContext("2d", id, backing.width, backing.height);
+      const nextContext = document.getCSSCanvasContext!("2d", id, backing.width, backing.height);
       if (!nextContext) throw new Error("document.getCSSCanvasContext() did not return a 2D context");
       if (nextContext.canvas
         && (nextContext.canvas.width !== backing.width || nextContext.canvas.height !== backing.height)) {
@@ -205,7 +306,7 @@ function createWebkitSurface(document, options) {
       const previousPixels = Math.max(1, backingWidth * backingHeight);
       let shrunk = false;
       try {
-        const releaseContext = document.getCSSCanvasContext("2d", id, 1, 1);
+        const releaseContext = document.getCSSCanvasContext!("2d", id, 1, 1);
         if (releaseContext) {
           releaseContext.save();
           releaseContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -241,7 +342,10 @@ function createWebkitSurface(document, options) {
   return surface;
 }
 
-function createMozSurface(document, options) {
+function createMozSurface(
+  document: SurfaceDocument,
+  options: Readonly<ResolvedSurfaceOptions>,
+): CornerfillSurface {
   const id = nextSurfaceId(document, options.idPrefix);
   const canvas = document.createElement("canvas");
   canvas.id = id;
@@ -254,7 +358,7 @@ function createMozSurface(document, options) {
   let dpr = 1;
   let disposed = false;
   let registered = false;
-  const surface = {
+  const surface: CornerfillSurface = {
     schema: CORNERFILL_SURFACE_SCHEMA,
     backend: "moz-element",
     id,
@@ -290,7 +394,7 @@ function createMozSurface(document, options) {
       let unregisterError = null;
       if (registered && directRegistration) {
         try {
-          document.mozSetImageElement(id, null);
+          document.mozSetImageElement!(id, null);
           mozRegistrationCounts.set(document, Math.max(0, (mozRegistrationCounts.get(document) ?? 1) - 1));
         } catch (error) {
           unregisterError = error;
@@ -308,7 +412,7 @@ function createMozSurface(document, options) {
   try {
     surface.resize(options.cssWidth, options.cssHeight, options.dpr);
     if (directRegistration) {
-      document.mozSetImageElement(id, canvas);
+      document.mozSetImageElement!(id, canvas);
       registered = true;
       mozRegistrationCounts.set(document, (mozRegistrationCounts.get(document) ?? 0) + 1);
     } else {
@@ -317,7 +421,7 @@ function createMozSurface(document, options) {
     }
   } catch (error) {
     if (directRegistration) {
-      try { document.mozSetImageElement(id, null); } catch {}
+      try { document.mozSetImageElement!(id, null); } catch {}
     }
     registered = false;
     canvas.remove();
@@ -330,7 +434,10 @@ function createMozSurface(document, options) {
   return surface;
 }
 
-function createStaticSurface(document, options) {
+function createStaticSurface(
+  document: Document,
+  options: Readonly<ResolvedSurfaceOptions>,
+): CornerfillSurface {
   const id = nextSurfaceId(document, options.idPrefix);
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { alpha: true });
@@ -340,7 +447,7 @@ function createStaticSurface(document, options) {
   let dpr = 1;
   let cssImage = "none";
   let disposed = false;
-  const surface = {
+  const surface: CornerfillSurface = {
     schema: CORNERFILL_SURFACE_SCHEMA,
     backend: "static-data-url",
     id,
@@ -386,7 +493,8 @@ function createStaticSurface(document, options) {
   return surface;
 }
 
-export function createSurface(document, {
+export function createSurface(document: Document, options: SurfaceCreateOptions): CornerfillSurface;
+export function createSurface(document: Document, {
   cssWidth,
   cssHeight,
   dpr = document.defaultView?.devicePixelRatio ?? 1,
@@ -396,9 +504,9 @@ export function createSurface(document, {
   maxSurfacePixels = 16_777_216,
   maxWebkitPoolEntries = DEFAULT_MAX_WEBKIT_POOL_ENTRIES,
   maxWebkitPoolPrefixes = DEFAULT_MAX_WEBKIT_POOL_PREFIXES,
-} = {}) {
+}: Partial<SurfaceCreateOptions> = {}): CornerfillSurface {
   const capabilities = detectSurfaceCapabilities(document);
-  let selected = backend;
+  let selected: SelectedSurfaceBackend = backend;
   if (selected === "auto") {
     selected = capabilities.webkitCanvas
       ? "webkit-canvas"
@@ -420,16 +528,16 @@ export function createSurface(document, {
   if (selected === "none") {
     throw new Error("no live Cornerfill surface backend is available and static fallback is disabled");
   }
-  backingDimensions(cssWidth, cssHeight, dpr, maxSurfacePixels);
+  backingDimensions(cssWidth!, cssHeight!, dpr, maxSurfacePixels);
   if (!Number.isSafeInteger(maxWebkitPoolEntries) || maxWebkitPoolEntries < 0) {
     throw new TypeError("maxWebkitPoolEntries must be a non-negative integer");
   }
   if (!Number.isSafeInteger(maxWebkitPoolPrefixes) || maxWebkitPoolPrefixes < 0) {
     throw new TypeError("maxWebkitPoolPrefixes must be a non-negative integer");
   }
-  const options = {
-    cssWidth,
-    cssHeight,
+  const options: ResolvedSurfaceOptions = {
+    cssWidth: cssWidth!,
+    cssHeight: cssHeight!,
     dpr,
     idPrefix,
     maxSurfacePixels,

@@ -1,6 +1,33 @@
 export const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@2";
 
-function waitForImage(image) {
+export type ImageCacheRecordState = "loading" | "ready" | "error";
+
+export interface ImageCacheRecord {
+  absoluteUrl: string;
+  error: unknown;
+  image: HTMLImageElement;
+  key: string;
+  promise: Promise<HTMLImageElement>;
+  refs: number;
+  state: ImageCacheRecordState;
+}
+
+export interface ImageCacheOptions {
+  maxEstimatedPixels?: number;
+  maxZeroReferenceEntries?: number;
+  onDecode?: ((record: ImageCacheRecord) => void) | null;
+  onEvict?: ((record: ImageCacheRecord) => void) | null;
+  onHit?: ((record: ImageCacheRecord) => void) | null;
+}
+
+export interface ImageLease {
+  readonly key: string;
+  readonly promise: Promise<HTMLImageElement>;
+  readonly release: () => void;
+  readonly url: string;
+}
+
+function waitForImage(image: HTMLImageElement): Promise<void> {
   if (typeof image.decode === "function") {
     return image.decode().catch((error) => {
       if (image.complete && image.naturalWidth > 0) return;
@@ -8,20 +35,30 @@ function waitForImage(image) {
     });
   }
   if (image.complete && image.naturalWidth > 0) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    image.addEventListener("load", resolve, { once: true });
+  return new Promise<void>((resolve, reject) => {
+    image.addEventListener("load", () => resolve(), { once: true });
     image.addEventListener("error", () => reject(new Error(`image failed to load: ${image.src}`)), { once: true });
   });
 }
 
 export class ImageCache {
-  constructor(document, {
+  declare readonly document: Document;
+  declare readonly records: Map<string, ImageCacheRecord>;
+  declare readonly onDecode: ((record: ImageCacheRecord) => void) | null;
+  declare readonly onHit: ((record: ImageCacheRecord) => void) | null;
+  declare readonly onEvict: ((record: ImageCacheRecord) => void) | null;
+  declare readonly maxZeroReferenceEntries: number;
+  declare readonly maxEstimatedPixels: number;
+  declare evictions: number;
+  declare destroyed: boolean;
+
+  constructor(document: Document, {
     onDecode = null,
     onHit = null,
     onEvict = null,
     maxZeroReferenceEntries = 32,
     maxEstimatedPixels = 67_108_864,
-  } = {}) {
+  }: ImageCacheOptions = {}) {
     if (!document?.defaultView?.Image) throw new TypeError("ImageCache requires a browser document");
     if (!Number.isSafeInteger(maxZeroReferenceEntries) || maxZeroReferenceEntries < 0) {
       throw new TypeError("maxZeroReferenceEntries must be a non-negative integer");
@@ -40,19 +77,19 @@ export class ImageCache {
     this.destroyed = false;
   }
 
-  _touch(record) {
+  private _touch(record: ImageCacheRecord): void {
     if (this.records.get(record.key) !== record) return;
     this.records.delete(record.key);
     this.records.set(record.key, record);
   }
 
-  _estimatedPixels(record) {
+  private _estimatedPixels(record: ImageCacheRecord): number {
     return record.state === "ready"
       ? Math.max(0, record.image.naturalWidth * record.image.naturalHeight)
       : 0;
   }
 
-  _evict() {
+  private _evict(): void {
     if (this.destroyed) return;
     const records = [...this.records.values()];
     let zeroReferenceEntries = records.filter(({ refs, state }) => refs === 0 && state === "ready").length;
@@ -71,41 +108,46 @@ export class ImageCache {
     }
   }
 
-  acquire(url, { crossOrigin = null } = {}) {
+  acquire(
+    url: string | URL,
+    { crossOrigin = null }: { crossOrigin?: string | null } = {},
+  ): Readonly<ImageLease> {
     if (this.destroyed) throw new Error("image cache is destroyed");
     const absoluteUrl = new URL(url, this.document.baseURI).href;
     const key = `${crossOrigin ?? "same-origin-default"}\n${absoluteUrl}`;
     let record = this.records.get(key);
     if (!record) {
-      const image = new this.document.defaultView.Image();
+      const image = new this.document.defaultView!.Image();
       image.decoding = "async";
       if (crossOrigin !== null) image.crossOrigin = crossOrigin;
-      record = {
+      let created!: ImageCacheRecord;
+      const promise = (async () => {
+        image.src = absoluteUrl;
+        await waitForImage(image);
+        if (!(image.naturalWidth > 0 && image.naturalHeight > 0)) {
+          throw new Error(`decoded image has no intrinsic dimensions: ${absoluteUrl}`);
+        }
+        created.state = "ready";
+        this.onDecode?.(created);
+        this._evict();
+        return image;
+      })().catch((error) => {
+        created.state = "error";
+        created.error = error;
+        this.records.delete(key);
+        throw error;
+      });
+      created = {
         key,
         absoluteUrl,
         image,
         refs: 0,
         state: "loading",
         error: null,
-        promise: null,
+        promise,
       };
-      record.promise = (async () => {
-        image.src = absoluteUrl;
-        await waitForImage(image);
-        if (!(image.naturalWidth > 0 && image.naturalHeight > 0)) {
-          throw new Error(`decoded image has no intrinsic dimensions: ${absoluteUrl}`);
-        }
-        record.state = "ready";
-        this.onDecode?.(record);
-        this._evict();
-        return image;
-      })().catch((error) => {
-        record.state = "error";
-        record.error = error;
-        this.records.delete(key);
-        throw error;
-      });
-      this.records.set(key, record);
+      this.records.set(key, created);
+      record = created;
     } else {
       this._touch(record);
       this.onHit?.(record);
@@ -145,7 +187,7 @@ export class ImageCache {
     });
   }
 
-  destroy() {
+  destroy(): void {
     if (this.destroyed) return;
     for (const record of this.records.values()) {
       if (record.refs === 0) record.image.src = "";

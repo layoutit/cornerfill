@@ -12,7 +12,7 @@ import {
   resolveCornerShape,
   resolveCornerShapeDeclarations,
   shapeParameterToDiagonal,
-} from "../src/values.mjs";
+} from "../dist/values.mjs";
 
 test("border-radius expands one through four values and slash axes", () => {
   const resolved = resolveBorderRadius("50% 20px 10% / 100% 30px", 200, 80);

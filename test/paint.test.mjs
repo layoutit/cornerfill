@@ -8,8 +8,8 @@ import {
   paintOwnedLayer,
   preparePreparedOpaqueImageContext,
   repaintPreparedOpaqueImage,
-} from "../src/paint.mjs";
-import { buildCornerGeometry } from "../src/geometry.mjs";
+} from "../dist/paint.mjs";
+import { buildCornerGeometry } from "../dist/geometry.mjs";
 
 function contextRecorder() {
   const calls = [];

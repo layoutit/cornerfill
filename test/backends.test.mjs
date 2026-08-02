@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSurface, getSurfaceResourceStats } from "../src/backends.mjs";
+import { createSurface, getSurfaceResourceStats } from "../dist/backends.mjs";
 
 function webkitDocument() {
   const contexts = new Map();
@@ -139,8 +139,8 @@ test("WebKit reuse pools are bounded and every released canvas is shrunk", () =>
 });
 
 test("separate module copies share a collision-resistant document ID registry", async () => {
-  const firstModule = await import("../src/backends.mjs?copy=first");
-  const secondModule = await import("../src/backends.mjs?copy=second");
+  const firstModule = await import("../dist/backends.mjs?copy=first");
+  const secondModule = await import("../dist/backends.mjs?copy=second");
   const document = firefoxDocument();
   const first = firstModule.createSurface(document, {
     backend: "moz-element",

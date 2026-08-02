@@ -88,7 +88,7 @@ Call `refreshAdoptedStyleSheet()` again with the same standard source passed to 
 - `border-radius` and `corner-shape` shorthands and longhands, physical and logical corners, elliptical percentages, the implemented `calc()` subset, overlap reduction, and opposite-concave constraints.
 - Solid colors, static same-origin or CORS raster layers and atlas crops, and non-repeating linear, radial, and conic gradients within the implemented grammar.
 - Admitted background stacks with sizing, positioning, repetition, origin, and clip. The explicit runtime also admits one opaque scroll-attached raster using `multiply` over one opaque `rgb()` or hex color.
-- One-color solid borders with unequal widths, one zero-offset zero-blur inset shadow with non-negative spread, and one fully contained solid outline on an empty paint-owned host.
+- One-color solid borders with unequal widths when the clipped inner edge remains one non-self-intersecting contour, one zero-offset zero-blur inset shadow with non-negative spread, and one fully contained solid outline on an empty paint-owned host.
 - Observed generic elements and a lower-overhead caller-clocked prepared path for retained renderers.
 - Automatic variables, direct corner-shape `@supports` declarations, media rules, named layers, stateful selectors, recursive imports, and explicitly registered open roots within the source boundary above.
 
@@ -170,6 +170,7 @@ cornerfill.destroy();
 - The fallback owns the host background, supported border, radius, shadow, and outline paint. Author `!important` declarations that prevent that ownership are rejected.
 - Descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, and shaped `backdrop-filter` clipping are not available. Pseudo-elements remain on the host but do not gain a shaped overflow clip.
 - Outer shadows, outlines outside the border box, `border-shape`, `border-image`, per-side border colors, and non-solid border styles are not implemented.
+- Rare combinations of concave corners, radii, and unequal border widths can make the clipped inner border edge self-intersect and require multiple contours. Cornerfill refuses those elements before mutating their paint surface instead of approximating the border.
 - Animated CSS images, cross-origin images without CORS, general `image-set()` selection, repeating gradients, and gradient interpolation spaces or hints are outside the supported paint grammar.
 - General background blending is not supported. Automatic mode cannot prove raster opacity, so the bounded `multiply` path is explicit-runtime only.
 - Automatic discovery supports one physical or logical declaration family at a time. Mixed families and keyframe-driven fallback paint are rejected. The explicit value API can resolve physical and logical declarations together.
@@ -183,9 +184,12 @@ Cornerfill refuses unsupported cases instead of painting a result with different
 ## Development
 
 ```sh
+npm run build
 npm test
 npm run test:browser:runtime
 ```
+
+TypeScript `.mts` modules are the source of truth. The build writes browser-ready `.mjs` files and matching declarations to `dist/`.
 
 ## License
 

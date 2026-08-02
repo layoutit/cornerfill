@@ -1,5 +1,58 @@
 const CORNER_COUNT = 4;
 
+export type Four<T> = readonly [T, T, T, T];
+export type CornerDirection = "ltr" | "rtl";
+export type CornerWritingMode =
+  | "horizontal-tb"
+  | "vertical-rl"
+  | "vertical-lr"
+  | "sideways-rl"
+  | "sideways-lr";
+export type PhysicalCorner = "top-left" | "top-right" | "bottom-right" | "bottom-left";
+export type LogicalCorner = "start-start" | "start-end" | "end-end" | "end-start";
+
+type PhysicalRadiusDeclaration = PhysicalCorner | `border-${PhysicalCorner}-radius`;
+type LogicalRadiusDeclaration = LogicalCorner | `border-${LogicalCorner}-radius`;
+type PhysicalShapeDeclaration = PhysicalCorner | `corner-${PhysicalCorner}-shape`;
+type LogicalShapeDeclaration = LogicalCorner | `corner-${LogicalCorner}-shape`;
+
+export interface LengthPercentage {
+  readonly px: number;
+  readonly percent: number;
+  readonly source: string;
+}
+
+export interface ParsedCornerRadius {
+  readonly rx: LengthPercentage;
+  readonly ry: LengthPercentage;
+}
+
+export interface ResolvedCornerRadius {
+  readonly rx: number;
+  readonly ry: number;
+}
+
+export interface CornerWritingOptions {
+  readonly direction?: CornerDirection;
+  readonly writingMode?: CornerWritingMode;
+}
+
+export interface BorderRadiusDeclarations extends CornerWritingOptions {
+  readonly shorthand?: string;
+  readonly physical?: Readonly<Partial<Record<PhysicalRadiusDeclaration, string>>>;
+  readonly logical?: Readonly<Partial<Record<LogicalRadiusDeclaration, string>>>;
+}
+
+export interface CornerShapeDeclarations extends CornerWritingOptions {
+  readonly shorthand?: string;
+  readonly physical?: Readonly<Partial<Record<PhysicalShapeDeclaration, string>>>;
+  readonly logical?: Readonly<Partial<Record<LogicalShapeDeclaration, string>>>;
+}
+
+export type CornerShapeSource = string | Four<number> | CornerShapeDeclarations;
+
+type PhysicalSide = "top" | "right" | "bottom" | "left";
+
 export const CORNER_SHAPE_PARAMETERS = Object.freeze({
   notch: Number.NEGATIVE_INFINITY,
   scoop: -1,
@@ -9,16 +62,19 @@ export const CORNER_SHAPE_PARAMETERS = Object.freeze({
   square: Number.POSITIVE_INFINITY,
 });
 
-function syntaxError(label, value, detail) {
+function syntaxError(label: string, value: unknown, detail: string): SyntaxError {
   return new SyntaxError(`${label} ${detail}: ${JSON.stringify(value)}`);
 }
 
-function scanTopLevel(value, onCharacter) {
+function scanTopLevel(
+  value: string,
+  onCharacter: (character: string, index: number, depth: number) => void,
+): void {
   let depth = 0;
-  let quote = null;
+  let quote: string | null = null;
   let escaped = false;
   for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
+    const character = value[index]!;
     if (escaped) {
       escaped = false;
       continue;
@@ -46,7 +102,7 @@ function scanTopLevel(value, onCharacter) {
   if (depth !== 0) throw syntaxError("CSS value", value, "has unbalanced parentheses");
 }
 
-export function splitTopLevelWhitespace(input) {
+export function splitTopLevelWhitespace(input: string): readonly string[] {
   const value = String(input).trim();
   if (!value) return Object.freeze([]);
   const parts = [];
@@ -65,7 +121,7 @@ export function splitTopLevelWhitespace(input) {
   return Object.freeze(parts);
 }
 
-export function splitTopLevelCommas(input) {
+export function splitTopLevelCommas(input: string): readonly string[] {
   const value = String(input).trim();
   if (!value) return Object.freeze([]);
   const parts = [];
@@ -81,21 +137,22 @@ export function splitTopLevelCommas(input) {
   return Object.freeze(parts);
 }
 
-function splitTopLevelSlash(input) {
+function splitTopLevelSlash(input: string): readonly [string] | readonly [string, string] {
   const value = String(input).trim();
-  const slashIndexes = [];
+  const slashIndexes: number[] = [];
   scanTopLevel(value, (character, index, depth) => {
     if (character === "/" && depth === 0) slashIndexes.push(index);
   });
   if (slashIndexes.length > 1) throw syntaxError("border-radius", value, "contains more than one top-level slash");
   if (slashIndexes.length === 0) return Object.freeze([value]);
+  const slashIndex = slashIndexes[0]!;
   return Object.freeze([
-    value.slice(0, slashIndexes[0]).trim(),
-    value.slice(slashIndexes[0] + 1).trim(),
+    value.slice(0, slashIndex).trim(),
+    value.slice(slashIndex + 1).trim(),
   ]);
 }
 
-function freezeLengthPercentage(px, percent, source) {
+function freezeLengthPercentage(px: number, percent: number, source: string): Readonly<LengthPercentage> {
   return Object.freeze({ px, percent, source });
 }
 
@@ -103,7 +160,10 @@ const NUMBER = String.raw`(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?`;
 const SIMPLE_LENGTH_PERCENTAGE = new RegExp(`^([+-]?${NUMBER})(px|%)?$`, "iu");
 const CALC_TERM = new RegExp(`([+-]?)(${NUMBER})(px|%)?`, "ig");
 
-export function parseLengthPercentage(input, { label = "length-percentage" } = {}) {
+export function parseLengthPercentage(
+  input: string,
+  { label = "length-percentage" }: { label?: string } = {},
+): Readonly<LengthPercentage> {
   const source = String(input).trim();
   const simple = SIMPLE_LENGTH_PERCENTAGE.exec(source);
   if (simple) {
@@ -117,7 +177,7 @@ export function parseLengthPercentage(input, { label = "length-percentage" } = {
 
   const match = /^calc\((.*)\)$/isu.exec(source);
   if (!match) throw syntaxError(label, source, "is outside the supported px/% syntax");
-  const expression = match[1].replaceAll(/\s+/gu, "");
+  const expression = match[1]!.replaceAll(/\s+/gu, "");
   if (!expression) throw syntaxError(label, source, "contains an empty calc()");
   let cursor = 0;
   let px = 0;
@@ -144,7 +204,10 @@ export function parseLengthPercentage(input, { label = "length-percentage" } = {
   return freezeLengthPercentage(px, percent, source);
 }
 
-export function resolveLengthPercentage(value, reference) {
+export function resolveLengthPercentage(
+  value: string | LengthPercentage,
+  reference: number,
+): number {
   if (!Number.isFinite(reference) || reference < 0) {
     throw new TypeError("length-percentage reference must be a finite non-negative number");
   }
@@ -155,17 +218,17 @@ export function resolveLengthPercentage(value, reference) {
   return parsed.px + parsed.percent * reference;
 }
 
-function expandFour(values, label) {
+function expandFour<T>(values: readonly T[], label: string): Four<T> {
   if (!Array.isArray(values) || values.length < 1 || values.length > 4) {
     throw new SyntaxError(`${label} requires one through four values`);
   }
   if (values.length === 1) return [values[0], values[0], values[0], values[0]];
   if (values.length === 2) return [values[0], values[1], values[0], values[1]];
   if (values.length === 3) return [values[0], values[1], values[2], values[1]];
-  return [...values];
+  return [values[0], values[1], values[2], values[3]];
 }
 
-function parseRadiusAxis(input, label) {
+function parseRadiusAxis(input: string, label: string): Four<Readonly<LengthPercentage>> {
   const tokens = splitTopLevelWhitespace(input);
   if (tokens.length < 1 || tokens.length > 4) {
     throw syntaxError("border-radius", input, `${label} axis requires one through four values`);
@@ -175,7 +238,10 @@ function parseRadiusAxis(input, label) {
   })), `border-radius ${label}`);
 }
 
-function parseRadiusLengthPercentage(input, options) {
+function parseRadiusLengthPercentage(
+  input: string,
+  options: { label?: string } = {},
+): Readonly<LengthPercentage> {
   const source = String(input).trim();
   const parsed = parseLengthPercentage(source, options);
   if (!/^calc\(/iu.test(source) && (parsed.px < 0 || parsed.percent < 0)) {
@@ -184,40 +250,55 @@ function parseRadiusLengthPercentage(input, options) {
   return parsed;
 }
 
-export function parseBorderRadius(input) {
+export function parseBorderRadius(input: string): Four<Readonly<ParsedCornerRadius>> {
   const source = String(input).trim();
   if (!source) throw syntaxError("border-radius", source, "cannot be empty");
   const axes = splitTopLevelSlash(source);
   const horizontal = parseRadiusAxis(axes[0], "horizontal");
   const vertical = axes.length === 2 ? parseRadiusAxis(axes[1], "vertical") : horizontal;
-  return Object.freeze(horizontal.map((rx, index) => Object.freeze({ rx, ry: vertical[index] })));
+  return Object.freeze(horizontal.map((rx, index) => (
+    Object.freeze({ rx, ry: vertical[index] })
+  ))) as Four<Readonly<ParsedCornerRadius>>;
 }
 
-export function parseCornerRadius(input) {
+export function parseCornerRadius(input: string): Readonly<ParsedCornerRadius> {
   const tokens = splitTopLevelWhitespace(input);
   if (tokens.length < 1 || tokens.length > 2) {
     throw syntaxError("corner radius", input, "requires one or two values");
   }
-  const rx = parseRadiusLengthPercentage(tokens[0], { label: "corner horizontal radius" });
-  const ry = parseRadiusLengthPercentage(tokens[1] ?? tokens[0], { label: "corner vertical radius" });
+  const first = tokens[0]!;
+  const rx = parseRadiusLengthPercentage(first, { label: "corner horizontal radius" });
+  const ry = parseRadiusLengthPercentage(tokens[1] ?? first, { label: "corner vertical radius" });
   return Object.freeze({ rx, ry });
 }
 
-export function resolveParsedRadii(parsed, width, height) {
+export function resolveParsedRadii(
+  parsed: readonly ParsedCornerRadius[],
+  width: number,
+  height: number,
+): Four<Readonly<ResolvedCornerRadius>> {
   if (!Array.isArray(parsed) || parsed.length !== CORNER_COUNT) {
     throw new TypeError("parsed radii must contain four corners");
   }
   return Object.freeze(parsed.map(({ rx, ry }) => Object.freeze({
     rx: Math.max(0, resolveLengthPercentage(rx, width)),
     ry: Math.max(0, resolveLengthPercentage(ry, height)),
-  })));
+  }))) as Four<Readonly<ResolvedCornerRadius>>;
 }
 
-export function resolveBorderRadius(input, width, height) {
+export function resolveBorderRadius(
+  input: string | readonly ParsedCornerRadius[],
+  width: number,
+  height: number,
+): Four<Readonly<ResolvedCornerRadius>> {
   return resolveParsedRadii(typeof input === "string" ? parseBorderRadius(input) : input, width, height);
 }
 
-export function resolveCornerRadiusLonghands(values, width, height) {
+export function resolveCornerRadiusLonghands(
+  values: readonly string[],
+  width: number,
+  height: number,
+): Four<Readonly<ResolvedCornerRadius>> {
   if (!Array.isArray(values) || values.length !== CORNER_COUNT) {
     throw new TypeError("corner radius longhands must contain four values");
   }
@@ -259,16 +340,24 @@ const LOGICAL_SHAPE_PROPERTY = Object.freeze({
   "corner-end-start-shape": "end-start",
 });
 
-function physicalCornerName(corner, properties, label) {
+function physicalCornerName(
+  corner: string,
+  properties: Readonly<Record<string, string>>,
+  label: string,
+): PhysicalCorner {
   const name = properties[corner] ?? corner;
-  if (PHYSICAL_CORNER_INDEX[name] === undefined) throw new TypeError(`invalid ${label}: ${corner}`);
-  return name;
+  if (!Object.hasOwn(PHYSICAL_CORNER_INDEX, name)) throw new TypeError(`invalid ${label}: ${corner}`);
+  return name as PhysicalCorner;
 }
 
-function logicalCornerName(corner, properties, label) {
+function logicalCornerName(
+  corner: string,
+  properties: Readonly<Record<string, string>>,
+  label: string,
+): LogicalCorner {
   const name = properties[corner] ?? corner;
   if (!/^(?:start|end)-(?:start|end)$/u.test(name)) throw new TypeError(`invalid ${label}: ${corner}`);
-  return name;
+  return name as LogicalCorner;
 }
 
 export function resolveBorderRadiusDeclarations({
@@ -277,7 +366,7 @@ export function resolveBorderRadiusDeclarations({
   logical = {},
   writingMode = "horizontal-tb",
   direction = "ltr",
-} = {}, width, height) {
+}: BorderRadiusDeclarations = {}, width: number, height: number): Four<Readonly<ResolvedCornerRadius>> {
   const result = [...parseBorderRadius(shorthand)];
   for (const [corner, value] of Object.entries(physical)) {
     const physicalCorner = physicalCornerName(corner, PHYSICAL_RADIUS_PROPERTY, "physical radius corner");
@@ -291,23 +380,25 @@ export function resolveBorderRadiusDeclarations({
   return resolveParsedRadii(result, width, height);
 }
 
-export function parseCornerShapeValue(input) {
+export function parseCornerShapeValue(input: string): number {
   const source = String(input).trim().toLowerCase();
-  if (Object.hasOwn(CORNER_SHAPE_PARAMETERS, source)) return CORNER_SHAPE_PARAMETERS[source];
+  if (Object.hasOwn(CORNER_SHAPE_PARAMETERS, source)) {
+    return CORNER_SHAPE_PARAMETERS[source as keyof typeof CORNER_SHAPE_PARAMETERS];
+  }
   const match = /^superellipse\((.*)\)$/isu.exec(source);
   if (!match) throw syntaxError("corner-shape", input, "contains an unsupported value");
-  const argument = match[1].trim();
+  const argument = match[1]!.trim();
   if (argument === "infinity" || argument === "+infinity") return Number.POSITIVE_INFINITY;
   if (argument === "-infinity") return Number.NEGATIVE_INFINITY;
   const simpleNumber = new RegExp(`^[+-]?${NUMBER}$`, "iu");
-  let value;
+  let value: number;
   if (simpleNumber.test(argument)) value = Number(argument);
   else {
     const calculation = /^calc\((.*)\)$/isu.exec(argument);
     if (!calculation) {
       throw syntaxError("corner-shape", input, "requires a finite number or signed infinity");
     }
-    const expression = calculation[1].replaceAll(/\s+/gu, "");
+    const expression = calculation[1]!.replaceAll(/\s+/gu, "");
     let cursor = 0;
     let terms = 0;
     value = 0;
@@ -328,7 +419,7 @@ export function parseCornerShapeValue(input) {
   return Object.is(value, -0) ? 0 : value;
 }
 
-export function parseCornerShape(input) {
+export function parseCornerShape(input: string): Four<number> {
   const source = String(input).trim();
   const tokens = splitTopLevelWhitespace(source);
   if (tokens.length < 1 || tokens.length > 4) {
@@ -337,10 +428,10 @@ export function parseCornerShape(input) {
   return Object.freeze(expandFour(tokens.map(parseCornerShapeValue), "corner-shape"));
 }
 
-export function logicalCornerToPhysical(logicalCorner, {
+export function logicalCornerToPhysical(logicalCorner: string, {
   writingMode = "horizontal-tb",
   direction = "ltr",
-} = {}) {
+}: CornerWritingOptions = {}): PhysicalCorner {
   const match = /^(start|end)-(start|end)$/u.exec(logicalCorner);
   if (!match) throw new TypeError(`invalid logical corner: ${logicalCorner}`);
   const [, blockToken, inlineToken] = match;
@@ -350,10 +441,10 @@ export function logicalCornerToPhysical(logicalCorner, {
     throw new TypeError(`unsupported direction: ${direction}`);
   }
   const rtl = directionValue === "rtl";
-  let blockStart;
-  let blockEnd;
-  let inlineStart;
-  let inlineEnd;
+  let blockStart: PhysicalSide;
+  let blockEnd: PhysicalSide;
+  let inlineStart: PhysicalSide;
+  let inlineEnd: PhysicalSide;
   if (mode === "horizontal-tb") {
     [blockStart, blockEnd] = ["top", "bottom"];
     [inlineStart, inlineEnd] = rtl ? ["right", "left"] : ["left", "right"];
@@ -366,10 +457,14 @@ export function logicalCornerToPhysical(logicalCorner, {
   } else {
     throw new TypeError(`unsupported writing-mode: ${writingMode}`);
   }
-  const sides = [blockToken === "start" ? blockStart : blockEnd, inlineToken === "start" ? inlineStart : inlineEnd];
+  const sides: readonly PhysicalSide[] = [
+    blockToken === "start" ? blockStart : blockEnd,
+    inlineToken === "start" ? inlineStart : inlineEnd,
+  ];
   const vertical = sides.find((side) => side === "top" || side === "bottom");
   const horizontal = sides.find((side) => side === "left" || side === "right");
-  return `${vertical}-${horizontal}`;
+  if (!vertical || !horizontal) throw new Error("logical corner did not resolve to two physical axes");
+  return `${vertical}-${horizontal}` as PhysicalCorner;
 }
 
 export function resolveCornerShapeDeclarations({
@@ -378,7 +473,7 @@ export function resolveCornerShapeDeclarations({
   logical = {},
   writingMode = "horizontal-tb",
   direction = "ltr",
-} = {}) {
+}: CornerShapeDeclarations = {}): Four<number> {
   const result = [...parseCornerShape(shorthand)];
   for (const [corner, value] of Object.entries(physical)) {
     const physicalCorner = physicalCornerName(corner, PHYSICAL_SHAPE_PROPERTY, "physical shape corner");
@@ -389,31 +484,32 @@ export function resolveCornerShapeDeclarations({
     const physicalCorner = logicalCornerToPhysical(logicalCorner, { writingMode, direction });
     result[PHYSICAL_CORNER_INDEX[physicalCorner]] = parseCornerShapeValue(value);
   }
-  return Object.freeze(result);
+  return Object.freeze(result) as Four<number>;
 }
 
-export function resolveCornerShape(input, {
+export function resolveCornerShape(input: CornerShapeSource, {
   writingMode = "horizontal-tb",
   direction = "ltr",
-} = {}) {
+}: CornerWritingOptions = {}): Four<number> {
   if (typeof input === "string") return parseCornerShape(input);
   if (Array.isArray(input)) {
     if (input.length !== CORNER_COUNT || input.some((value) => (
       typeof value !== "number" || Number.isNaN(value)
     ))) throw new TypeError("resolved corner shapes must contain four numeric parameters");
-    return Object.freeze([...input]);
+    return Object.freeze([...input]) as Four<number>;
   }
   if (input && typeof input === "object") {
+    const declarations = input as CornerShapeDeclarations;
     return resolveCornerShapeDeclarations({
-      ...input,
-      writingMode: input.writingMode ?? writingMode,
-      direction: input.direction ?? direction,
+      ...declarations,
+      writingMode: declarations.writingMode ?? writingMode,
+      direction: declarations.direction ?? direction,
     });
   }
   throw new TypeError("unsupported corner-shape source");
 }
 
-export function shapeParameterToDiagonal(value) {
+export function shapeParameterToDiagonal(value: number): number {
   if (typeof value !== "number" || Number.isNaN(value)) {
     throw new TypeError("corner-shape parameter must be numeric");
   }
@@ -425,7 +521,7 @@ export function shapeParameterToDiagonal(value) {
   return value < 0 ? 1 - convexHalfCorner : convexHalfCorner;
 }
 
-export function diagonalToShapeParameter(value) {
+export function diagonalToShapeParameter(value: number): number {
   if (!Number.isFinite(value)) throw new TypeError("corner-shape diagonal coordinate must be finite");
   if (value <= 0) return Number.NEGATIVE_INFINITY;
   if (value >= 1) return Number.POSITIVE_INFINITY;
@@ -436,19 +532,24 @@ export function diagonalToShapeParameter(value) {
   return Object.is(parameter, -0) ? 0 : parameter;
 }
 
-export function interpolateCornerShape(from, to, progress, options = {}) {
+export function interpolateCornerShape(
+  from: CornerShapeSource,
+  to: CornerShapeSource,
+  progress: number,
+  options: CornerWritingOptions = {},
+): Four<number> {
   if (!Number.isFinite(progress)) throw new TypeError("corner-shape interpolation progress must be finite");
   const fromValues = resolveCornerShape(from, options);
   const toValues = resolveCornerShape(to, options);
   return Object.freeze(fromValues.map((fromValue, index) => {
     const fromDiagonal = shapeParameterToDiagonal(fromValue);
-    const toDiagonal = shapeParameterToDiagonal(toValues[index]);
+    const toDiagonal = shapeParameterToDiagonal(toValues[index]!);
     const diagonal = Math.min(1, Math.max(0, fromDiagonal + (toDiagonal - fromDiagonal) * progress));
     return diagonalToShapeParameter(diagonal);
-  }));
+  })) as Four<number>;
 }
 
-export function serializeShapeParameter(value) {
+export function serializeShapeParameter(value: number): string {
   if (value === Number.POSITIVE_INFINITY) return "square";
   if (value === Number.NEGATIVE_INFINITY) return "notch";
   const keyword = Object.entries(CORNER_SHAPE_PARAMETERS).find(([, parameter]) => Object.is(parameter, value));

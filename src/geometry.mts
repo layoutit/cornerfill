@@ -2,6 +2,109 @@ import {
   parseCornerShape,
   resolveBorderRadius,
 } from "./values.mjs";
+import type { Four, ResolvedCornerRadius } from "./values.mjs";
+
+export type Point = readonly [x: number, y: number];
+export type Radius = Readonly<ResolvedCornerRadius>;
+
+export interface CanonicalCorner {
+  readonly rx: number;
+  readonly ry: number;
+  readonly s: number;
+}
+
+export interface CornerSamplingOptions {
+  readonly maxDepth?: number | undefined;
+  readonly segments?: number | undefined;
+  readonly tolerance?: number | undefined;
+}
+
+interface SamplingOptions extends CornerSamplingOptions {
+  readonly dpr?: number | undefined;
+}
+
+export interface CornerGeometryOptions {
+  readonly borderRadius: string | Four<Radius>;
+  readonly cornerShape: string | Four<number>;
+  readonly dpr?: number;
+  readonly height: number;
+  readonly tolerance?: number | undefined;
+  readonly width: number;
+}
+
+export interface ResolvedCornerRadii {
+  readonly ordinaryScaleApplied: boolean;
+  readonly oppositeScale: number;
+  readonly radii: Four<Radius>;
+}
+
+export interface CornerContourOptions {
+  readonly dpr?: number | undefined;
+  readonly height: number;
+  readonly radii: Four<Radius>;
+  readonly radiiAreResolved?: boolean | undefined;
+  readonly segments?: number | undefined;
+  readonly shapeParameters: Four<number>;
+  readonly tolerance?: number | undefined;
+  readonly width: number;
+}
+
+export interface CornerGeometry {
+  readonly carveOuts: Four<readonly Point[]>;
+  readonly contour: readonly Point[];
+  readonly dpr: number;
+  readonly height: number;
+  readonly oppositeScale: number;
+  readonly ordinaryScaleApplied: boolean;
+  readonly radii: Four<Radius>;
+  readonly requestedRadii: Four<Radius>;
+  readonly shapeParameters: Four<number>;
+  readonly width: number;
+}
+
+export interface Rect {
+  readonly height: number;
+  readonly width: number;
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface CornerVertices {
+  readonly center: Point;
+  readonly end: Point;
+  readonly outer: Point;
+  readonly start: Point;
+}
+
+export interface InsetCornerGeometry {
+  readonly contour: readonly Point[];
+  readonly corners: readonly Readonly<CornerVertices>[];
+  readonly targetRect: Readonly<Rect>;
+}
+
+export type CornerInsets =
+  | number
+  | Four<number>
+  | Readonly<{ bottom: number; left: number; right: number; top: number }>;
+
+interface CornerHull {
+  readonly origin: Point;
+  readonly polygon: readonly Point[];
+}
+
+interface SegmentIntersection {
+  readonly firstRatio: number;
+  readonly point: Point;
+  readonly secondRatio: number;
+}
+
+interface TrimmedCurves {
+  readonly next: Point[];
+  readonly previous: Point[];
+}
+
+type InsetCacheValue = InsetCornerGeometry | typeof UNSUPPORTED_INSET_TOPOLOGY;
+type InsetCache = Map<string, InsetCacheValue>;
 
 const CORNER_COUNT = 4;
 const DEFAULT_SEGMENTS = 64;
@@ -12,36 +115,57 @@ const CONCAVE_SAFETY_MARGIN = 1e-5;
 const MAX_INSET_CACHE_ENTRIES = 16;
 const UNSUPPORTED_INSET_TOPOLOGY = Symbol("unsupported inset topology");
 const INSET_TOPOLOGY_ERROR = "shaped inset contour self-intersects after clipping and is unsupported";
-const insetGeometryCache = new WeakMap();
+const insetGeometryCache = new WeakMap<CornerGeometry, InsetCache>();
 
-function finiteNonNegative(value, label) {
-  if (!Number.isFinite(value) || value < 0) {
+function finiteNonNegative(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new TypeError(`${label} must be a finite non-negative number`);
   }
   return value;
 }
 
-function validShapeParameter(value, label) {
+function validShapeParameter(value: number, label: string): number {
   if (typeof value !== "number" || Number.isNaN(value)) {
     throw new TypeError(`${label} must be a number or signed infinity`);
   }
   return value;
 }
 
-function frozenPoint(x, y) {
+function frozenPoint(x: number, y: number): Point {
   return Object.freeze([x, y]);
 }
 
-export function resolveRadii(width, height, radii) {
+function frozenFour<T>(first: T, second: T, third: T, fourth: T): Four<T> {
+  return Object.freeze([first, second, third, fourth]);
+}
+
+function normalizedRadius(input: unknown, index: number): Radius {
+  const corner = input !== null && typeof input === "object"
+    ? input as Partial<Radius>
+    : null;
+  return Object.freeze({
+    rx: finiteNonNegative(corner?.rx, `radii[${index}].rx`),
+    ry: finiteNonNegative(corner?.ry, `radii[${index}].ry`),
+  });
+}
+
+export function resolveRadii(
+  width: number,
+  height: number,
+  radii: Four<Radius>,
+): Four<Radius> {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
   if (!Array.isArray(radii) || radii.length !== CORNER_COUNT) {
     throw new TypeError("radii must contain top-left, top-right, bottom-right, bottom-left");
   }
-  const values = radii.map((corner, index) => Object.freeze({
-    rx: finiteNonNegative(corner?.rx, `radii[${index}].rx`),
-    ry: finiteNonNegative(corner?.ry, `radii[${index}].ry`),
-  }));
+  const input: readonly unknown[] = radii;
+  const values = frozenFour(
+    normalizedRadius(input[0], 0),
+    normalizedRadius(input[1], 1),
+    normalizedRadius(input[2], 2),
+    normalizedRadius(input[3], 3),
+  );
   const ratios = [
     values[0].rx + values[1].rx > 0 ? width / (values[0].rx + values[1].rx) : 1,
     values[3].rx + values[2].rx > 0 ? width / (values[3].rx + values[2].rx) : 1,
@@ -49,13 +173,19 @@ export function resolveRadii(width, height, radii) {
     values[1].ry + values[2].ry > 0 ? height / (values[1].ry + values[2].ry) : 1,
   ];
   const scale = Math.min(1, ...ratios);
-  return Object.freeze(values.map(({ rx, ry }) => Object.freeze({
+  const scaleRadius = ({ rx, ry }: Radius): Radius => Object.freeze({
     rx: rx * scale,
     ry: ry * scale,
-  })));
+  });
+  return frozenFour(
+    scaleRadius(values[0]),
+    scaleRadius(values[1]),
+    scaleRadius(values[2]),
+    scaleRadius(values[3]),
+  );
 }
 
-function canonicalPoint(rx, ry, s, theta) {
+function canonicalPoint(rx: number, ry: number, s: number, theta: number): Point {
   const exponent = 2 ** Math.abs(s);
   const power = 2 / exponent;
   const sin = Math.sin(theta) ** power;
@@ -65,7 +195,7 @@ function canonicalPoint(rx, ry, s, theta) {
     : [rx * cos, ry * sin];
 }
 
-function pointLineDistance(point, start, end) {
+function pointLineDistance(point: Point, start: Point, end: Point): number {
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
   const lengthSquared = dx * dx + dy * dy;
@@ -74,11 +204,23 @@ function pointLineDistance(point, start, end) {
   return areaTwice / Math.sqrt(lengthSquared);
 }
 
-function adaptiveCanonicalCorner(rx, ry, s, tolerance, maxDepth) {
-  const start = [rx, 0];
-  const end = [0, ry];
-  const points = [start];
-  const subdivide = (theta0, point0, theta1, point1, depth) => {
+function adaptiveCanonicalCorner(
+  rx: number,
+  ry: number,
+  s: number,
+  tolerance: number,
+  maxDepth: number,
+): Point[] {
+  const start: Point = [rx, 0];
+  const end: Point = [0, ry];
+  const points: Point[] = [start];
+  const subdivide = (
+    theta0: number,
+    point0: Point,
+    theta1: number,
+    point1: Point,
+    depth: number,
+  ): void => {
     const midpointTheta = (theta0 + theta1) / 2;
     const midpoint = canonicalPoint(rx, ry, s, midpointTheta);
     if (depth < maxDepth && pointLineDistance(midpoint, point0, point1) > tolerance) {
@@ -92,11 +234,11 @@ function adaptiveCanonicalCorner(rx, ry, s, tolerance, maxDepth) {
   return points;
 }
 
-export function sampleCanonicalCorner({ rx, ry, s }, {
+export function sampleCanonicalCorner({ rx, ry, s }: CanonicalCorner, {
   segments,
   tolerance = 0.125,
   maxDepth = 14,
-} = {}) {
+}: CornerSamplingOptions = {}): readonly Point[] {
   finiteNonNegative(rx, "corner.rx");
   finiteNonNegative(ry, "corner.ry");
   validShapeParameter(s, "corner.s");
@@ -109,7 +251,7 @@ export function sampleCanonicalCorner({ rx, ry, s }, {
   }
   if (s === 0) return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, ry)]);
 
-  let points;
+  let points: Point[];
   if (segments !== undefined) {
     if (!Number.isInteger(segments) || segments < 1 || segments > 4096) {
       throw new TypeError("segments must be an integer from 1 through 4096");
@@ -132,18 +274,29 @@ export function sampleCanonicalCorner({ rx, ry, s }, {
   return Object.freeze(points.map(([x, y]) => frozenPoint(x, y)));
 }
 
-function append(points, candidates, skipFirst = true) {
+function append(points: Point[], candidates: readonly Point[], skipFirst = true): void {
   for (let index = skipFirst ? 1 : 0; index < candidates.length; index += 1) {
-    points.push(candidates[index]);
+    points.push(candidates[index]!);
   }
 }
 
-function mapped(points, mapper, reverse = false) {
+function mapped(
+  points: readonly Point[],
+  mapper: (x: number, y: number) => Point,
+  reverse = false,
+): readonly Point[] {
   const source = reverse ? [...points].reverse() : points;
   return source.map(([x, y]) => frozenPoint(...mapper(x, y)));
 }
 
-function cornerCurve(index, width, height, radius, shapeParameter, options) {
+function cornerCurve(
+  index: number,
+  width: number,
+  height: number,
+  radius: Radius,
+  shapeParameter: number,
+  options: CornerSamplingOptions,
+): readonly Point[] {
   const canonical = sampleCanonicalCorner({ ...radius, s: shapeParameter }, options);
   if (index === 0) return mapped(canonical, (x, y) => [x, y]);
   if (index === 1) return mapped(canonical, (x, y) => [width - x, y]);
@@ -151,28 +304,31 @@ function cornerCurve(index, width, height, radius, shapeParameter, options) {
   return mapped(canonical, (x, y) => [x, height - y]);
 }
 
-function outerCorner(index, width, height) {
+function outerCorner(index: number, width: number, height: number): Point {
   if (index === 0) return frozenPoint(0, 0);
   if (index === 1) return frozenPoint(width, 0);
   if (index === 2) return frozenPoint(width, height);
   return frozenPoint(0, height);
 }
 
-function convexHull(points) {
-  const unique = [...new Map(points.map(([x, y]) => [`${x},${y}`, [x, y]])).values()]
+function convexHull(points: readonly Point[]): Point[] {
+  const unique = [...new Map<string, Point>(points.map(([x, y]) => [
+    `${x},${y}`,
+    [x, y],
+  ])).values()]
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   if (unique.length < 3) return unique;
-  const cross = (origin, a, b) => (
+  const cross = (origin: Point, a: Point, b: Point): number => (
     (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
   );
-  const lower = [];
+  const lower: Point[] = [];
   for (const point of unique) {
-    while (lower.length >= 2 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+    while (lower.length >= 2 && cross(lower.at(-2)!, lower.at(-1)!, point) <= 0) lower.pop();
     lower.push(point);
   }
-  const upper = [];
+  const upper: Point[] = [];
   for (const point of [...unique].reverse()) {
-    while (upper.length >= 2 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+    while (upper.length >= 2 && cross(upper.at(-2)!, upper.at(-1)!, point) <= 0) upper.pop();
     upper.push(point);
   }
   lower.pop();
@@ -180,7 +336,7 @@ function convexHull(points) {
   return [...lower, ...upper];
 }
 
-function projection(polygon, axisX, axisY) {
+function projection(polygon: readonly Point[], axisX: number, axisY: number): Point {
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
   for (const [x, y] of polygon) {
@@ -191,7 +347,7 @@ function projection(polygon, axisX, axisY) {
   return [min, max];
 }
 
-function normalizedAxis(current, next) {
+function normalizedAxis(current: Point, next: Point): Point | null {
   const axisX = -(next[1] - current[1]);
   const axisY = next[0] - current[0];
   const length = Math.hypot(axisX, axisY);
@@ -199,12 +355,16 @@ function normalizedAxis(current, next) {
   return [axisX / length, axisY / length];
 }
 
-export function convexPolygonsOverlap(first, second, epsilon = INTERSECTION_EPSILON) {
+export function convexPolygonsOverlap(
+  first: readonly Point[],
+  second: readonly Point[],
+  epsilon = INTERSECTION_EPSILON,
+): boolean {
   if (first.length < 3 || second.length < 3) return false;
   for (const polygon of [first, second]) {
     for (let index = 0; index < polygon.length; index += 1) {
-      const current = polygon[index];
-      const next = polygon[(index + 1) % polygon.length];
+      const current = polygon[index]!;
+      const next = polygon[(index + 1) % polygon.length]!;
       const axis = normalizedAxis(current, next);
       if (!axis) continue;
       const [axisX, axisY] = axis;
@@ -216,7 +376,7 @@ export function convexPolygonsOverlap(first, second, epsilon = INTERSECTION_EPSI
   return true;
 }
 
-function normalizedInnerCornerHull(shapeParameter) {
+function normalizedInnerCornerHull(shapeParameter: number): readonly Point[] {
   if (!(shapeParameter < 0)) return [[1, 1], [1, 0], [0, 1]];
   // The draft's signed interpolation coordinate points the concave hull in the
   // wrong direction. Use the unflipped convex half-corner called out in CSSWG
@@ -228,39 +388,50 @@ function normalizedInnerCornerHull(shapeParameter) {
     ? 1
     : 0.5 ** (1 / (2 ** Math.abs(shapeParameter)));
   const tangentExtent = 2 * half - 1;
-  const intersectionA = [1, -tangentExtent];
-  const intersectionB = [tangentExtent, 1];
+  const intersectionA: Point = [1, -tangentExtent];
+  const intersectionB: Point = [tangentExtent, 1];
   return [[1, 1], [1, 0], intersectionA, intersectionB, [0, 1]];
 }
 
-function rotateNormalized([x, y], quarterTurns) {
+function rotateNormalized([x, y]: Point, quarterTurns: number): Point {
   if (quarterTurns === 0) return [x, y];
   if (quarterTurns === 1) return [1 - y, x];
   if (quarterTurns === 2) return [1 - x, 1 - y];
   return [y, 1 - x];
 }
 
-function mappedInnerHull(index, width, height, radius, shapeParameter) {
+function mappedInnerHull(
+  index: number,
+  width: number,
+  height: number,
+  radius: Radius,
+  shapeParameter: number,
+): CornerHull {
   if (radius.rx === 0 || radius.ry === 0) return { origin: [0, 0], polygon: [] };
   const quarterTurns = index === 1 ? 0 : index === 2 ? 1 : index === 3 ? 2 : 3;
   const originX = index === 1 || index === 2 ? width - radius.rx : 0;
   const originY = index === 2 || index === 3 ? height - radius.ry : 0;
-  const mappedHull = normalizedInnerCornerHull(shapeParameter).map((point) => {
+  const mappedHull = normalizedInnerCornerHull(shapeParameter).map((point): Point => {
     const [x, y] = rotateNormalized(point, quarterTurns);
     return [originX + x * radius.rx, originY + y * radius.ry];
   });
   return {
-    origin: mappedHull[0],
+    origin: mappedHull[0]!,
     polygon: convexHull(mappedHull),
   };
 }
 
-function scaleOverlapTester(first, second) {
-  const axes = [];
+function scaleOverlapTester(first: CornerHull, second: CornerHull): (scale: number) => boolean {
+  const axes: Array<{
+    firstOrigin: number;
+    firstProjection: Point;
+    secondOrigin: number;
+    secondProjection: Point;
+  }> = [];
   for (const polygon of [first.polygon, second.polygon]) {
     for (let index = 0; index < polygon.length; index += 1) {
-      const current = polygon[index];
-      const next = polygon[(index + 1) % polygon.length];
+      const current = polygon[index]!;
+      const next = polygon[(index + 1) % polygon.length]!;
       const axis = normalizedAxis(current, next);
       if (!axis) continue;
       const [axisX, axisY] = axis;
@@ -272,7 +443,7 @@ function scaleOverlapTester(first, second) {
       });
     }
   }
-  return (scale) => {
+  return (scale: number): boolean => {
     if (first.polygon.length < 3 || second.polygon.length < 3) return false;
     for (const axis of axes) {
       const firstMin = axis.firstOrigin + (axis.firstProjection[0] - axis.firstOrigin) * scale;
@@ -286,7 +457,7 @@ function scaleOverlapTester(first, second) {
   };
 }
 
-function highestNonOverlappingScale(first, second, maximum = 1) {
+function highestNonOverlappingScale(first: CornerHull, second: CornerHull, maximum = 1): number {
   const overlaps = scaleOverlapTester(first, second);
   if (!overlaps(maximum)) return maximum;
   let low = 0;
@@ -299,7 +470,13 @@ function highestNonOverlappingScale(first, second, maximum = 1) {
   return low;
 }
 
-function mappedCarveOutHull(index, width, height, radius, shapeParameter) {
+function mappedCarveOutHull(
+  index: number,
+  width: number,
+  height: number,
+  radius: Radius,
+  shapeParameter: number,
+): CornerHull {
   const origin = outerCorner(index, width, height);
   return {
     origin,
@@ -312,14 +489,19 @@ function mappedCarveOutHull(index, width, height, radius, shapeParameter) {
   };
 }
 
-export function oppositeCornerScaleFactor(width, height, radii, shapeParameters) {
+export function oppositeCornerScaleFactor(
+  width: number,
+  height: number,
+  radii: Four<Radius>,
+  shapeParameters: Four<number>,
+): number {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
   if (!Array.isArray(radii) || radii.length !== CORNER_COUNT
     || !Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
     throw new TypeError("opposite-corner inputs must contain four corners");
   }
-  const diagonalPairs = [[0, 2], [1, 3]];
+  const diagonalPairs = [[0, 2], [1, 3]] as const;
   let result = 1;
   for (const [first, second] of diagonalPairs) {
     if (!(shapeParameters[first] < 0 && shapeParameters[second] < 0)) continue;
@@ -350,7 +532,12 @@ export function oppositeCornerScaleFactor(width, height, radii, shapeParameters)
   return result;
 }
 
-export function resolveCornerRadii(width, height, radii, shapeParameters) {
+export function resolveCornerRadii(
+  width: number,
+  height: number,
+  radii: Four<Radius>,
+  shapeParameters: Four<number>,
+): Readonly<ResolvedCornerRadii> {
   const ordinary = resolveRadii(width, height, radii);
   if (!Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
     throw new TypeError("shapeParameters must contain four values");
@@ -359,17 +546,17 @@ export function resolveCornerRadii(width, height, radii, shapeParameters) {
   const oppositeScale = oppositeCornerScaleFactor(width, height, ordinary, shapeParameters);
   return Object.freeze({
     ordinaryScaleApplied: ordinary.some((radius, index) => (
-      radius.rx !== radii[index].rx || radius.ry !== radii[index].ry
+      radius.rx !== radii[index]!.rx || radius.ry !== radii[index]!.ry
     )),
     oppositeScale,
     radii: Object.freeze(ordinary.map(({ rx, ry }) => Object.freeze({
       rx: rx * oppositeScale,
       ry: ry * oppositeScale,
-    }))),
+    }))) as Four<Radius>,
   });
 }
 
-function samplingOptions({ segments, tolerance, dpr = 1 } = {}) {
+function samplingOptions({ segments, tolerance, dpr = 1 }: SamplingOptions = {}): CornerSamplingOptions {
   if (segments !== undefined) return { segments };
   return { tolerance: tolerance ?? 0.125 / Math.max(1, dpr) };
 }
@@ -383,15 +570,15 @@ export function cornerCarveOuts({
   tolerance,
   dpr = 1,
   radiiAreResolved = false,
-}) {
+}: CornerContourOptions): Four<readonly Point[]> {
   const resolved = radiiAreResolved
     ? Object.freeze({ radii, oppositeScale: 1 })
     : resolveCornerRadii(width, height, radii, shapeParameters);
   const options = samplingOptions({ segments, tolerance, dpr });
   return Object.freeze(resolved.radii.map((radius, index) => Object.freeze([
     outerCorner(index, width, height),
-    ...cornerCurve(index, width, height, radius, shapeParameters[index], options),
-  ])));
+    ...cornerCurve(index, width, height, radius, shapeParameters[index]!, options),
+  ]))) as Four<readonly Point[]>;
 }
 
 export function contourPoints({
@@ -403,7 +590,7 @@ export function contourPoints({
   tolerance,
   dpr = 1,
   radiiAreResolved = false,
-}) {
+}: CornerContourOptions): readonly Point[] {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
   if (!Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
@@ -418,20 +605,23 @@ export function contourPoints({
     width,
     height,
     radius,
-    shapeParameters[index],
+    shapeParameters[index]!,
     options,
   ));
-  const [topLeft, topRight, bottomRight, bottomLeft] = resolved;
-  const points = [frozenPoint(topLeft.rx, 0)];
+  const topLeft = resolved[0]!;
+  const topRight = resolved[1]!;
+  const bottomRight = resolved[2]!;
+  const bottomLeft = resolved[3]!;
+  const points: Point[] = [frozenPoint(topLeft.rx, 0)];
 
   points.push(frozenPoint(width - topRight.rx, 0));
-  append(points, curves[1]);
+  append(points, curves[1]!);
   points.push(frozenPoint(width, height - bottomRight.ry));
-  append(points, curves[2]);
+  append(points, curves[2]!);
   points.push(frozenPoint(bottomLeft.rx, height));
-  append(points, curves[3]);
+  append(points, curves[3]!);
   points.push(frozenPoint(0, topLeft.ry));
-  append(points, [...curves[0]].reverse());
+  append(points, [...curves[0]!].reverse());
 
   return Object.freeze(points);
 }
@@ -443,7 +633,7 @@ export function buildCornerGeometry({
   cornerShape,
   dpr = 1,
   tolerance,
-}) {
+}: CornerGeometryOptions): Readonly<CornerGeometry> {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
   const requestedRadii = typeof borderRadius === "string"
@@ -466,7 +656,17 @@ export function buildCornerGeometry({
   });
 }
 
-export function insetGeometry({ width, height, radii, inset }) {
+export function insetGeometry({
+  width,
+  height,
+  radii,
+  inset,
+}: {
+  width: number;
+  height: number;
+  radii: Four<Radius>;
+  inset: number;
+}): Readonly<Rect & { radii: Four<Radius> }> {
   finiteNonNegative(inset, "inset");
   const innerWidth = Math.max(0, width - inset * 2);
   const innerHeight = Math.max(0, height - inset * 2);
@@ -479,29 +679,34 @@ export function insetGeometry({ width, height, radii, inset }) {
     y: inset,
     width: innerWidth,
     height: innerHeight,
-    radii: Object.freeze(innerRadii),
+    radii: Object.freeze(innerRadii) as Four<Radius>,
   });
 }
 
-function pointAdd(point, vector) {
+function pointAdd(point: Point, vector: Point): Point {
   return [point[0] + vector[0], point[1] + vector[1]];
 }
 
-function pointSubtract(first, second) {
+function pointSubtract(first: Point, second: Point): Point {
   return [first[0] - second[0], first[1] - second[1]];
 }
 
-function vectorScale(vector, scale) {
+function vectorScale(vector: Point, scale: number): Point {
   return [vector[0] * scale, vector[1] * scale];
 }
 
-function unitVector(from, to) {
+function unitVector(from: Point, to: Point): Point {
   const vector = pointSubtract(to, from);
   const length = Math.hypot(vector[0], vector[1]);
   return length > 1e-12 ? [vector[0] / length, vector[1] / length] : [0, 0];
 }
 
-function lineIntersection(firstStart, firstEnd, secondStart, secondEnd) {
+function lineIntersection(
+  firstStart: Point,
+  firstEnd: Point,
+  secondStart: Point,
+  secondEnd: Point,
+): Point | null {
   const first = pointSubtract(firstEnd, firstStart);
   const second = pointSubtract(secondEnd, secondStart);
   const denominator = first[0] * second[1] - first[1] * second[0];
@@ -511,7 +716,12 @@ function lineIntersection(firstStart, firstEnd, secondStart, secondEnd) {
   return pointAdd(firstStart, vectorScale(first, t));
 }
 
-function segmentIntersection(firstStart, firstEnd, secondStart, secondEnd) {
+function segmentIntersection(
+  firstStart: Point,
+  firstEnd: Point,
+  secondStart: Point,
+  secondEnd: Point,
+): Readonly<SegmentIntersection> | null {
   const first = pointSubtract(firstEnd, firstStart);
   const second = pointSubtract(secondEnd, secondStart);
   const denominator = first[0] * second[1] - first[1] * second[0];
@@ -528,38 +738,43 @@ function segmentIntersection(firstStart, firstEnd, secondStart, secondEnd) {
   });
 }
 
-function pointDistance(first, second) {
+function pointDistance(first: Point, second: Point): number {
   return Math.hypot(second[0] - first[0], second[1] - first[1]);
 }
 
-function samePoint(first, second) {
+function samePoint(first: Point, second: Point): boolean {
   return pointDistance(first, second) <= INTERSECTION_EPSILON;
 }
 
-function trimAdjacentCurves(previous, next) {
+function trimAdjacentCurves(previous: Point[], next: Point[]): TrimmedCurves {
   if (previous.length < 2 || next.length < 2) return { previous, next };
   const previousSuffix = new Array(previous.length).fill(0);
   for (let index = previous.length - 2; index >= 0; index -= 1) {
-    previousSuffix[index] = previousSuffix[index + 1] + pointDistance(previous[index], previous[index + 1]);
+    previousSuffix[index] = previousSuffix[index + 1]! + pointDistance(previous[index]!, previous[index + 1]!);
   }
   const nextPrefix = new Array(next.length).fill(0);
   for (let index = 1; index < next.length; index += 1) {
-    nextPrefix[index] = nextPrefix[index - 1] + pointDistance(next[index - 1], next[index]);
+    nextPrefix[index] = nextPrefix[index - 1]! + pointDistance(next[index - 1]!, next[index]!);
   }
-  let best = null;
+  let best: {
+    intersection: Readonly<SegmentIntersection>;
+    nextIndex: number;
+    previousIndex: number;
+    score: number;
+  } | null = null;
   for (let previousIndex = 0; previousIndex < previous.length - 1; previousIndex += 1) {
     for (let nextIndex = 0; nextIndex < next.length - 1; nextIndex += 1) {
       const intersection = segmentIntersection(
-        previous[previousIndex],
-        previous[previousIndex + 1],
-        next[nextIndex],
-        next[nextIndex + 1],
+        previous[previousIndex]!,
+        previous[previousIndex + 1]!,
+        next[nextIndex]!,
+        next[nextIndex + 1]!,
       );
       if (!intersection) continue;
-      const score = pointDistance(intersection.point, previous[previousIndex + 1])
-        + previousSuffix[previousIndex + 1]
-        + nextPrefix[nextIndex]
-        + pointDistance(next[nextIndex], intersection.point);
+      const score = pointDistance(intersection.point, previous[previousIndex + 1]!)
+        + previousSuffix[previousIndex + 1]!
+        + nextPrefix[nextIndex]!
+        + pointDistance(next[nextIndex]!, intersection.point);
       if (!best || score < best.score) {
         best = { intersection, nextIndex, previousIndex, score };
       }
@@ -567,31 +782,35 @@ function trimAdjacentCurves(previous, next) {
   }
   if (!best) return { previous, next };
   const previousTrimmed = previous.slice(0, best.previousIndex + 1);
-  if (!samePoint(previousTrimmed.at(-1), best.intersection.point)) {
+  if (!samePoint(previousTrimmed.at(-1)!, best.intersection.point)) {
     previousTrimmed.push(best.intersection.point);
   }
   const nextTrimmed = [best.intersection.point];
   for (const point of next.slice(best.nextIndex + 1)) {
-    if (!samePoint(nextTrimmed.at(-1), point)) nextTrimmed.push(point);
+    if (!samePoint(nextTrimmed.at(-1)!, point)) nextTrimmed.push(point);
   }
   return { previous: previousTrimmed, next: nextTrimmed };
 }
 
-function resolveAdjacentCurveIntersections(curves) {
+function resolveAdjacentCurveIntersections(curves: readonly (readonly Point[])[]): Point[][] {
   const resolved = curves.map((curve) => [...curve]);
   for (let index = 0; index < resolved.length; index += 1) {
     const nextIndex = (index + 1) % resolved.length;
-    const trimmed = trimAdjacentCurves(resolved[index], resolved[nextIndex]);
+    const trimmed = trimAdjacentCurves(resolved[index]!, resolved[nextIndex]!);
     resolved[index] = trimmed.previous;
     resolved[nextIndex] = trimmed.next;
   }
   return resolved;
 }
 
-function clipPolygonEdge(points, inside, intersection) {
+function clipPolygonEdge(
+  points: Point[],
+  inside: (point: Point) => boolean,
+  intersection: (first: Point, second: Point) => Point,
+): Point[] {
   if (points.length === 0) return points;
-  const output = [];
-  let previous = points.at(-1);
+  const output: Point[] = [];
+  let previous = points.at(-1)!;
   let previousInside = inside(previous);
   for (const point of points) {
     const pointInside = inside(point);
@@ -603,16 +822,16 @@ function clipPolygonEdge(points, inside, intersection) {
   return output;
 }
 
-function clipContourToRect(points, rect) {
+function clipContourToRect(points: readonly Point[], rect: Rect): Point[] {
   const left = rect.x;
   const top = rect.y;
   const right = rect.x + rect.width;
   const bottom = rect.y + rect.height;
-  const verticalIntersection = (x) => (first, second) => {
+  const verticalIntersection = (x: number) => (first: Point, second: Point): Point => {
     const ratio = (x - first[0]) / (second[0] - first[0]);
     return [x, first[1] + (second[1] - first[1]) * ratio];
   };
-  const horizontalIntersection = (y) => (first, second) => {
+  const horizontalIntersection = (y: number) => (first: Point, second: Point): Point => {
     const ratio = (y - first[1]) / (second[1] - first[1]);
     return [first[0] + (second[0] - first[0]) * ratio, y];
   };
@@ -624,26 +843,30 @@ function clipContourToRect(points, rect) {
   return clipped;
 }
 
-function normalizedClosedContour(points) {
-  const normalized = [];
+function normalizedClosedContour(points: readonly Point[]): Point[] {
+  const normalized: Point[] = [];
   for (const point of points) {
-    if (!normalized.length || !samePoint(normalized.at(-1), point)) normalized.push(point);
+    if (!normalized.length || !samePoint(normalized.at(-1)!, point)) normalized.push(point);
   }
-  if (normalized.length > 1 && samePoint(normalized[0], normalized.at(-1))) normalized.pop();
+  if (normalized.length > 1 && samePoint(normalized[0]!, normalized.at(-1)!)) normalized.pop();
   return normalized;
 }
 
-function properContourIntersection(points) {
+function properContourIntersection(points: readonly Point[]): {
+  first: number;
+  intersection: Readonly<SegmentIntersection>;
+  second: number;
+} | null {
   for (let first = 0; first < points.length; first += 1) {
     const firstNext = (first + 1) % points.length;
     for (let second = first + 2; second < points.length; second += 1) {
       const secondNext = (second + 1) % points.length;
       if (first === 0 && secondNext === 0) continue;
       const intersection = segmentIntersection(
-        points[first],
-        points[firstNext],
-        points[second],
-        points[secondNext],
+        points[first]!,
+        points[firstNext]!,
+        points[second]!,
+        points[secondNext]!,
       );
       if (!intersection
         || intersection.firstRatio <= INTERSECTION_EPSILON
@@ -656,15 +879,26 @@ function properContourIntersection(points) {
   return null;
 }
 
-function rememberInsetGeometry(geometry, cache, key, value) {
+function rememberInsetGeometry(
+  geometry: CornerGeometry,
+  cache: InsetCache | null | undefined,
+  key: string,
+  value: InsetCacheValue,
+): void {
   if (!Object.isFrozen(geometry)) return;
   const nextCache = cache ?? new Map();
   nextCache.set(key, value);
-  while (nextCache.size > MAX_INSET_CACHE_ENTRIES) nextCache.delete(nextCache.keys().next().value);
+  while (nextCache.size > MAX_INSET_CACHE_ENTRIES) nextCache.delete(nextCache.keys().next().value!);
   if (!cache) insetGeometryCache.set(geometry, nextCache);
 }
 
-function cornerVertices(index, width, height, radius, shapeParameter) {
+function cornerVertices(
+  index: number,
+  width: number,
+  height: number,
+  radius: Radius,
+  _shapeParameter: number,
+): CornerVertices {
   const { rx, ry } = radius;
   if (index === 0) return { start: [0, ry], outer: [0, 0], end: [rx, 0], center: [rx, ry] };
   if (index === 1) return { start: [width - rx, 0], outer: [width, 0], end: [width, ry], center: [width - rx, ry] };
@@ -672,17 +906,21 @@ function cornerVertices(index, width, height, radius, shapeParameter) {
   return { start: [rx, height], outer: [0, height], end: [0, height - ry], center: [rx, height - ry] };
 }
 
-function inwardDirection(index) {
+function inwardDirection(index: number): Point {
   return [index === 0 || index === 3 ? 1 : -1, index === 0 || index === 1 ? 1 : -1];
 }
 
-function startsOnVerticalEdge(index) {
+function startsOnVerticalEdge(index: number): boolean {
   return index === 0 || index === 2;
 }
 
-function adjustedBevel(corner, startInset, endInset) {
+function adjustedBevel(
+  corner: CornerVertices,
+  startInset: number,
+  endInset: number,
+): CornerVertices {
   const chord = pointSubtract(corner.end, corner.start);
-  let inward = [-chord[1], chord[0]];
+  let inward: Point = [-chord[1], chord[0]];
   const inwardLength = Math.hypot(inward[0], inward[1]);
   inward = inwardLength > 0 ? vectorScale(inward, 1 / inwardLength) : [0, 0];
   const towardCenter = pointSubtract(corner.center, corner.outer);
@@ -694,7 +932,10 @@ function adjustedBevel(corner, startInset, endInset) {
   const clipStart = pointAdd(corner.start, startExtension);
   const clipEnd = pointAdd(corner.end, endExtension);
   const clipOuter = pointAdd(pointAdd(corner.outer, startExtension), endExtension);
-  const midpoint = [(adjustedStart[0] + adjustedEnd[0]) / 2, (adjustedStart[1] + adjustedEnd[1]) / 2];
+  const midpoint: Point = [
+    (adjustedStart[0] + adjustedEnd[0]) / 2,
+    (adjustedStart[1] + adjustedEnd[1]) / 2,
+  ];
   return {
     ...corner,
     start: lineIntersection(adjustedStart, midpoint, clipStart, clipOuter) ?? adjustedStart,
@@ -702,14 +943,19 @@ function adjustedBevel(corner, startInset, endInset) {
   };
 }
 
-function adjustedRound(corner, index, startInset, endInset) {
+function adjustedRound(
+  corner: CornerVertices,
+  index: number,
+  startInset: number,
+  endInset: number,
+): CornerVertices {
   const verticalInset = startsOnVerticalEdge(index) ? startInset : endInset;
   const horizontalInset = startsOnVerticalEdge(index) ? endInset : startInset;
   const outerRadiusX = Math.abs(corner.center[0] - corner.outer[0]);
   const outerRadiusY = Math.abs(corner.center[1] - corner.outer[1]);
   const radiusX = Math.max(0, outerRadiusX - verticalInset);
   const radiusY = Math.max(0, outerRadiusY - horizontalInset);
-  const scale = (point) => [
+  const scale = (point: Point): Point => [
     corner.center[0] + (point[0] - corner.center[0]) * (outerRadiusX > 0 ? radiusX / outerRadiusX : 0),
     corner.center[1] + (point[1] - corner.center[1]) * (outerRadiusY > 0 ? radiusY / outerRadiusY : 0),
   ];
@@ -722,20 +968,27 @@ function adjustedRound(corner, index, startInset, endInset) {
   };
 }
 
-function adjustedScoop(corner, index, startInset, endInset) {
+function adjustedScoop(
+  corner: CornerVertices,
+  index: number,
+  startInset: number,
+  endInset: number,
+): CornerVertices {
   const verticalInset = startsOnVerticalEdge(index) ? startInset : endInset;
   const horizontalInset = startsOnVerticalEdge(index) ? endInset : startInset;
   const outerRadiusX = Math.abs(corner.center[0] - corner.outer[0]);
   const outerRadiusY = Math.abs(corner.center[1] - corner.outer[1]);
   const radiusX = outerRadiusX + horizontalInset;
   const radiusY = outerRadiusY + verticalInset;
-  const extent = (radius, ratio) => radius * Math.sqrt(Math.max(0, 1 - ratio * ratio));
+  const extent = (radius: number, ratio: number): number => (
+    radius * Math.sqrt(Math.max(0, 1 - ratio * ratio))
+  );
   const direction = inwardDirection(index);
-  const side = [
+  const side: Point = [
     corner.outer[0] + direction[0] * verticalInset,
     corner.outer[1] + direction[1] * extent(radiusY, radiusX > 0 ? verticalInset / radiusX : 0),
   ];
-  const horizontal = [
+  const horizontal: Point = [
     corner.outer[0] + direction[0] * extent(radiusX, radiusY > 0 ? horizontalInset / radiusY : 0),
     corner.outer[1] + direction[1] * horizontalInset,
   ];
@@ -746,9 +999,14 @@ function adjustedScoop(corner, index, startInset, endInset) {
   };
 }
 
-function adjustedGeneral(corner, shapeParameter, startInset, endInset) {
-  let strokeA;
-  let strokeB;
+function adjustedGeneral(
+  corner: CornerVertices,
+  shapeParameter: number,
+  startInset: number,
+  endInset: number,
+): CornerVertices {
+  let strokeA: number;
+  let strokeB: number;
   if (shapeParameter === Number.NEGATIVE_INFINITY) {
     strokeA = -1;
     strokeB = 1;
@@ -758,7 +1016,7 @@ function adjustedGeneral(corner, shapeParameter, startInset, endInset) {
   } else {
     const clamped = Math.min(1, Math.max(-1, shapeParameter));
     const half = 0.5 ** (2 ** -clamped);
-    const direction = [half * 2 - 0.5, 1.5 - half * 2];
+    const direction: Point = [half * 2 - 0.5, 1.5 - half * 2];
     const length = Math.hypot(direction[0], direction[1]);
     strokeA = -direction[1] / length;
     strokeB = direction[0] / length;
@@ -775,7 +1033,13 @@ function adjustedGeneral(corner, shapeParameter, startInset, endInset) {
   };
 }
 
-function adjustCornerForInsets(corner, index, shapeParameter, startInset, endInset) {
+function adjustCornerForInsets(
+  corner: CornerVertices,
+  index: number,
+  shapeParameter: number,
+  startInset: number,
+  endInset: number,
+): CornerVertices {
   if (startInset === 0 && endInset === 0) return corner;
   if (shapeParameter === 0) return adjustedBevel(corner, startInset, endInset);
   if (shapeParameter === 1) return adjustedRound(corner, index, startInset, endInset);
@@ -783,7 +1047,7 @@ function adjustCornerForInsets(corner, index, shapeParameter, startInset, endIns
   return adjustedGeneral(corner, shapeParameter, startInset, endInset);
 }
 
-function mappedCornerPoint(corner, shapeParameter, theta) {
+function mappedCornerPoint(corner: CornerVertices, shapeParameter: number, theta: number): Point {
   if (shapeParameter < 0) {
     return mappedCornerPoint({
       start: corner.start,
@@ -806,14 +1070,25 @@ function mappedCornerPoint(corner, shapeParameter, theta) {
   ];
 }
 
-function sampleAdjustedCorner(corner, shapeParameter, tolerance, maxDepth = 14) {
+function sampleAdjustedCorner(
+  corner: CornerVertices,
+  shapeParameter: number,
+  tolerance: number,
+  maxDepth = 14,
+): Point[] {
   if (shapeParameter === 0) return [corner.start, corner.end];
   if (shapeParameter === Number.POSITIVE_INFINITY) return [corner.start, corner.outer, corner.end];
   if (shapeParameter === Number.NEGATIVE_INFINITY) return [corner.start, corner.center, corner.end];
   const start = corner.start;
   const end = corner.end;
-  const points = [start];
-  const subdivide = (theta0, point0, theta1, point1, depth) => {
+  const points: Point[] = [start];
+  const subdivide = (
+    theta0: number,
+    point0: Point,
+    theta1: number,
+    point1: Point,
+    depth: number,
+  ): void => {
     const theta = (theta0 + theta1) / 2;
     const midpoint = mappedCornerPoint(corner, shapeParameter, theta);
     if (depth < maxDepth && pointLineDistance(midpoint, point0, point1) > tolerance) {
@@ -825,29 +1100,34 @@ function sampleAdjustedCorner(corner, shapeParameter, tolerance, maxDepth = 14) 
   return points;
 }
 
-function normalizeInsets(insets) {
+function normalizeInsets(insets: CornerInsets): Four<number> {
   const values = Number.isFinite(insets)
-    ? [insets, insets, insets, insets]
+    ? [insets as number, insets as number, insets as number, insets as number]
     : Array.isArray(insets)
       ? insets
-      : [insets?.top, insets?.right, insets?.bottom, insets?.left];
-  if (values.length !== 4 || values.some((value) => !Number.isFinite(value) || value < 0)) {
+      : [
+        (insets as Exclude<CornerInsets, number | Four<number>>)?.top,
+        (insets as Exclude<CornerInsets, number | Four<number>>)?.right,
+        (insets as Exclude<CornerInsets, number | Four<number>>)?.bottom,
+        (insets as Exclude<CornerInsets, number | Four<number>>)?.left,
+      ];
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value) || value! < 0)) {
     throw new TypeError("contour insets must contain four finite non-negative sides");
   }
-  return values;
+  return values as Four<number>;
 }
 
-export function insetCornerGeometry(geometry, insets, {
+export function insetCornerGeometry(geometry: CornerGeometry, insets: CornerInsets, {
   tolerance = 0.125 / Math.max(1, geometry?.dpr ?? 1),
-} = {}) {
+}: { tolerance?: number } = {}): Readonly<InsetCornerGeometry> {
   if (!geometry || typeof geometry !== "object") throw new TypeError("outer corner geometry is required");
   const [top, right, bottom, left] = normalizeInsets(insets);
   const cacheKey = `${top}\n${right}\n${bottom}\n${left}\n${tolerance}`;
   const cache = Object.isFrozen(geometry) ? insetGeometryCache.get(geometry) : null;
   const cached = cache?.get(cacheKey);
   if (cached !== undefined) {
-    cache.delete(cacheKey);
-    cache.set(cacheKey, cached);
+    cache!.delete(cacheKey);
+    cache!.set(cacheKey, cached);
     if (cached === UNSUPPORTED_INSET_TOPOLOGY) throw new TypeError(INSET_TOPOLOGY_ERROR);
     return cached;
   }
@@ -862,29 +1142,29 @@ export function insetCornerGeometry(geometry, insets, {
     rememberInsetGeometry(geometry, cache, cacheKey, empty);
     return empty;
   }
-  const startInsets = [left, top, right, bottom];
-  const endInsets = [top, right, bottom, left];
+  const startInsets: Four<number> = [left, top, right, bottom];
+  const endInsets: Four<number> = [top, right, bottom, left];
   const corners = geometry.radii.map((radius, index) => adjustCornerForInsets(
-    cornerVertices(index, geometry.width, geometry.height, radius, geometry.shapeParameters[index]),
+    cornerVertices(index, geometry.width, geometry.height, radius, geometry.shapeParameters[index]!),
     index,
-    geometry.shapeParameters[index],
-    startInsets[index],
-    endInsets[index],
+    geometry.shapeParameters[index]!,
+    startInsets[index]!,
+    endInsets[index]!,
   ));
   const curves = resolveAdjacentCurveIntersections(corners.map((corner, index) => sampleAdjustedCorner(
     corner,
-    geometry.shapeParameters[index],
+    geometry.shapeParameters[index]!,
     tolerance,
   )));
-  const points = [curves[0].at(-1)];
-  points.push(curves[1][0]);
-  append(points, curves[1]);
-  points.push(curves[2][0]);
-  append(points, curves[2]);
-  points.push(curves[3][0]);
-  append(points, curves[3]);
-  points.push(curves[0][0]);
-  append(points, curves[0]);
+  const points: Point[] = [curves[0]!.at(-1)!];
+  points.push(curves[1]![0]!);
+  append(points, curves[1]!);
+  points.push(curves[2]![0]!);
+  append(points, curves[2]!);
+  points.push(curves[3]![0]!);
+  append(points, curves[3]!);
+  points.push(curves[0]![0]!);
+  append(points, curves[0]!);
   const resolvedPoints = normalizedClosedContour(clipContourToRect(points, targetRect));
   if (properContourIntersection(resolvedPoints)) {
     rememberInsetGeometry(geometry, cache, cacheKey, UNSUPPORTED_INSET_TOPOLOGY);

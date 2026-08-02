@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { qualifyNativeCornerShape } from "../src/native.mjs";
+import { qualifyNativeCornerShape } from "../dist/native.mjs";
 
 test("native qualification has no fallback import closure", () => {
-  const source = readFileSync(new URL("../src/native.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/native.mts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /^\s*import\s/mu);
   for (const fallback of ["auto-runtime", "runtime", "geometry", "paint", "background", "images", "backends"]) {
     assert.doesNotMatch(source, new RegExp(`from ["']\\./${fallback}\\.mjs["']`, "u"));
@@ -12,7 +12,7 @@ test("native qualification has no fallback import closure", () => {
 });
 
 test("the package root statically imports only native qualification", () => {
-  const source = readFileSync(new URL("../src/auto.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../dist/auto.mjs", import.meta.url), "utf8");
   const staticImports = [...source.matchAll(/^\s*import\s+[^;]+?from\s+["']([^"']+)["']/gmu)]
     .map((match) => match[1]);
   assert.deepEqual(staticImports, ["./native.mjs"]);
