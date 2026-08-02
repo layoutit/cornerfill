@@ -1,6 +1,6 @@
 {
   "name": "cornerfill",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Native-first paint polyfill for CSS corner-shape in Safari and Firefox",
   "license": "MIT",
   "type": "module",
