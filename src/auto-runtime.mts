@@ -1,12 +1,13 @@
 import { installCornerfill } from "./runtime.mjs";
 import type {
   CornerfillControllerHandle,
+  CornerfillControllerStats,
   CornerfillEntryExplanation,
   CornerfillHandle,
   CornerfillInstallOptions,
 } from "./runtime.mjs";
-import { CORNERFILL_ORACLE_QUALIFICATION } from "./native.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
+import { CORNERFILL_ORACLE_QUALIFICATION } from "./qualification.mjs";
 import {
   parseCornerShape,
   parseCornerShapeValue,
@@ -37,7 +38,7 @@ interface TextReplacement {
   readonly value: string;
 }
 
-interface SelectorObservation {
+export interface SelectorObservation {
   readonly attributes: readonly string[];
   readonly characterData: boolean;
   readonly conservative: boolean;
@@ -127,7 +128,7 @@ interface DiagnosticDetails {
   readonly source?: string | undefined;
 }
 
-interface DiagnosticRecord {
+export interface DiagnosticRecord {
   readonly context: string;
   readonly declaration: string | null;
   readonly message: string;
@@ -251,7 +252,7 @@ interface MediaListenerRecord {
   readonly listener: (event: MediaQueryListEvent) => void;
 }
 
-interface ObservationState extends SelectorObservation {
+export interface ObservationState extends SelectorObservation {
   readonly mediaQueries: readonly string[];
 }
 
@@ -267,12 +268,15 @@ interface AutomaticCounters {
   sourceReads: number;
 }
 
+export type CornerfillAutomaticCounters = Readonly<AutomaticCounters>;
+
 export interface CornerfillAutoOptions extends CornerfillInstallOptions {
   readonly adoptedStyleSheets?: boolean | undefined;
   readonly autoObserve?: boolean | undefined;
   readonly controller?: CornerfillControllerHandle | undefined;
   readonly onError?: ((error: unknown, context: string) => void) | undefined;
   readonly root?: AutoRoot | undefined;
+  readonly stylesheetTimeoutMs?: number | undefined;
 }
 
 interface InternalCornerfillAutoOptions extends CornerfillAutoOptions {
@@ -281,14 +285,38 @@ interface InternalCornerfillAutoOptions extends CornerfillAutoOptions {
 
 export interface CornerfillAutoExplanation {
   readonly attached: number;
+  readonly automatic?: Readonly<{
+    adoptedStylesheets: number;
+    counters: CornerfillAutomaticCounters;
+    cssomInsertDeleteAfterInstallation: true;
+    inlineStyleAttributes: true;
+    limitations: readonly string[];
+    observation: Readonly<ObservationState>;
+    observedSourceClassStyleStateAndViewportChanges: boolean;
+    observing: boolean;
+    readableStyleElements: true;
+    sameOriginAndCorsStylesheetLinks: true;
+    selectorAndConditionalCascade: true;
+  }> | undefined;
+  readonly decision: Readonly<{
+    reason: "fallback-forced" | "native-requirements-satisfied" | "native-requirements-unresolved";
+    selected: "fallback" | "native";
+    unresolvedNativeRequirements: readonly string[];
+  }>;
   readonly errors: readonly Readonly<DiagnosticRecord>[];
   readonly fallbackLoaded: boolean;
+  readonly implementation: Readonly<{
+    automaticDiscovery: "BYPASSED_NATIVE" | "IMPLEMENTED";
+    fallbackRenderer: "IMPLEMENTED" | "NOT_LOADED" | "NOT_SELECTED";
+  }>;
   readonly inlineElements: number;
   readonly mode: "fallback" | "native";
+  readonly nativeQualification: Readonly<CornerfillNativeQualification>;
+  readonly oracleQualification: typeof CORNERFILL_ORACLE_QUALIFICATION;
+  readonly runtime: Readonly<CornerfillControllerStats> | null;
   readonly schema: "cornerfill-auto@1";
   readonly scopes: number;
   readonly stylesheets: number;
-  readonly [property: string]: unknown;
 }
 
 export interface CornerfillAutoControllerHandle {
@@ -334,77 +362,42 @@ const AUTO_STYLESHEET_ATTRIBUTE = "data-cornerfill-auto-styles";
 const AUTO_UNSET = "__cornerfill_unset__";
 const AUTO_PHYSICAL_SHAPE = "--cornerfill-auto-physical-shape";
 const AUTO_LOGICAL_SHAPE = "--cornerfill-auto-logical-shape";
-const AUTO_UNSUPPORTED_SHAPE = "--cornerfill-auto-unsupported-shape";
-const AUTO_PHYSICAL_RADIUS = "--cornerfill-auto-physical-radius";
-const AUTO_LOGICAL_RADIUS = "--cornerfill-auto-logical-radius";
-const AUTO_UNSUPPORTED_OWNED = "--cornerfill-auto-unsupported-owned";
 const CARRIER_REGISTRATIONS = new WeakMap<Document, CarrierRegistration>();
 
-const PHYSICAL_SHAPE_PROPERTIES: readonly ShapeProperty[] = Object.freeze([
+const PHYSICAL_SHAPE_PROPERTIES: readonly Exclude<ShapeProperty, "corner-shape">[] = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
   "corner-bottom-right-shape",
   "corner-bottom-left-shape",
 ]);
 
-const LOGICAL_SHAPE_PROPERTIES: readonly ShapeProperty[] = Object.freeze([
+const LOGICAL_SHAPE_PROPERTIES: readonly Exclude<ShapeProperty, "corner-shape">[] = Object.freeze([
   "corner-start-start-shape",
   "corner-start-end-shape",
   "corner-end-end-shape",
   "corner-end-start-shape",
 ]);
 
-type OwnedCarrierKind = "radius-logical" | "radius-physical" | "url";
-type OwnedPropertyCarrier = readonly [property: string, carrier: string, kind?: OwnedCarrierKind];
+const SHAPE_STATUS_PROPERTIES = Object.freeze(Object.fromEntries(
+  [...PHYSICAL_SHAPE_PROPERTIES, ...LOGICAL_SHAPE_PROPERTIES].map((property) => (
+    [property, `--cornerfill-auto-status-${property}`]
+  )),
+)) as Readonly<Record<Exclude<ShapeProperty, "corner-shape">, string>>;
+const SHAPE_STATUS_CARRIERS = Object.freeze(Object.values(SHAPE_STATUS_PROPERTIES));
 
-const OWNED_PROPERTY_CARRIERS: readonly OwnedPropertyCarrier[] = Object.freeze([
-  ["border-top-left-radius", "--cornerfill-border-top-left-radius", "radius-physical"],
-  ["border-top-right-radius", "--cornerfill-border-top-right-radius", "radius-physical"],
-  ["border-bottom-right-radius", "--cornerfill-border-bottom-right-radius", "radius-physical"],
-  ["border-bottom-left-radius", "--cornerfill-border-bottom-left-radius", "radius-physical"],
-  ["border-start-start-radius", "--cornerfill-border-start-start-radius", "radius-logical"],
-  ["border-start-end-radius", "--cornerfill-border-start-end-radius", "radius-logical"],
-  ["border-end-end-radius", "--cornerfill-border-end-end-radius", "radius-logical"],
-  ["border-end-start-radius", "--cornerfill-border-end-start-radius", "radius-logical"],
-  ["background-color", "--cornerfill-background-color"],
-  ["background-image", "--cornerfill-background-image", "url"],
-  ["background-size", "--cornerfill-background-size"],
-  ["background-position", "--cornerfill-background-position"],
-  ["background-repeat", "--cornerfill-background-repeat"],
-  ["background-origin", "--cornerfill-background-origin"],
-  ["background-clip", "--cornerfill-background-clip"],
-  ["background-blend-mode", "--cornerfill-background-blend-mode"],
-  ["background-attachment", "--cornerfill-background-attachment"],
-  ["image-rendering", "--cornerfill-image-rendering"],
-  ["border-top-color", "--cornerfill-border-top-color"],
-  ["border-right-color", "--cornerfill-border-right-color"],
-  ["border-bottom-color", "--cornerfill-border-bottom-color"],
-  ["border-left-color", "--cornerfill-border-left-color"],
-  ["box-shadow", "--cornerfill-box-shadow"],
-  ["outline-width", "--cornerfill-outline-width"],
-  ["outline-style", "--cornerfill-outline-style"],
-  ["outline-color", "--cornerfill-outline-color"],
-  ["outline-offset", "--cornerfill-outline-offset"],
-]);
-
-const OWNED_CARRIERS = Object.freeze(OWNED_PROPERTY_CARRIERS.map(([, carrier]) => carrier));
 const AUTO_CARRIERS = Object.freeze([
   ...new Set([
     ...SHAPE_CARRIERS,
-    ...OWNED_CARRIERS,
+    ...SHAPE_STATUS_CARRIERS,
     AUTO_PHYSICAL_SHAPE,
     AUTO_LOGICAL_SHAPE,
-    AUTO_UNSUPPORTED_SHAPE,
-    AUTO_PHYSICAL_RADIUS,
-    AUTO_LOGICAL_RADIUS,
-    AUTO_UNSUPPORTED_OWNED,
   ]),
 ]);
 
 const SHAPE_MARKERS = Object.freeze([
+  ...SHAPE_STATUS_CARRIERS,
   AUTO_PHYSICAL_SHAPE,
   AUTO_LOGICAL_SHAPE,
-  AUTO_UNSUPPORTED_SHAPE,
 ]);
 
 const AUTOMATIC_DISCOVERY = Object.freeze({
@@ -419,7 +412,7 @@ const AUTOMATIC_DISCOVERY = Object.freeze({
     "adopted stylesheets unless explicitly enabled for a registered open shadow root",
     "adopted stylesheet corner-shape source unless supplied to refreshAdoptedStyleSheet()",
     "mixed physical/logical declaration families",
-    "corner-shape or paint changes driven by CSS keyframes",
+    "corner-shape or paint changes driven by CSS animations or transitions",
     "alternate stylesheet sets",
     "corner-shape rules inserted through CSSOM before Cornerfill starts",
     "unsupported declarations assigned through CSSStyleDeclaration, which the browser discards",
@@ -463,76 +456,14 @@ function isCssWhitespaceOrComments(value: string): boolean {
   return value.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim() === "";
 }
 
-/**
- * Rename authored corner-shape declarations to durable custom properties.
- * Strings, comments, selectors, @supports conditions, and declaration values
- * are left untouched. The browser still performs the actual CSS parse.
- */
-export function transportCornerShapeDeclarations(source: string): string {
-  if (typeof source !== "string") throw new TypeError("CSS source must be a string");
-  const replacements: TextReplacement[] = [];
-  let statementStart = 0;
-  let quote: string | null = null;
-  let comment = false;
-  let escaped = false;
+type CssTokenVisitor = (
+  index: number,
+  character: string,
+  parentheses: number,
+  brackets: number,
+) => boolean | void;
 
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
-    const next = source[index + 1];
-    if (comment) {
-      if (character === "*" && next === "/") {
-        comment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "/" && next === "*") {
-      comment = true;
-      index += 1;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === ":") {
-      const statement = source.slice(statementStart, index);
-      const match = /([\w-]+)\s*$/u.exec(statement);
-      if (match && isCssWhitespaceOrComments(statement.slice(0, match.index))) {
-        const property = match[1]!.toLowerCase();
-        if (!isShapeProperty(property)) continue;
-        const carrier = SHAPE_PROPERTIES[property];
-        if (carrier) {
-          replacements.push(Object.freeze({
-            start: statementStart + match.index,
-            end: statementStart + match.index + match[1]!.length,
-            value: carrier,
-          }));
-        }
-      }
-      continue;
-    }
-    if (character === ";" || character === "{" || character === "}") statementStart = index + 1;
-  }
-
-  if (replacements.length === 0) return source;
-  let output = "";
-  let cursor = 0;
-  for (const replacement of replacements) {
-    output += source.slice(cursor, replacement.start);
-    output += replacement.value;
-    cursor = replacement.end;
-  }
-  return output + source.slice(cursor);
-}
-
-function declarationEnd(source: string, start: number): number {
+function scanCssSyntax(source: string, start: number, visit: CssTokenVisitor): void {
   let quote: string | null = null;
   let comment = false;
   let escaped = false;
@@ -554,6 +485,14 @@ function declarationEnd(source: string, start: number): number {
       else if (character === quote) quote = null;
       continue;
     }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
     if (character === "/" && next === "*") {
       comment = true;
       index += 1;
@@ -563,13 +502,22 @@ function declarationEnd(source: string, start: number): number {
       quote = character;
       continue;
     }
+    if (visit(index, character, parentheses, brackets) === false) return;
     if (character === "(") parentheses += 1;
     else if (character === ")") parentheses = Math.max(0, parentheses - 1);
     else if (character === "[") brackets += 1;
     else if (character === "]") brackets = Math.max(0, brackets - 1);
-    else if (parentheses === 0 && brackets === 0 && (character === ";" || character === "}")) return index;
   }
-  return source.length;
+}
+
+function declarationEnd(source: string, start: number): number {
+  let end = source.length;
+  scanCssSyntax(source, start, (index, character, parentheses, brackets) => {
+    if (parentheses !== 0 || brackets !== 0 || (character !== ";" && character !== "}")) return;
+    end = index;
+    return false;
+  });
+  return end;
 }
 
 function declarationValue(raw: string): Readonly<{ priority: string; value: string }> {
@@ -581,31 +529,89 @@ function declarationValue(raw: string): Readonly<{ priority: string; value: stri
   });
 }
 
+function shapeStatusDeclarations(
+  properties: readonly Exclude<ShapeProperty, "corner-shape">[],
+  status: "ok" | "unsupported",
+  priority: string,
+): string {
+  return properties.map((property) => (
+    `${SHAPE_STATUS_PROPERTIES[property]}:${status}${priority};`
+  )).join("");
+}
+
+function shapeCssWideDeclaration(
+  property: ShapeProperty,
+  value: string,
+  priority: string,
+  longhands: readonly Exclude<ShapeProperty, "corner-shape">[],
+  marker: string,
+): string {
+  const carrierValue = /^(?:initial|unset)$/iu.test(value) ? AUTO_UNSET : value;
+  const carriers = property === "corner-shape"
+    ? longhands.map((longhand) => SHAPE_PROPERTIES[longhand])
+    : [SHAPE_PROPERTIES[property]];
+  return `${carriers.map((carrier) => `${carrier}:${carrierValue}${priority};`).join("")}`
+    + `${longhands.map((longhand) => `${SHAPE_STATUS_PROPERTIES[longhand]}:${carrierValue}${priority};`).join("")}`
+    + `${marker}:${carrierValue}${priority};`;
+}
+
+function potentiallyValidUnsupportedShape(value: string): boolean {
+  const functionValue = /^superellipse\(\s*((?:calc|min|max|clamp)\([\s\S]*\))\s*\)$/iu.exec(value);
+  if (!functionValue) return false;
+  const expression = functionValue[1]!;
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (character !== "+" && character !== "-") continue;
+    const before = expression[index - 1] ?? "";
+    const after = expression[index + 1] ?? "";
+    const prefix = expression.slice(0, index).trimEnd();
+    const unary = prefix === ""
+      || /[,(+\-*/]$/u.test(prefix)
+      || /[eE]$/u.test(prefix);
+    if (!unary && (!/\s/u.test(before) || !/\s/u.test(after))) return false;
+  }
+  return true;
+}
+
 function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): string {
   const { value, priority } = declarationValue(rawValue);
+  const longhands: readonly Exclude<ShapeProperty, "corner-shape">[] = property === "corner-shape"
+    ? PHYSICAL_SHAPE_PROPERTIES
+    : [property as Exclude<ShapeProperty, "corner-shape">];
+  const marker = property === "corner-shape" || PHYSICAL_SHAPE_PROPERTIES.includes(property)
+    ? AUTO_PHYSICAL_SHAPE
+    : AUTO_LOGICAL_SHAPE;
+  if (/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value)) {
+    return shapeCssWideDeclaration(property, value, priority, longhands, marker);
+  }
   try {
     if (/\bvar\s*\(/iu.test(value)) {
       const carrier = SHAPE_PROPERTIES[property];
-      const marker = property === "corner-shape" || PHYSICAL_SHAPE_PROPERTIES.includes(property)
-        ? AUTO_PHYSICAL_SHAPE
-        : AUTO_LOGICAL_SHAPE;
-      return `${carrier}:${value}${priority};${marker}:1${priority};`;
+      return `${carrier}:${value}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};`;
     }
     if (property === "corner-shape") {
       const values = parseCornerShape(value);
       return `${PHYSICAL_SHAPE_PROPERTIES.map((longhand, index) => (
         `${SHAPE_PROPERTIES[longhand]}:${serializeShapeParameter(values[index]!)}${priority};`
-      )).join("")}${AUTO_PHYSICAL_SHAPE}:1${priority};`;
+      )).join("")}${shapeStatusDeclarations(longhands, "ok", priority)}${AUTO_PHYSICAL_SHAPE}:1${priority};`;
     }
     const carrier = SHAPE_PROPERTIES[property];
     const parsed = serializeShapeParameter(parseCornerShapeValue(value));
-    const marker = LOGICAL_SHAPE_PROPERTIES.includes(property)
-      ? AUTO_LOGICAL_SHAPE
-      : AUTO_PHYSICAL_SHAPE;
-    return `${carrier}:${parsed}${priority};${marker}:1${priority};`;
+    return `${carrier}:${parsed}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};`;
   } catch {
-    return `${AUTO_UNSUPPORTED_SHAPE}:1${priority};`;
+    return potentiallyValidUnsupportedShape(value)
+      ? `${shapeStatusDeclarations(longhands, "unsupported", priority)}${marker}:1${priority};`
+      : "";
   }
+}
+
+function allCarrierDeclaration(rawDeclaration: string, rawValue: string): string | null {
+  const { value, priority } = declarationValue(rawValue);
+  if (!/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value)) return null;
+  const carrierValue = /^(?:initial|unset)$/iu.test(value) ? AUTO_UNSET : value;
+  return `${rawDeclaration};${AUTO_CARRIERS.map((carrier) => (
+    `${carrier}:${carrierValue}${priority};`
+  )).join("")}`;
 }
 
 function canonicalizeCornerShapeDeclarations(
@@ -614,73 +620,39 @@ function canonicalizeCornerShapeDeclarations(
 ): string {
   const replacements: TextReplacement[] = [];
   let statementStart = 0;
-  let quote: string | null = null;
-  let comment = false;
-  let escaped = false;
-  let parentheses = 0;
-  let brackets = 0;
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
-    const next = source[index + 1];
-    if (comment) {
-      if (character === "*" && next === "/") {
-        comment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "/" && next === "*") {
-      comment = true;
-      index += 1;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === "(") {
-      parentheses += 1;
-      continue;
-    }
-    if (character === ")") {
-      parentheses = Math.max(0, parentheses - 1);
-      continue;
-    }
-    if (character === "[") {
-      brackets += 1;
-      continue;
-    }
-    if (character === "]") {
-      brackets = Math.max(0, brackets - 1);
-      continue;
-    }
-    if (parentheses !== 0 || brackets !== 0) continue;
+  let skipThrough = -1;
+  scanCssSyntax(source, 0, (index, character, parentheses, brackets) => {
+    if (index <= skipThrough) return;
+    if (parentheses !== 0 || brackets !== 0) return;
     if (character === ":") {
       const statement = source.slice(statementStart, index);
       const match = /([\w-]+)\s*$/u.exec(statement);
-      if (!match || !isCssWhitespaceOrComments(statement.slice(0, match.index))) continue;
+      if (!match || !isCssWhitespaceOrComments(statement.slice(0, match.index))) return;
       const property = match[1]!.toLowerCase();
-      if (!isShapeProperty(property)) continue;
+      if (!isShapeProperty(property) && property !== "all") return;
       const end = declarationEnd(source, index + 1);
       const start = statementStart + match.index;
+      if (property === "all") {
+        const replacement = allCarrierDeclaration(
+          source.slice(start, end),
+          source.slice(index + 1, end),
+        );
+        if (!replacement) return;
+        replacements.push(Object.freeze({ start, end, value: replacement }));
+        skipThrough = end - 1;
+        return;
+      }
       authoredDeclarations?.push(source.slice(start, end).trim());
       replacements.push(Object.freeze({
         start,
         end,
-        value: shapeCarrierDeclaration(property, source.slice(index + 1, end)),
+        value: shapeCarrierDeclaration(property as ShapeProperty, source.slice(index + 1, end)),
       }));
-      index = Math.max(index, end - 1);
-      continue;
+      skipThrough = end - 1;
+      return;
     }
     if (character === ";" || character === "{" || character === "}") statementStart = index + 1;
-  }
+  });
 
   if (replacements.length === 0) return source;
   let output = "";
@@ -693,63 +665,27 @@ function canonicalizeCornerShapeDeclarations(
   return output + source.slice(cursor);
 }
 
-function cssString(value: unknown): string {
-  return `"${String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
-}
-
-function resolveCssUrls(value: string, baseUrl: string): string {
-  return String(value).replaceAll(
-    /url\(\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|([^\s)'"\\]+))\s*\)/giu,
-    (source: string, doubleQuoted: string, singleQuoted: string, unquoted: string) => {
-      const raw = (doubleQuoted ?? singleQuoted ?? unquoted ?? "").replaceAll(/\\([()'"\\])/gu, "$1");
-      try {
-        return `url(${cssString(new URL(raw, baseUrl).href)})`;
-      } catch {
-        return source;
-      }
-    },
-  );
-}
-
 function serializedDeclaration(
   style: CSSStyleDeclaration,
   property: string,
   value: string,
-  outputProperty = property,
 ): string {
   const priority = style.getPropertyPriority(property);
-  return `${outputProperty}:${value}${priority ? " !important" : ""};`;
+  return `${property}:${value}${priority ? " !important" : ""};`;
 }
 
 function carrierDeclarations(
   style: CSSStyleDeclaration | null | undefined,
-  baseUrl: string,
 ): Readonly<{ css: string; shape: boolean }> {
   if (!style?.getPropertyValue) return Object.freeze({ css: "", shape: false });
   let css = "";
   let shape = false;
-  let physicalRadius = false;
-  let logicalRadius = false;
   for (const property of [...SHAPE_CARRIERS, ...SHAPE_MARKERS]) {
     const value = style.getPropertyValue(property).trim();
     if (!value) continue;
     css += serializedDeclaration(style, property, value);
     shape = true;
   }
-  for (const [property, carrier, kind] of OWNED_PROPERTY_CARRIERS) {
-    let value = style.getPropertyValue(property).trim();
-    if (!value) continue;
-    if (/^(?:inherit|revert|revert-layer)$/iu.test(value)) {
-      css += `${AUTO_UNSUPPORTED_OWNED}:1${style.getPropertyPriority(property) ? " !important" : ""};`;
-      continue;
-    }
-    if (kind === "url") value = resolveCssUrls(value, baseUrl);
-    css += serializedDeclaration(style, property, value, carrier);
-    if (kind === "radius-physical") physicalRadius = true;
-    else if (kind === "radius-logical") logicalRadius = true;
-  }
-  if (physicalRadius) css += `${AUTO_PHYSICAL_RADIUS}:1;`;
-  if (logicalRadius) css += `${AUTO_LOGICAL_RADIUS}:1;`;
   return Object.freeze({ css, shape });
 }
 
@@ -762,7 +698,9 @@ function diagnosticShapeDeclarations(style: CSSStyleDeclaration): readonly strin
     const priority = style.getPropertyPriority(carrier);
     declarations.push(`${property}: ${value}${priority ? " !important" : ""}`);
   }
-  if (declarations.length === 0 && style.getPropertyValue(AUTO_UNSUPPORTED_SHAPE).trim()) {
+  if (declarations.length === 0 && SHAPE_STATUS_CARRIERS.some((property) => (
+    style.getPropertyValue(property).trim() === "unsupported"
+  ))) {
     declarations.push("corner-shape: <unsupported value>");
   }
   return Object.freeze(declarations);
@@ -774,36 +712,13 @@ function ruleHeader(rule: CSSRule): string {
 }
 
 function matchingParenthesis(value: string, start: number): number {
-  let depth = 0;
-  let quote: string | null = null;
-  let escaped = false;
-  for (let index = start; index < value.length; index += 1) {
-    const character = value[index]!;
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === "(") depth += 1;
-    else if (character === ")") {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
+  let end = -1;
+  scanCssSyntax(value, start, (index, character, parentheses) => {
+    if (character !== ")" || parentheses !== 1) return;
+    end = index;
+    return false;
+  });
+  return end;
 }
 
 function supportsShapeValue(property: string, value: string): boolean {
@@ -868,7 +783,7 @@ function serializeCarrierRules(
     const rule = rawRule as CarrierRule;
     const header = ruleHeader(rule);
     if (/^@(?:-webkit-)?keyframes\b/iu.test(header)) continue;
-    const declarations = carrierDeclarations(rule.style, baseUrl);
+    const declarations = carrierDeclarations(rule.style);
     if (typeof rule.selectorText === "string" && (rule.cssRules?.length ?? 0) > 0) {
       throw new SyntaxError(`Automatic CSS cannot preserve nested selector rule: ${rule.selectorText}`);
     }
@@ -1043,41 +958,16 @@ function parseCarrierSheet(
 }
 
 function cssStatementEnd(source: string, start: number): number {
-  let quote: string | null = null;
-  let comment = false;
-  let escaped = false;
-  let parentheses = 0;
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index]!;
-    const next = source[index + 1];
-    if (comment) {
-      if (character === "*" && next === "/") {
-        comment = false;
-        index += 1;
-      }
-      continue;
+  let end = -1;
+  scanCssSyntax(source, start, (index, character, parentheses, brackets) => {
+    if (parentheses !== 0 || brackets !== 0) return;
+    if (character === ";") {
+      end = index;
+      return false;
     }
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "/" && next === "*") {
-      comment = true;
-      index += 1;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === "(") parentheses += 1;
-    else if (character === ")") parentheses = Math.max(0, parentheses - 1);
-    else if (parentheses === 0 && character === ";") return index;
-    else if (parentheses === 0 && character === "{") return -1;
-  }
-  return -1;
+    if (character === "{") return false;
+  });
+  return end;
 }
 
 function skipCssTrivia(source: string, start: number): number {
@@ -1298,14 +1188,60 @@ function mutateStylesheetModel(
 
 function computedCarrier(computed: CSSStyleDeclaration, property: string): string {
   const value = computed.getPropertyValue(property).trim();
-  return value === AUTO_UNSET ? "" : value;
+  return value === AUTO_UNSET || /^(?:initial|unset)$/iu.test(value) ? "" : value;
 }
+
+const AUTOMATIC_COMPUTED_PROPERTIES = Object.freeze([
+  "background-attachment",
+  "background-blend-mode",
+  "background-clip",
+  "background-color",
+  "background-image",
+  "background-origin",
+  "background-position",
+  "background-repeat",
+  "background-size",
+  "border-bottom-color",
+  "border-bottom-left-radius",
+  "border-bottom-right-radius",
+  "border-bottom-style",
+  "border-bottom-width",
+  "border-image-source",
+  "border-left-color",
+  "border-left-style",
+  "border-left-width",
+  "border-right-color",
+  "border-right-style",
+  "border-right-width",
+  "border-top-color",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-top-style",
+  "border-top-width",
+  "box-shadow",
+  "box-sizing",
+  "color",
+  "height",
+  "image-rendering",
+  "outline-color",
+  "outline-offset",
+  "outline-style",
+  "outline-width",
+  "overflow-x",
+  "overflow-y",
+  "padding-bottom",
+  "padding-left",
+  "padding-right",
+  "padding-top",
+  "width",
+]);
 
 function automaticComputedSignature(computed: CSSStyleDeclaration): string {
   return [
     computed.visibility,
     computed.direction,
     computed.writingMode,
+    ...AUTOMATIC_COMPUTED_PROPERTIES.map((property) => computed.getPropertyValue(property)),
     ...AUTO_CARRIERS.map((property) => computedCarrier(computed, property)),
   ].join("\n");
 }
@@ -1334,11 +1270,8 @@ function automaticStyleMutationSignature(value: unknown): string {
 }
 
 function carrierProblem(computed: CSSStyleDeclaration): string | null {
-  if (computedCarrier(computed, AUTO_UNSUPPORTED_SHAPE)) {
+  if (SHAPE_STATUS_CARRIERS.some((property) => computedCarrier(computed, property) === "unsupported")) {
     return "Automatic CSS cannot resolve this corner-shape value; use cornerfill/runtime for explicit state.";
-  }
-  if (computedCarrier(computed, AUTO_UNSUPPORTED_OWNED)) {
-    return "Automatic CSS cannot preserve an inherited or reverted paint-owned declaration; use cornerfill/runtime for explicit state.";
   }
   const variableShorthand = computedCarrier(computed, SHAPE_PROPERTIES["corner-shape"]);
   const competingLonghand = [...PHYSICAL_SHAPE_PROPERTIES, ...LOGICAL_SHAPE_PROPERTIES]
@@ -1349,10 +1282,6 @@ function carrierProblem(computed: CSSStyleDeclaration): string | null {
   if (computedCarrier(computed, AUTO_PHYSICAL_SHAPE)
     && computedCarrier(computed, AUTO_LOGICAL_SHAPE)) {
     return "Automatic CSS refuses mixed physical and logical corner-shape declarations because their cross-family cascade cannot be preserved.";
-  }
-  if (computedCarrier(computed, AUTO_PHYSICAL_RADIUS)
-    && computedCarrier(computed, AUTO_LOGICAL_RADIUS)) {
-    return "Automatic CSS refuses mixed physical and logical border-radius declarations because their cross-family cascade cannot be preserved.";
   }
   return null;
 }
@@ -1452,7 +1381,7 @@ function inlineCarrierRecords(
   const transformed = canonicalizeCornerShapeDeclarations(String(source), authoredDeclarations);
   const scratch = document.createElement("div");
   scratch.setAttribute("style", transformed);
-  const compiled = carrierDeclarations(scratch.style, document.baseURI);
+  const compiled = carrierDeclarations(scratch.style);
   if (!compiled.css) return Object.freeze({
     declarations: Object.freeze([]),
     shape: false,
@@ -1488,6 +1417,7 @@ function runtimeOptions(
     adoptedStyleSheets: _adoptedStyleSheets,
     parentAuto: _parentAuto,
     onError: _onError,
+    stylesheetTimeoutMs: _stylesheetTimeoutMs,
     ...runtime
   } = options;
   return { ...runtime, document };
@@ -1543,6 +1473,7 @@ class CornerfillAutoController {
   declare sourceRequested: boolean;
   declare readonly sourceRequests: Map<StylesheetOwner, SourceRequest>;
   declare readonly stylesheets: Map<StylesheetOwner, Readonly<StylesheetRecord>>;
+  declare readonly stylesheetTimeoutMs: number;
   declare workRequested: boolean;
 
   constructor(options: Readonly<InternalCornerfillAutoOptions> = {}) {
@@ -1550,6 +1481,10 @@ class CornerfillAutoController {
     if (!document?.defaultView) throw new TypeError("installCornerfillAuto() requires a browser document");
     this.document = document as RuntimeDocument;
     this.root = options.root ?? this.document;
+    this.stylesheetTimeoutMs = options.stylesheetTimeoutMs ?? 3_000;
+    if (!Number.isFinite(this.stylesheetTimeoutMs) || this.stylesheetTimeoutMs <= 0) {
+      throw new TypeError("stylesheetTimeoutMs must be a finite positive number");
+    }
     this.nonce = options.nonce ?? stylesheetElements(this.root).map(nonceValue).find(Boolean)
       ?? nonceValue(this.document.querySelector("script[nonce],style[nonce],link[nonce]"))
       ?? null;
@@ -1952,7 +1887,7 @@ class CornerfillAutoController {
       request.cancelWait = cancel;
       const timer = this.document.defaultView.setTimeout(() => finish(
         new Error(`browser stylesheet load timed out: ${owner.href}`),
-      ), 3_000);
+      ), this.stylesheetTimeoutMs);
       owner.addEventListener("load", loaded, { once: true });
       owner.addEventListener("error", failed, { once: true });
       this.pendingStylesheetWaits.add(cancel);
@@ -2671,7 +2606,7 @@ class CornerfillAutoController {
       this._clearErrors(element);
       if (!hasShapeCarrier(computed)) continue;
       try {
-        const handle = this.controller.attach(element, { dynamicCarriers: true });
+        const handle = this.controller.attach(element);
         this.automaticCounters.handleAttaches += 1;
         this.handles.set(element, handle);
         this.handleSignatures.set(element, automaticComputedSignature(computed));
@@ -2826,18 +2761,10 @@ class CornerfillAutoController {
   }
 
   async _start(): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> {
-    if (this.document.readyState === "loading") {
-      await new Promise<void>((resolve) => this.document.addEventListener(
-        "DOMContentLoaded",
-        () => resolve(),
-        { once: true },
-      ));
-    }
     if (this.destroyed || this.native) return this.explain();
     this._ensureCarrierRegistration();
-    const result = await this.refresh();
     this._installObserver();
-    return result;
+    return this.refresh();
   }
 
   _queueRefresh(
@@ -2948,6 +2875,7 @@ class CornerfillAutoController {
       autoObserve: options.autoObserve ?? this.autoObserve,
       adoptedStyleSheets: options.adoptedStyleSheets === true,
       onError: options.onError ?? this.onError ?? undefined,
+      stylesheetTimeoutMs: this.stylesheetTimeoutMs,
     });
     this.scopes.set(root, scope);
     return scope;
@@ -2985,7 +2913,7 @@ class CornerfillAutoController {
       }),
       implementation: Object.freeze({
         automaticDiscovery: this.native ? "BYPASSED_NATIVE" : "IMPLEMENTED",
-        fallbackRenderer: this.native ? "NOT_LOADED" : "IMPLEMENTED",
+        fallbackRenderer: this.native ? "NOT_SELECTED" : "IMPLEMENTED",
       }),
       oracleQualification: CORNERFILL_ORACLE_QUALIFICATION,
       automatic: Object.freeze({

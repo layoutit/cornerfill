@@ -1,14 +1,30 @@
 #!/usr/bin/env node
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLAYWRIGHT_CLI_PACKAGE = "@playwright/cli@0.1.17";
+const require = createRequire(import.meta.url);
+
+function moduleFiles(directory, extension) {
+  return readdirSync(join(PROJECT_ROOT, directory), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
+    .map((entry) => `${directory}/${entry.name}`);
+}
+
 const SOURCE_FILES = Object.freeze([
   "package.json",
   "package-lock.json",
@@ -21,31 +37,9 @@ const SOURCE_FILES = Object.freeze([
   "bench/imports/grandchild.css",
   "bench/imports/root.css",
   "scripts/runtime-regressions.mjs",
-  "src/auto-runtime.mts",
-  "src/auto.mts",
-  "src/backends.mts",
-  "src/background.mts",
-  "src/geometry.mts",
-  "src/gradients.mts",
-  "src/images.mts",
-  "src/identity.mts",
-  "src/native.mts",
-  "src/paint.mts",
-  "src/runtime.mts",
-  "src/values.mts",
-  "dist/auto-runtime.mjs",
-  "dist/auto.mjs",
-  "dist/backends.mjs",
-  "dist/background.mjs",
-  "dist/geometry.mjs",
-  "dist/gradients.mjs",
-  "dist/images.mjs",
-  "dist/identity.mjs",
-  "dist/native.mjs",
-  "dist/paint.mjs",
-  "dist/runtime.mjs",
-  "dist/values.mjs",
-]);
+  ...moduleFiles("src", ".mts"),
+  ...moduleFiles("dist", ".mjs"),
+].sort());
 const MIME = Object.freeze({
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -56,13 +50,11 @@ const MIME = Object.freeze({
 function locatePlaywrightModule() {
   const explicit = process.env.CORNERFILL_PLAYWRIGHT_MODULE;
   if (explicit) return resolve(explicit);
-  const lookup = spawnSync(
-    "npx",
-    ["--yes", "--package", PLAYWRIGHT_CLI_PACKAGE, "sh", "-c", "command -v playwright-cli"],
-    { encoding: "utf8" },
-  );
-  if (lookup.status !== 0 || !lookup.stdout.trim()) throw new Error("Playwright is unavailable");
-  return join(resolve(dirname(lookup.stdout.trim()), ".."), "playwright", "index.mjs");
+  try {
+    return require.resolve("playwright");
+  } catch {
+    throw new Error("Playwright is unavailable; run npm install");
+  }
 }
 
 function sourceIdentity(path) {
@@ -150,7 +142,8 @@ async function drivePointerStates(page) {
 const selected = browsers(process.argv.slice(2));
 const out = join(PROJECT_ROOT, "output", "playwright", "runtime-hardening", new Date().toISOString().replaceAll(":", "-"));
 mkdirSync(out, { recursive: true });
-const playwright = await import(pathToFileURL(locatePlaywrightModule()).href);
+const playwrightModule = await import(pathToFileURL(locatePlaywrightModule()).href);
+const playwright = playwrightModule.default ?? playwrightModule;
 const server = await startServer();
 const reports = [];
 try {

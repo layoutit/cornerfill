@@ -1,7 +1,7 @@
 {
   "name": "cornerfill",
   "version": "0.0.1",
-  "description": "Native-first paint polyfill for CSS corner-shape in Safari and Firefox",
+  "description": "CSS corner-shape polyfill for Safari and Firefox",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -23,6 +23,11 @@
       "import": "./dist/runtime.mjs",
       "default": "./dist/runtime.mjs"
     },
+    "./auto": {
+      "types": "./dist/auto-runtime.d.mts",
+      "import": "./dist/auto-runtime.mjs",
+      "default": "./dist/auto-runtime.mjs"
+    },
     "./geometry": {
       "types": "./dist/geometry.d.mts",
       "import": "./dist/geometry.mjs",
@@ -32,6 +37,11 @@
       "types": "./dist/values.d.mts",
       "import": "./dist/values.mjs",
       "default": "./dist/values.mjs"
+    },
+    "./spec": {
+      "types": "./dist/spec.d.mts",
+      "import": "./dist/spec.mjs",
+      "default": "./dist/spec.mjs"
     }
   },
   "repository": {
@@ -53,16 +63,22 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=18.17.0"
   },
   "scripts": {
-    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { force: true, recursive: true });\"",
-    "build": "npm run clean && tsc -p tsconfig.json && tsc -p tsconfig.types.json",
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { force: true, recursive: true }); rmSync('src/qualification.mts', { force: true });\"",
+    "generate": "node scripts/generate-qualification.mjs",
+    "build": "npm run clean && npm run generate && tsc -p tsconfig.json && tsc -p tsconfig.types.json",
     "prepare": "npm run build",
     "test": "npm run build && node --test",
-    "test:browser:runtime": "npm run build && node scripts/runtime-regressions.mjs"
+    "test:browser:runtime": "npm run build && node scripts/runtime-regressions.mjs",
+    "test:browser:runtime:built": "node scripts/runtime-regressions.mjs",
+    "oracle:list": "node scripts/oracle.mjs list",
+    "oracle:smoke": "npm run build && node scripts/oracle.mjs run --cases=bevel,round,mario-texel-face",
+    "oracle:cross": "npm run build && node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=bevel,bevel-rotated,mario-texel-face"
   },
   "devDependencies": {
+    "@playwright/cli": "0.1.17",
     "typescript": "7.0.2"
   }
 }

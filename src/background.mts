@@ -59,9 +59,16 @@ export interface BackgroundRepeat {
   readonly y: BackgroundRepeatMode;
 }
 
+export type BackgroundBoxSideInput = number | Four<number> | Readonly<{
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+}>;
+
 export interface BackgroundBoxMetricsInput {
-  readonly border?: unknown;
-  readonly padding?: unknown;
+  readonly border?: BackgroundBoxSideInput | null | undefined;
+  readonly padding?: BackgroundBoxSideInput | null | undefined;
 }
 
 export interface BackgroundBoxMetrics {

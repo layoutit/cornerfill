@@ -4,12 +4,25 @@ import {
   createPreparedOpaqueImageProgram,
   drawPreparedOpaqueImage,
   explainPreparedOpaqueImage,
+  isFullyTransparentCssColor,
   paintCornerfill,
   paintOwnedLayer,
   preparePreparedOpaqueImageContext,
-  repaintPreparedOpaqueImage,
 } from "../dist/paint.mjs";
 import { buildCornerGeometry } from "../dist/geometry.mjs";
+
+test("transparent CSS color serialization is recognized without parsing opaque colors", () => {
+  for (const color of [
+    "transparent",
+    "rgba(1, 2, 3, 0)",
+    "rgb(1 2 3 / 0%)",
+    "hsl(120 50% 50% / 0.0)",
+    "color(display-p3 1 0 0 / 0)",
+  ]) assert.equal(isFullyTransparentCssColor(color), true, color);
+  for (const color of ["red", "rgb(1 2 3 / .1)", "rgba(1, 2, 3, 1)"]) {
+    assert.equal(isFullyTransparentCssColor(color), false, color);
+  }
+});
 
 function contextRecorder() {
   const calls = [];
@@ -40,7 +53,8 @@ test("prepared opaque crop repaints the retained contour with numeric source coo
     },
   });
   const context = contextRecorder();
-  repaintPreparedOpaqueImage(context, program, -512, 0);
+  preparePreparedOpaqueImageContext(context, program);
+  drawPreparedOpaqueImage(context, program, -512, 0);
   const draw = context.calls.find(([name]) => name === "drawImage");
   assert.deepEqual(draw, ["drawImage", image, 32, 0, 4, 4, 0, 0, 64, 44]);
   assert.deepEqual(explainPreparedOpaqueImage(program, -512, 0).layer.sourceRect, [32, 0, 4, 4]);
@@ -58,7 +72,7 @@ test("prepared opaque updates reject positions that expose stale pixels", () => 
     },
   });
   assert.throws(
-    () => repaintPreparedOpaqueImage(contextRecorder(), program, 1, 0),
+    () => drawPreparedOpaqueImage(contextRecorder(), program, 1, 0),
     /no longer covers/u,
   );
 });

@@ -34,8 +34,28 @@ export interface CornerfillSurface {
   readonly schema: typeof CORNERFILL_SURFACE_SCHEMA;
   readonly size: Readonly<SurfaceSize>;
   commit(): void;
+  /** Releases backend resources. Cleanup is best-effort and does not throw. */
   dispose(): void;
   resize(cssWidth: number, cssHeight: number, dpr: number): boolean;
+}
+
+export interface SurfaceResourceStats {
+  readonly firefox: Readonly<{
+    registrations: number;
+    unregisterFailures: number;
+  }>;
+  readonly schema: "cornerfill-surface-resources@1";
+  readonly webkit: Readonly<{
+    activeCanvases: number;
+    pooledCanvases: number;
+    pooledPixels: number;
+    prefixes: number;
+    retainedCanvases: number;
+    retainedPixels: number;
+    retiredCanvases: number;
+    retiredPixels: number;
+    shrinkFailures: number;
+  }>;
 }
 
 export interface SurfaceCapabilities {
@@ -79,12 +99,6 @@ interface WebkitReleaseOptions {
   readonly shrunk: boolean;
 }
 
-type CssSupportHost = typeof globalThis & {
-  CSS?: {
-    supports?: (property: string, value: string) => boolean;
-  };
-};
-
 type SurfaceDocument = Document & {
   getCSSCanvasContext?: (
     contextId: "2d",
@@ -95,9 +109,9 @@ type SurfaceDocument = Document & {
   mozSetImageElement?: (id: string, element: Element | null) => void;
 };
 
-const hiddenRoots = new WeakMap<Document, HTMLDivElement>();
 const webkitSurfacePools = new WeakMap<Document, WebkitPoolState>();
 const mozRegistrationCounts = new WeakMap<Document, number>();
+const mozUnregisterFailureCounts = new WeakMap<Document, number>();
 
 const DEFAULT_MAX_WEBKIT_POOL_ENTRIES = 256;
 const DEFAULT_MAX_WEBKIT_POOL_PREFIXES = 16;
@@ -188,41 +202,11 @@ function backingDimensions(
   return Object.freeze({ width, height });
 }
 
-function getHiddenRoot(document: Document): HTMLDivElement {
-  let root = hiddenRoots.get(document);
-  if (root?.isConnected) return root;
-  root = document.createElement("div");
-  root.setAttribute("data-cornerfill-surfaces", "");
-  root.setAttribute("aria-hidden", "true");
-  Object.assign(root.style, {
-    position: "fixed",
-    left: "-100000px",
-    top: "-100000px",
-    width: "1px",
-    height: "1px",
-    overflow: "hidden",
-    pointerEvents: "none",
-    visibility: "hidden",
-  });
-  (document.body ?? document.documentElement).append(root);
-  hiddenRoots.set(document, root);
-  return root;
-}
-
-function maybeRemoveHiddenRoot(document: Document): void {
-  const root = hiddenRoots.get(document);
-  if (root && root.childElementCount === 0) {
-    root.remove();
-    hiddenRoots.delete(document);
-  }
-}
-
 export function detectSurfaceCapabilities(document: Document): Readonly<SurfaceCapabilities> {
-  const view = (document?.defaultView ?? globalThis) as CssSupportHost;
-  const cssSupports = view.CSS?.supports?.bind(view.CSS);
   const webkitCanvas = typeof (document as SurfaceDocument)?.getCSSCanvasContext === "function";
   const mozRegistration = typeof (document as SurfaceDocument)?.mozSetImageElement === "function";
-  const mozElement = mozRegistration || Boolean(cssSupports?.("background-image", "-moz-element(#cornerfill-probe)"));
+  // Syntax support cannot expose a Canvas by ID; registration is the actual backend capability.
+  const mozElement = mozRegistration;
   return Object.freeze({
     schema: "cornerfill-surface-capabilities@1",
     webkitCanvas,
@@ -233,7 +217,7 @@ export function detectSurfaceCapabilities(document: Document): Readonly<SurfaceC
   });
 }
 
-export function getSurfaceResourceStats(document: Document) {
+export function getSurfaceResourceStats(document: Document): Readonly<SurfaceResourceStats> {
   const webkit = webkitSurfacePools.get(document);
   return Object.freeze({
     schema: "cornerfill-surface-resources@1",
@@ -250,6 +234,7 @@ export function getSurfaceResourceStats(document: Document) {
     }),
     firefox: Object.freeze({
       registrations: mozRegistrationCounts.get(document) ?? 0,
+      unregisterFailures: mozUnregisterFailureCounts.get(document) ?? 0,
     }),
   });
 }
@@ -350,7 +335,6 @@ function createMozSurface(
   const canvas = document.createElement("canvas");
   canvas.id = id;
   canvas.setAttribute("aria-hidden", "true");
-  const directRegistration = typeof document.mozSetImageElement === "function";
   const context = canvas.getContext("2d", { alpha: true });
   if (!context) throw new Error("could not create the Firefox live canvas context");
   let cssWidth = 0;
@@ -391,13 +375,12 @@ function createMozSurface(
     commit() {},
     dispose() {
       if (disposed) return;
-      let unregisterError = null;
-      if (registered && directRegistration) {
+      if (registered) {
         try {
           document.mozSetImageElement!(id, null);
           mozRegistrationCounts.set(document, Math.max(0, (mozRegistrationCounts.get(document) ?? 1) - 1));
-        } catch (error) {
-          unregisterError = error;
+        } catch {
+          mozUnregisterFailureCounts.set(document, (mozUnregisterFailureCounts.get(document) ?? 0) + 1);
         }
       }
       registered = false;
@@ -405,29 +388,21 @@ function createMozSurface(
       canvas.width = 1;
       canvas.height = 1;
       disposed = true;
-      maybeRemoveHiddenRoot(document);
-      if (unregisterError) throw unregisterError;
     },
   };
   try {
     surface.resize(options.cssWidth, options.cssHeight, options.dpr);
-    if (directRegistration) {
-      document.mozSetImageElement!(id, canvas);
-      registered = true;
-      mozRegistrationCounts.set(document, (mozRegistrationCounts.get(document) ?? 0) + 1);
-    } else {
-      getHiddenRoot(document).append(canvas);
-      registered = true;
-    }
+    document.mozSetImageElement!(id, canvas);
+    registered = true;
+    mozRegistrationCounts.set(document, (mozRegistrationCounts.get(document) ?? 0) + 1);
   } catch (error) {
-    if (directRegistration) {
-      try { document.mozSetImageElement!(id, null); } catch {}
+    try { document.mozSetImageElement!(id, null); } catch {
+      mozUnregisterFailureCounts.set(document, (mozUnregisterFailureCounts.get(document) ?? 0) + 1);
     }
     registered = false;
     canvas.remove();
     canvas.width = 1;
     canvas.height = 1;
-    maybeRemoveHiddenRoot(document);
     disposed = true;
     throw error;
   }
@@ -493,7 +468,6 @@ function createStaticSurface(
   return surface;
 }
 
-export function createSurface(document: Document, options: SurfaceCreateOptions): CornerfillSurface;
 export function createSurface(document: Document, {
   cssWidth,
   cssHeight,
@@ -504,7 +478,7 @@ export function createSurface(document: Document, {
   maxSurfacePixels = 16_777_216,
   maxWebkitPoolEntries = DEFAULT_MAX_WEBKIT_POOL_ENTRIES,
   maxWebkitPoolPrefixes = DEFAULT_MAX_WEBKIT_POOL_PREFIXES,
-}: Partial<SurfaceCreateOptions> = {}): CornerfillSurface {
+}: Readonly<SurfaceCreateOptions>): CornerfillSurface {
   const capabilities = detectSurfaceCapabilities(document);
   let selected: SelectedSurfaceBackend = backend;
   if (selected === "auto") {
@@ -528,7 +502,7 @@ export function createSurface(document: Document, {
   if (selected === "none") {
     throw new Error("no live Cornerfill surface backend is available and static fallback is disabled");
   }
-  backingDimensions(cssWidth!, cssHeight!, dpr, maxSurfacePixels);
+  backingDimensions(cssWidth, cssHeight, dpr, maxSurfacePixels);
   if (!Number.isSafeInteger(maxWebkitPoolEntries) || maxWebkitPoolEntries < 0) {
     throw new TypeError("maxWebkitPoolEntries must be a non-negative integer");
   }
@@ -536,8 +510,8 @@ export function createSurface(document: Document, {
     throw new TypeError("maxWebkitPoolPrefixes must be a non-negative integer");
   }
   const options: ResolvedSurfaceOptions = {
-    cssWidth: cssWidth!,
-    cssHeight: cssHeight!,
+    cssWidth,
+    cssHeight,
     dpr,
     idPrefix,
     maxSurfacePixels,

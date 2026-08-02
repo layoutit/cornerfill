@@ -107,12 +107,13 @@ type InsetCacheValue = InsetCornerGeometry | typeof UNSUPPORTED_INSET_TOPOLOGY;
 type InsetCache = Map<string, InsetCacheValue>;
 
 const CORNER_COUNT = 4;
-const DEFAULT_SEGMENTS = 64;
 const INTERSECTION_EPSILON = 1e-9;
 const FLOATING_SHAPE_LIMIT = 54;
 const CONCAVE_SAFETY_SEGMENTS = 256;
 const CONCAVE_SAFETY_MARGIN = 1e-5;
 const MAX_INSET_CACHE_ENTRIES = 16;
+// 52 bisections reach the precision limit of a finite IEEE-754 mantissa.
+const INTERSECTION_BISECTION_ITERATIONS = 52;
 const UNSUPPORTED_INSET_TOPOLOGY = Symbol("unsupported inset topology");
 const INSET_TOPOLOGY_ERROR = "shaped inset contour self-intersects after clipping and is unsupported";
 const insetGeometryCache = new WeakMap<CornerGeometry, InsetCache>();
@@ -462,7 +463,7 @@ function highestNonOverlappingScale(first: CornerHull, second: CornerHull, maxim
   if (!overlaps(maximum)) return maximum;
   let low = 0;
   let high = maximum;
-  for (let iteration = 0; iteration < 52; iteration += 1) {
+  for (let iteration = 0; iteration < INTERSECTION_BISECTION_ITERATIONS; iteration += 1) {
     const middle = (low + high) / 2;
     if (overlaps(middle)) high = middle;
     else low = middle;
@@ -599,7 +600,7 @@ export function contourPoints({
   const resolved = radiiAreResolved
     ? radii
     : resolveCornerRadii(width, height, radii, shapeParameters).radii;
-  const options = samplingOptions({ segments: segments ?? (tolerance === undefined ? DEFAULT_SEGMENTS : undefined), tolerance, dpr });
+  const options = samplingOptions({ segments, tolerance, dpr });
   const curves = resolved.map((radius, index) => cornerCurve(
     index,
     width,
@@ -897,7 +898,6 @@ function cornerVertices(
   width: number,
   height: number,
   radius: Radius,
-  _shapeParameter: number,
 ): CornerVertices {
   const { rx, ry } = radius;
   if (index === 0) return { start: [0, ry], outer: [0, 0], end: [rx, 0], center: [rx, ry] };
@@ -1145,7 +1145,7 @@ export function insetCornerGeometry(geometry: CornerGeometry, insets: CornerInse
   const startInsets: Four<number> = [left, top, right, bottom];
   const endInsets: Four<number> = [top, right, bottom, left];
   const corners = geometry.radii.map((radius, index) => adjustCornerForInsets(
-    cornerVertices(index, geometry.width, geometry.height, radius, geometry.shapeParameters[index]!),
+    cornerVertices(index, geometry.width, geometry.height, radius),
     index,
     geometry.shapeParameters[index]!,
     startInsets[index]!,

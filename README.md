@@ -1,6 +1,6 @@
 # Cornerfill
 
-A native-first paint polyfill for CSS `corner-shape` in Safari and Firefox. Write ordinary CSS, keep transforms on the original element, and let Cornerfill paint the shaped background and border into a transparent Canvas image. A semantically qualified native engine stays native and does not download the fallback renderer.
+Cornerfill makes CSS `corner-shape` work in Safari and Firefox. You write ordinary CSS; Cornerfill paints the host background and border into a transparent Canvas-backed background image while leaving the original element, layout, and transform in place. A semantically qualified native engine stays native and never starts the fallback renderer.
 
 Cornerfill shapes host paint. It does not add descendant overflow clipping or shaped hit testing. It is built for retained DOM renderers such as [PolyCSS](https://github.com/LayoutitStudio/polycss), but the runtime and geometry are standalone.
 
@@ -15,7 +15,9 @@ npm install cornerfill
 Import Cornerfill once:
 
 ```js
-import "cornerfill";
+import cornerfill from "cornerfill";
+
+await cornerfill?.ready;
 ```
 
 Then write normal CSS:
@@ -30,11 +32,11 @@ Then write normal CSS:
 }
 ```
 
-That is the plug-and-play document path. A qualified native engine renders the declaration itself. On supported Safari/WebKit and Firefox builds, Cornerfill finds accessible authored declarations and attaches the fallback automatically. You do not need custom properties, a build transform, or a second import.
+That is the plug-and-play document path. A qualified native engine renders the declaration itself. On supported Safari/WebKit and Firefox builds, Cornerfill finds accessible authored declarations and attaches the fallback automatically. You do not need carrier properties, a build transform, or a second import. Startup installs discovery immediately; `ready` resolves after the first asynchronous stylesheet and attachment pass. The export is `null` only outside a DOM environment.
 
 ## How It Works
 
-Safari and Firefox discard an unsupported `corner-shape` declaration when they build CSSOM. Cornerfill reads accessible stylesheet source instead, then writes private values into a companion stylesheet. Authors still write standard CSS; the browser still resolves selectors, variables, conditions, layers, importance, and the cascade.
+Safari and Firefox may omit an unsupported `corner-shape` declaration from CSSOM. Cornerfill reads accessible authored stylesheet text and copies only those shape declarations into a private companion stylesheet. The browser then resolves selectors, variables, conditions, layers, importance, CSS-wide values, and declaration order. Backgrounds, borders, radii, and other supported paint inputs come from browser-computed style; Cornerfill does not recreate their cascade.
 
 Cornerfill parses `border-radius` and `corner-shape`, resolves the CSS radius constraints, builds the contour, and paints the host-owned pixels into a transparent Canvas surface. Safari/WebKit exposes that surface through `-webkit-canvas()`. Firefox registers it with `mozSetImageElement()` and displays it through `-moz-element()`.
 
@@ -50,7 +52,7 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-a
 | Safari / WebKit | `-webkit-canvas()` when the live Canvas API is available |
 | Firefox | `-moz-element()` when Canvas registration is available |
 
-Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
+Native selection requires syntax support, canonical computed corner-shape longhands, and a shaped hit-test probe; syntax support alone is not enough. The qualification report exposes those results separately and marks outer paint, inner borders, clipping, effects, and animation as `unobserved` rather than pretending one probe certified them. Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
 
 ## Automatic Sources and Shadow Roots
 
@@ -61,6 +63,7 @@ Open shadow roots are explicit because discovery does not cross a shadow boundar
 ```js
 import { cornerfill } from "cornerfill";
 
+if (!cornerfill) throw new Error("Cornerfill requires a document");
 const scope = cornerfill.registerRoot(shadowRoot);
 await scope.ready;
 
@@ -75,6 +78,7 @@ const sheet = new CSSStyleSheet();
 sheet.replaceSync(css);
 shadowRoot.adoptedStyleSheets = [sheet];
 
+if (!cornerfill) throw new Error("Cornerfill requires a document");
 const scope = cornerfill.registerRoot(shadowRoot, { adoptedStyleSheets: true });
 await scope.ready;
 await scope.refreshAdoptedStyleSheet(sheet, css);
@@ -82,10 +86,12 @@ await scope.refreshAdoptedStyleSheet(sheet, css);
 
 Call `refreshAdoptedStyleSheet()` again with the same standard source passed to a later `replace()` or `replaceSync()`. Cornerfill does not patch `attachShadow()`, `CSSStyleSheet`, or `CSS.supports()`.
 
+Linked stylesheets and `@import` recovery use `fetch()`. A restrictive CSP must therefore allow those URLs through `connect-src` as well as normal stylesheet loading. Pass a `nonce` when the policy requires one for Cornerfill's generated companion style.
+
 ## Supported
 
 - `round`, `squircle`, `square`, `bevel`, `scoop`, `notch`, and finite `superellipse()` corners.
-- `border-radius` and `corner-shape` shorthands and longhands, physical and logical corners, elliptical percentages, the implemented `calc()` subset, overlap reduction, and opposite-concave constraints.
+- `corner-shape` plus its physical and logical corner longhands. Standard `border-radius` declarations are read from browser-computed physical longhands, so relative units and browser-resolved `calc()`, `min()`, `max()`, and `clamp()` values are retained. The explicit value helpers also accept documented px/percentage expressions.
 - Solid colors, static same-origin or CORS raster layers and atlas crops, and non-repeating linear, radial, and conic gradients within the implemented grammar.
 - Admitted background stacks with sizing, positioning, repetition, origin, and clip. The explicit runtime also admits one opaque scroll-attached raster using `multiply` over one opaque `rgb()` or hex color.
 - One-color solid borders with unequal widths when the clipped inner edge remains one non-self-intersecting contour, one zero-offset zero-blur inset shadow with non-negative spread, and one fully contained solid outline on an empty paint-owned host.
@@ -94,7 +100,39 @@ Call `refreshAdoptedStyleSheet()` again with the same standard source passed to 
 
 Implemented support is not an oracle `PASS`. Current fallback comparisons remain `UNQUALIFIED`; `controller.capabilities.paint` reports available code paths, not pixel parity. Gradient color and repeated or resized raster sampling still need native qualification.
 
+## Spec Surface
+
+Cornerfill is pinned to the 26 March 2026 Working Draft of [CSS Borders and Box Decorations Level 4](https://drafts.csswg.org/css-borders-4/). `cornerfill/spec` exports the exact CSSWG and WPT commits used by this release together with a machine-readable property matrix.
+
+| Surface | 0.0.1 status |
+| --- | --- |
+| `corner-shape` and four physical plus four logical corner-shape longhands | Automatic fallback |
+| `border-radius` and four physical plus four logical radius longhands | Browser-computed input |
+| Side shape shorthands, combined radius-and-shape properties, and side radius shorthands | Not implemented |
+| Ordinary elements | Automatic fallback |
+| `::before`, `::after`, and other pseudo-elements | Not implemented |
+
+The matrix is deliberately narrower than the current draft. Unknown or unsupported syntax is reported or left native; it is not approximated.
+
 ## Runtime API
+
+The package root is the zero-configuration entry. If an application needs scanner options, `cornerfill/auto` exports the installer without starting it as an import side effect:
+
+```js
+import { installCornerfillAuto } from "cornerfill/auto";
+
+const cornerfill = installCornerfillAuto({
+  stylesheetTimeoutMs: 5_000,
+  nonce: document.currentScript?.nonce,
+  onError(error, context) {
+    console.error(`Cornerfill source error in ${context}`, error);
+  },
+});
+
+await cornerfill.ready;
+```
+
+`autoObserve: false` switches off automatic source/state observation. `adoptedStyleSheets: true` opts a registered open shadow root into constructed-sheet handling. These options are for controlled integrations; normal document use should import `cornerfill`.
 
 Use the scanner-free runtime when your application already owns element state:
 
@@ -173,7 +211,7 @@ cornerfill.destroy();
 - Rare combinations of concave corners, radii, and unequal border widths can make the clipped inner border edge self-intersect and require multiple contours. Cornerfill refuses those elements before mutating their paint surface instead of approximating the border.
 - Animated CSS images, cross-origin images without CORS, general `image-set()` selection, repeating gradients, and gradient interpolation spaces or hints are outside the supported paint grammar.
 - General background blending is not supported. Automatic mode cannot prove raster opacity, so the bounded `multiply` path is explicit-runtime only.
-- Automatic discovery supports one physical or logical declaration family at a time. Mixed families and keyframe-driven fallback paint are rejected. The explicit value API can resolve physical and logical declarations together.
+- Automatic discovery supports one physical or logical declaration family at a time. Mixed families are rejected. Automatic CSS animations and transitions of shape or paint dependencies are not reproduced with native timing or interpolation; use the explicit update/interpolation API when that behavior matters.
 - Direct declaration tests such as `@supports (corner-shape: bevel)` are preserved. Complex conditions that cannot be transported without changing their meaning, anonymous layers, nested selector rules, and unknown at-rule contexts are refused before ownership.
 - Cross-origin stylesheets and imports require CORS. Closed or unregistered shadow roots are not discovered. Constructed/adopted sheets require explicit open-root registration and the exact-source refresh shown above. Generated styles require a CSP nonce when the page policy does.
 - After installation, automatic mode mirrors `insertRule()` and `deleteRule()` on directly discovered, non-import stylesheet instances and restores the original instance methods on teardown. Rules inserted before startup and unsupported values assigned through `CSSStyleDeclaration` cannot be recovered after the browser discards them.
@@ -187,9 +225,13 @@ Cornerfill refuses unsupported cases instead of painting a result with different
 npm run build
 npm test
 npm run test:browser:runtime
+npm run oracle:smoke
+npm run oracle:cross
 ```
 
-TypeScript `.mts` modules are the source of truth. The build writes browser-ready `.mjs` files and matching declarations to `dist/`.
+`test:browser:runtime` opens and closes Chrome, WebKit, and Firefox strictly one at a time. The oracle commands do the same and never use `kill-all`. The smoke and cross-engine fixtures include the real Mario texel crop and therefore require `CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp` when it is not at the development-machine default. See [the executable oracle contract](oracle/README.md).
+
+TypeScript `.mts` modules are the source of truth. The build writes browser-ready `.mjs` files and matching declarations to `dist/`. It also generates the exported qualification object from the tracked [oracle qualification record](oracle/qualification.json); candidate comparisons remain `UNQUALIFIED` until reviewed evidence supports explicit tolerances. The package root is asynchronous ESM; controlled integrations that cannot consume top-level await can call the installers from `cornerfill/auto` or `cornerfill/runtime` directly.
 
 ## License
 
