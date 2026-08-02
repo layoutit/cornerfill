@@ -1,13 +1,39 @@
 #!/usr/bin/env node
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const PLAYWRIGHT_CLI_PACKAGE = "@playwright/cli@0.1.17";
+const SOURCE_FILES = Object.freeze([
+  "package.json",
+  "README.md",
+  "bench/runtime-regression.html",
+  "bench/runtime-regression.mjs",
+  "bench/imports/child.css",
+  "bench/imports/grandchild.css",
+  "bench/imports/root.css",
+  "scripts/runtime-regressions.mjs",
+  "src/auto-runtime.mjs",
+  "src/auto.mjs",
+  "src/backends.mjs",
+  "src/background.mjs",
+  "src/geometry.mjs",
+  "src/gradients.mjs",
+  "src/images.mjs",
+  "src/identity.mjs",
+  "src/index.mjs",
+  "src/native.mjs",
+  "src/paint.mjs",
+  "src/runtime.mjs",
+  "src/values.mjs",
+]);
 const MIME = Object.freeze({
+  ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -18,11 +44,19 @@ function locatePlaywrightModule() {
   if (explicit) return resolve(explicit);
   const lookup = spawnSync(
     "npx",
-    ["--yes", "--package", "@playwright/cli", "sh", "-c", "command -v playwright-cli"],
+    ["--yes", "--package", PLAYWRIGHT_CLI_PACKAGE, "sh", "-c", "command -v playwright-cli"],
     { encoding: "utf8" },
   );
   if (lookup.status !== 0 || !lookup.stdout.trim()) throw new Error("Playwright is unavailable");
   return join(resolve(dirname(lookup.stdout.trim()), ".."), "playwright", "index.mjs");
+}
+
+function sourceIdentity(path) {
+  const bytes = readFileSync(path);
+  return Object.freeze({
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
 }
 
 function browsers(argv) {
@@ -64,6 +98,41 @@ async function startServer() {
   };
 }
 
+async function drivePointerStates(page) {
+  let stage = "";
+  while (stage !== "done") {
+    await page.waitForFunction((previous) => {
+      if (document.documentElement.dataset.runtimeRegressions !== undefined) return true;
+      const current = globalThis.__CORNERFILL_POINTER_DRIVER__?.stage;
+      return Boolean(current && current !== previous);
+    }, stage, { timeout: 120_000 });
+    if (await page.locator("html[data-runtime-regressions]").count() > 0) return;
+    stage = await page.evaluate(() => globalThis.__CORNERFILL_POINTER_DRIVER__?.stage ?? "");
+    if (stage === "hover-ready") {
+      await page.locator(".cornerfill-auto-hover").hover();
+      stage = "hover-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "hover-driven"; });
+    } else if (stage === "active-ready") {
+      await page.locator(".cornerfill-auto-active").hover();
+      await page.mouse.down();
+      stage = "active-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "active-driven"; });
+    } else if (stage === "active-release") {
+      await page.mouse.up();
+      stage = "active-released";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "active-released"; });
+    } else if (stage === "media-dark-ready") {
+      await page.emulateMedia({ colorScheme: "dark" });
+      stage = "media-dark-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "media-dark-driven"; });
+    } else if (stage === "media-light-ready") {
+      await page.emulateMedia({ colorScheme: "light" });
+      stage = "media-light-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "media-light-driven"; });
+    }
+  }
+}
+
 const selected = browsers(process.argv.slice(2));
 const out = join(PROJECT_ROOT, "output", "playwright", "runtime-hardening", new Date().toISOString().replaceAll(":", "-"));
 mkdirSync(out, { recursive: true });
@@ -87,10 +156,11 @@ try {
       page.on("console", (message) => {
         if (message.type() === "error") errors.push(new Error(message.text()));
       });
-      await page.goto(`${server.origin}/bench/runtime-regression.html?backend=${backend}`, {
+      await page.goto(`${server.origin}/bench/runtime-regression.html?backend=${backend}&drivePointer=1`, {
         waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
+      await drivePointerStates(page);
       await page.waitForFunction(() => (
         document.documentElement.dataset.runtimeRegressions !== undefined
       ), null, { timeout: 120_000 });
@@ -100,7 +170,7 @@ try {
       }
       if (errors.length > 0) throw new AggregateError(errors, `${browserName} emitted runtime errors`);
       const report = await page.evaluate(() => globalThis.__CORNERFILL_RUNTIME_REGRESSIONS__);
-      reports.push(Object.freeze({ browser: browserName, session, report }));
+      reports.push(Object.freeze({ browser: browserName, session, version: browser.version(), report }));
       writeFileSync(join(out, `${browserName}.json`), `${JSON.stringify(report, null, 2)}\n`);
     } finally {
       if (context) await context.close();
@@ -114,11 +184,17 @@ try {
   await server.close();
 }
 writeFileSync(join(out, "manifest.json"), `${JSON.stringify({
-  schema: "cornerfill-runtime-browser-regression-run@1",
+  schema: "cornerfill-runtime-browser-regression-run@2",
   status: "COMPLETE",
+  playwrightCliPackage: PLAYWRIGHT_CLI_PACKAGE,
+  sources: Object.fromEntries(SOURCE_FILES.map((path) => [
+    path,
+    sourceIdentity(join(PROJECT_ROOT, path)),
+  ])),
   browsers: selected,
-  reports: reports.map(({ browser, session, report }) => ({
+  reports: reports.map(({ browser, session, version, report }) => ({
     browser,
+    version,
     session,
     tests: report.tests.length,
     failures: report.tests.filter(({ status }) => status !== "PASS").length,

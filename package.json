@@ -1,7 +1,7 @@
 {
   "name": "cornerfill",
   "version": "0.1.0",
-  "description": "Canvas-backed corner-shape polyfill for Safari and Firefox",
+  "description": "Native-first paint polyfill for CSS corner-shape in Safari and Firefox",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -12,7 +12,7 @@
   ],
   "exports": {
     ".": "./src/auto.mjs",
-    "./runtime": "./src/index.mjs",
+    "./runtime": "./src/runtime.mjs",
     "./geometry": "./src/geometry.mjs",
     "./values": "./src/values.mjs"
   },
@@ -39,12 +39,6 @@
   },
   "scripts": {
     "test": "node --test",
-    "oracle:list": "node scripts/oracle.mjs list",
-    "oracle:smoke": "node scripts/oracle.mjs run --cases=bevel,round,mario-texel-face",
-    "oracle:cross": "node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=bevel,bevel-rotated,mario-texel-face",
-    "oracle:run": "node scripts/oracle.mjs run",
-    "oracle:check": "node scripts/oracle.mjs run --enforce-candidate",
-    "test:browser:runtime": "node scripts/runtime-regressions.mjs",
-    "perf:firefox:mario": "node scripts/trace-firefox-mario.mjs --headless"
+    "test:browser:runtime": "node scripts/runtime-regressions.mjs"
   }
 }

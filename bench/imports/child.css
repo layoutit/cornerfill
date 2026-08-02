@@ -1,0 +1,19 @@
+@import "./grandchild.css";
+
+.cornerfill-import-child,
+.cornerfill-import-order {
+  corner-shape: bevel;
+  border-radius: 5px;
+  background: red;
+}
+
+.cornerfill-import-focus:focus {
+  corner-shape: bevel;
+  border-radius: 5px;
+  background: red;
+}
+
+.cornerfill-import-never {
+  corner-shape: bevel;
+  background-image: url("./sprite.png");
+}

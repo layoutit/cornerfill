@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CORNERFILL_ORACLE_QUALIFICATION } from "../src/native.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -18,10 +19,9 @@ test("production sources contain none of the prohibited CSS renderers", () => {
 });
 
 test("oracle candidate tolerances remain deliberately unapproved", () => {
-  const tolerances = JSON.parse(readFileSync(join(root, "oracle", "tolerances.json"), "utf8"));
-  assert.equal(tolerances.calibration.approved, true);
-  assert.equal(tolerances.calibration.maxMeanAlpha, 0);
-  assert.equal(tolerances.calibration.maxMeanPremultipliedRgb, 0);
-  assert.equal(tolerances.calibration.maxChangedPixelRatio, 0);
-  assert.equal(tolerances.candidate.approved, false);
+  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.status, "PASS");
+  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.approvedTolerance, true);
+  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.exactZeroTolerance, true);
+  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.candidate.status, "UNQUALIFIED");
+  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.candidate.approvedTolerance, false);
 });

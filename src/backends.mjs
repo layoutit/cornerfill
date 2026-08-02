@@ -1,6 +1,7 @@
+import { nextDocumentId } from "./identity.mjs";
+
 export const CORNERFILL_SURFACE_SCHEMA = "cornerfill-live-surface@2";
 
-const documentCounters = new WeakMap();
 const hiddenRoots = new WeakMap();
 const webkitSurfacePools = new WeakMap();
 const mozRegistrationCounts = new WeakMap();
@@ -9,9 +10,7 @@ const DEFAULT_MAX_WEBKIT_POOL_ENTRIES = 256;
 const DEFAULT_MAX_WEBKIT_POOL_PREFIXES = 16;
 
 function nextSurfaceId(document, prefix = "cornerfill") {
-  const next = (documentCounters.get(document) ?? 0) + 1;
-  documentCounters.set(document, next);
-  return `${prefix.replace(/[^a-z0-9_-]/giu, "-")}-${next}`;
+  return nextDocumentId(document, "surface", prefix);
 }
 
 function normalizedPrefix(prefix = "cornerfill") {

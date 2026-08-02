@@ -14,6 +14,8 @@ import {
   buildCornerGeometry,
 } from "./geometry.mjs";
 import { ImageCache } from "./images.mjs";
+import { nextDocumentId } from "./identity.mjs";
+import { CORNERFILL_ORACLE_QUALIFICATION, qualifyNativeCornerShape } from "./native.mjs";
 import {
   createPreparedOpaqueImageProgram,
   drawPreparedOpaqueImage,
@@ -61,9 +63,13 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
     supported: false,
     reason: "Repeating gradient functions, interpolation hints/spaces, and out-of-range or non-zero length stops are outside the supported gradient grammar.",
   }),
+  rasterRepeatOriginParity: Object.freeze({
+    supported: false,
+    reason: "Repeat/origin geometry is implemented, but native CSS and Canvas raster sampling differ; focused native parity remains UNQUALIFIED.",
+  }),
   backgroundBlendModes: Object.freeze({
     supported: false,
-    reason: "Background layers currently require normal blend mode and scroll attachment.",
+    reason: "General background blending is unsupported; only one explicitly opaque scroll-attached raster with multiply over an opaque rgb()/hex color is admitted.",
   }),
   outerEffects: Object.freeze({
     supported: false,
@@ -76,6 +82,10 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
   perSideBorderPaint: Object.freeze({
     supported: false,
     reason: "Borders require one solid color; per-side colors and non-solid styles need corner-region partitioning not provided by this slice.",
+  }),
+  borderImagePaint: Object.freeze({
+    supported: false,
+    reason: "Fallback mode cannot combine a native border-image with the shaped border pixels it owns.",
   }),
   authorImportantOwnership: Object.freeze({
     supported: false,
@@ -143,12 +153,13 @@ const COOPERATIVE_OWNERSHIP_PROPERTIES = Object.freeze([
   "outline-offset",
   "outline-style",
   "outline-width",
+  "--cornerfill-live-image",
 ]);
 
 const LIVE_IMAGE_PROPERTY = "--cornerfill-live-image";
 const OWNERSHIP_ATTRIBUTE = "data-cornerfill-owned";
 const OWNED_BORDER_ATTRIBUTE = "data-cornerfill-owned-border";
-const documentControllerCounters = new WeakMap();
+const OWNED_SURFACE_ATTRIBUTE = "data-cornerfill-owned-surface";
 const elementOwners = new WeakMap();
 
 class StaleEntryWorkError extends Error {
@@ -159,9 +170,7 @@ class StaleEntryWorkError extends Error {
 }
 
 function nextControllerId(document) {
-  const next = (documentControllerCounters.get(document) ?? 0) + 1;
-  documentControllerCounters.set(document, next);
-  return `cornerfill-controller-${next}`;
+  return nextDocumentId(document, "controller", "cornerfill-controller");
 }
 
 const CARRIER = Object.freeze({
@@ -174,8 +183,14 @@ const CARRIER = Object.freeze({
   backgroundRepeat: "--cornerfill-background-repeat",
   backgroundOrigin: "--cornerfill-background-origin",
   backgroundClip: "--cornerfill-background-clip",
+  backgroundBlendMode: "--cornerfill-background-blend-mode",
+  backgroundAttachment: "--cornerfill-background-attachment",
   imageRendering: "--cornerfill-image-rendering",
   borderColor: "--cornerfill-border-color",
+  borderTopColor: "--cornerfill-border-top-color",
+  borderRightColor: "--cornerfill-border-right-color",
+  borderBottomColor: "--cornerfill-border-bottom-color",
+  borderLeftColor: "--cornerfill-border-left-color",
   boxShadow: "--cornerfill-box-shadow",
   outlineWidth: "--cornerfill-outline-width",
   outlineStyle: "--cornerfill-outline-style",
@@ -219,6 +234,8 @@ const PAINT_CARRIERS = Object.freeze([
   CARRIER.backgroundRepeat,
   CARRIER.backgroundOrigin,
   CARRIER.backgroundClip,
+  CARRIER.backgroundBlendMode,
+  CARRIER.backgroundAttachment,
   CARRIER.imageRendering,
 ]);
 
@@ -341,7 +358,18 @@ function applyNativeShapeSource(element, source) {
 }
 
 function readCarrier(computed, name) {
-  return computed.getPropertyValue(name).trim();
+  const value = computed.getPropertyValue(name).trim();
+  return value === "__cornerfill_unset__" ? "" : value;
+}
+
+function readColorCarrier(computed, name) {
+  const value = readCarrier(computed, name);
+  return /^currentcolor$/iu.test(value) ? computed.color : value;
+}
+
+function readShadowCarrier(computed) {
+  return readCarrier(computed, CARRIER.boxShadow)
+    .replaceAll(/\bcurrentcolor\b/giu, computed.color);
 }
 
 function readCarrierMap(computed, carriers) {
@@ -351,6 +379,17 @@ function readCarrierMap(computed, carriers) {
     if (value) values[corner] = value;
   }
   return Object.freeze(values);
+}
+
+function readBorderColorCarriers(computed) {
+  const sides = [
+    CARRIER.borderTopColor,
+    CARRIER.borderRightColor,
+    CARRIER.borderBottomColor,
+    CARRIER.borderLeftColor,
+  ].map((property) => readColorCarrier(computed, property));
+  if (sides.some(Boolean)) return sides;
+  return readColorCarrier(computed, CARRIER.borderColor);
 }
 
 function flowFromComputed(computed) {
@@ -471,11 +510,18 @@ function hasPaintedPseudo(view, element, pseudo) {
   return computed.display !== "none" && !new Set(["", "none", "normal"]).has(computed.content);
 }
 
-function hasHostForeground(view, element) {
+function hasHostForeground(view, element, computed = view.getComputedStyle(element)) {
   const childContent = [...element.childNodes].some((node) => (
     node.nodeType === 1 || (node.nodeType === 3 && node.textContent.trim() !== "")
   ));
+  const shadowContent = [...(element.shadowRoot?.childNodes ?? [])].some((node) => (
+    node.nodeType === 1 || (node.nodeType === 3 && node.textContent.trim() !== "")
+  ));
+  const listMarker = computed.display === "list-item"
+    && (computed.listStyleType !== "none" || computed.listStyleImage !== "none");
   return childContent
+    || shadowContent
+    || listMarker
     || hasPaintedPseudo(view, element, "::before")
     || hasPaintedPseudo(view, element, "::after");
 }
@@ -494,8 +540,14 @@ function inspectFallbackHost(view, element, computed) {
   if (backdropFilter !== "none") {
     throw new TypeError(CORNERFILL_LIMITATIONS.backdropFilterClipping.reason);
   }
+  const borderImageSource = computed.borderImageSource
+    || computed.getPropertyValue("border-image-source")
+    || "none";
+  if (borderImageSource !== "none") {
+    throw new TypeError(CORNERFILL_LIMITATIONS.borderImagePaint.reason);
+  }
   const clipsOverflow = [computed.overflowX, computed.overflowY].some((value) => value !== "visible");
-  if (clipsOverflow && hasHostForeground(view, element)) {
+  if (clipsOverflow && hasHostForeground(view, element, computed)) {
     throw new TypeError(CORNERFILL_LIMITATIONS.descendantOverflowClipping.reason);
   }
   return Object.freeze({
@@ -507,6 +559,14 @@ function inspectFallbackHost(view, element, computed) {
     pseudoElements: "browser-owned-without-shaped-overflow-clip",
     fragmentCount,
   });
+}
+
+function assertOutlineHost(view, element, outline) {
+  if (outline && hasHostForeground(view, element)) {
+    throw new TypeError(
+      "A contained outline can be painted only on an empty, paint-owned host without foreground or pseudo-element content.",
+    );
+  }
 }
 
 function assertFallbackRequirements(requirements = {}) {
@@ -536,24 +596,19 @@ function backgroundBoxMetrics(computed) {
 
 function captureOwnershipState(element) {
   return Object.freeze({
-    liveImage: Object.freeze({
-      value: element.style.getPropertyValue(LIVE_IMAGE_PROPERTY),
-      priority: element.style.getPropertyPriority(LIVE_IMAGE_PROPERTY),
-    }),
     owner: element.getAttribute(OWNERSHIP_ATTRIBUTE),
     borderOwner: element.getAttribute(OWNED_BORDER_ATTRIBUTE),
+    surfaceOwner: element.getAttribute(OWNED_SURFACE_ATTRIBUTE),
   });
 }
 
 function restoreOwnershipState(element, snapshot) {
-  element.style.removeProperty(LIVE_IMAGE_PROPERTY);
-  if (snapshot.liveImage.value) {
-    element.style.setProperty(LIVE_IMAGE_PROPERTY, snapshot.liveImage.value, snapshot.liveImage.priority);
-  }
   if (snapshot.owner === null) element.removeAttribute(OWNERSHIP_ATTRIBUTE);
   else element.setAttribute(OWNERSHIP_ATTRIBUTE, snapshot.owner);
   if (snapshot.borderOwner === null) element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
   else element.setAttribute(OWNED_BORDER_ATTRIBUTE, snapshot.borderOwner);
+  if (snapshot.surfaceOwner === null) element.removeAttribute(OWNED_SURFACE_ATTRIBUTE);
+  else element.setAttribute(OWNED_SURFACE_ATTRIBUTE, snapshot.surfaceOwner);
 }
 
 function assertCooperativeOwnership(element) {
@@ -603,17 +658,23 @@ function captureBorder(computed, colorOverride = "") {
   if (styles.some((style, index) => widths[index] > 0 && style !== "solid")) {
     throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
   }
-  const colors = [
+  const computedColors = [
     computed.borderTopColor,
     computed.borderRightColor,
     computed.borderBottomColor,
     computed.borderLeftColor,
   ];
+  const colors = Array.isArray(colorOverride)
+    ? colorOverride.map((color, index) => color || computedColors[index])
+    : computedColors;
   const paintedColors = colors.filter((_, index) => widths[index] > 0);
-  if (!colorOverride && !paintedColors.every((color) => color === paintedColors[0])) {
+  if (!paintedColors.every((color) => color === paintedColors[0])) {
     throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
   }
-  return normalizeBorder({ widths, color: colorOverride || paintedColors[0] });
+  return normalizeBorder({
+    widths,
+    color: typeof colorOverride === "string" && colorOverride ? colorOverride : paintedColors[0],
+  });
 }
 
 function borderSides(input, label) {
@@ -754,6 +815,7 @@ function captureOutline(computed, overrides = {}) {
 }
 
 function captureInitialSources(element, config, computed) {
+  const dynamicCarriers = config.dynamicCarriers === true;
   const radiusCapture = captureRadiusCarriers(computed);
   const computedShape = computed.getPropertyValue("corner-shape").trim();
   const shapeAttribute = element.getAttribute("data-cornerfill-shape");
@@ -794,36 +856,38 @@ function captureInitialSources(element, config, computed) {
     backgroundClip: computed.backgroundClip,
     backgroundBlendMode: computed.backgroundBlendMode,
     backgroundAttachment: computed.backgroundAttachment,
+    imageRendering: computed.imageRendering,
   });
   const carrierPaint = PAINT_CARRIERS.some((name) => readCarrier(computed, name));
   const capturedPaintSource = config.paint ?? captureComputedPaint(initialBackground, carrierPaint ? {
-    color: readCarrier(computed, CARRIER.backgroundColor),
+    color: readColorCarrier(computed, CARRIER.backgroundColor),
     image: readCarrier(computed, CARRIER.backgroundImage),
     size: readCarrier(computed, CARRIER.backgroundSize),
     position: readCarrier(computed, CARRIER.backgroundPosition),
     repeat: readCarrier(computed, CARRIER.backgroundRepeat),
     origin: readCarrier(computed, CARRIER.backgroundOrigin),
     clip: readCarrier(computed, CARRIER.backgroundClip),
+    blendMode: readCarrier(computed, CARRIER.backgroundBlendMode),
+    attachment: readCarrier(computed, CARRIER.backgroundAttachment),
     smoothing: readCarrier(computed, CARRIER.imageRendering),
   } : {});
   const paintSource = config.rasterIsOpaque === true && capturedPaintSource.kind === "image"
     ? Object.freeze({ ...capturedPaintSource, opaque: true })
     : capturedPaintSource;
-  const borderColorCarrier = readCarrier(computed, CARRIER.borderColor);
+  const borderColorCarrier = readBorderColorCarriers(computed);
   const borderSource = config.border === undefined
     ? captureBorder(computed, borderColorCarrier)
     : normalizeBorder(config.border);
-  const shadowCarrier = readCarrier(computed, CARRIER.boxShadow);
+  const shadowCarrier = readShadowCarrier(computed);
   const shadowSource = config.shadow === undefined
     ? normalizeInsetShadow(shadowCarrier || computed.boxShadow)
     : normalizeInsetShadow(config.shadow);
   const outlineCarrierValues = Object.freeze({
     width: readCarrier(computed, CARRIER.outlineWidth),
     style: readCarrier(computed, CARRIER.outlineStyle),
-    color: readCarrier(computed, CARRIER.outlineColor),
+    color: readColorCarrier(computed, CARRIER.outlineColor),
     offset: readCarrier(computed, CARRIER.outlineOffset),
   });
-  const outlineCarrier = Object.values(outlineCarrierValues).every(Boolean);
   const outlineSource = config.outline === undefined
     ? captureOutline(computed, outlineCarrierValues)
     : normalizeContainedOutline(config.outline);
@@ -834,19 +898,28 @@ function captureInitialSources(element, config, computed) {
     borderSource,
     shadowSource,
     outlineSource,
-    radiusCarrierBaseline: radiusCapture?.baseline ?? null,
+    radiusCarrierBaseline: dynamicCarriers
+      ? Object.freeze({
+        "top-left": "0px",
+        "top-right": "0px",
+        "bottom-right": "0px",
+        "bottom-left": "0px",
+      })
+      : radiusCapture?.baseline ?? null,
     shapeCarrierBaseline: shapeCapture.baseline,
     initialBackground,
+    rasterIsOpaque: config.rasterIsOpaque === true,
+    dynamicCarriers,
     dynamic: Object.freeze({
-      radius: config.borderRadius === undefined && radiusCapture?.present === true,
-      shape: config.cornerShape === undefined && shapeCapture.present === true,
-      paint: config.paint === undefined && carrierPaint,
+      radius: config.borderRadius === undefined,
+      shape: config.cornerShape === undefined && (dynamicCarriers || shapeCapture.present === true),
+      paint: config.paint === undefined,
       paintPosition: config.paint === undefined
         && config.observeBackgroundPosition !== false
         && paintSource.kind === "image",
       border: config.border === undefined,
-      shadow: config.shadow === undefined && Boolean(shadowCarrier),
-      outline: config.outline === undefined && outlineCarrier,
+      shadow: config.shadow === undefined,
+      outline: config.outline === undefined,
     }),
   });
 }
@@ -856,7 +929,15 @@ function currentSources(entry, computed) {
   let radiusSource = state.borderRadius ?? initial.radiusSource;
   if (state.borderRadius === undefined && initial.dynamic.radius) {
     radiusSource = captureRadiusCarriers(computed, initial.radiusCarrierBaseline)?.source
-      ?? initial.radiusSource;
+      ?? Object.freeze({
+        kind: "longhands",
+        values: Object.freeze([
+          computed.borderTopLeftRadius,
+          computed.borderTopRightRadius,
+          computed.borderBottomRightRadius,
+          computed.borderBottomLeftRadius,
+        ]),
+      });
   }
   let shapeSource = state.cornerShape ?? initial.shapeSource;
   if (state.cornerShape === undefined && initial.dynamic.shape) {
@@ -865,14 +946,27 @@ function currentSources(entry, computed) {
   }
   let paintSource = state.paint ?? initial.paintSource;
   if (state.paint === undefined && initial.dynamic.paint) {
-    paintSource = captureComputedPaint(initial.initialBackground, {
-      color: readCarrier(computed, CARRIER.backgroundColor),
+    const paintDefaults = initial.dynamicCarriers ? {
+      backgroundColor: "transparent",
+      backgroundImage: "none",
+      backgroundSize: "auto",
+      backgroundPosition: "0% 0%",
+      backgroundRepeat: "repeat",
+      backgroundOrigin: "padding-box",
+      backgroundClip: "border-box",
+      backgroundBlendMode: "normal",
+      backgroundAttachment: "scroll",
+    } : computed;
+    paintSource = captureComputedPaint(paintDefaults, {
+      color: readColorCarrier(computed, CARRIER.backgroundColor),
       image: readCarrier(computed, CARRIER.backgroundImage),
       size: readCarrier(computed, CARRIER.backgroundSize),
       position: readCarrier(computed, CARRIER.backgroundPosition),
       repeat: readCarrier(computed, CARRIER.backgroundRepeat),
       origin: readCarrier(computed, CARRIER.backgroundOrigin),
       clip: readCarrier(computed, CARRIER.backgroundClip),
+      blendMode: readCarrier(computed, CARRIER.backgroundBlendMode),
+      attachment: readCarrier(computed, CARRIER.backgroundAttachment),
       smoothing: readCarrier(computed, CARRIER.imageRendering),
     });
   } else if (state.paint === undefined && initial.dynamic.paintPosition
@@ -882,22 +976,37 @@ function currentSources(entry, computed) {
       backgroundPositionSpec: entry.dynamicBackgroundPositionSpec,
     });
   }
+  if (initial.rasterIsOpaque && paintSource.kind === "image" && paintSource.opaque !== true) {
+    paintSource = Object.freeze({ ...paintSource, opaque: true });
+  }
   let borderSource = state.border ?? initial.borderSource;
-  if (state.border === undefined && initial.dynamic.border && initial.borderSource) {
-    borderSource = captureBorder(computed, readCarrier(computed, CARRIER.borderColor) || initial.borderSource.color);
+  if (state.border === undefined && initial.dynamic.border) {
+    let colorCarrier = readBorderColorCarriers(computed);
+    if (initial.dynamicCarriers && Array.isArray(colorCarrier)) {
+      colorCarrier = colorCarrier.map((color) => color || computed.color);
+    }
+    borderSource = captureBorder(
+      computed,
+      colorCarrier
+        || (initial.dynamicCarriers ? computed.color : initial.borderSource?.color),
+    );
   }
   let shadowSource = state.shadow !== undefined ? state.shadow : initial.shadowSource;
   if (state.shadow === undefined && initial.dynamic.shadow) {
-    shadowSource = normalizeInsetShadow(readCarrier(computed, CARRIER.boxShadow) || "none");
+    shadowSource = normalizeInsetShadow(readShadowCarrier(computed) || computed.boxShadow);
   }
   let outlineSource = state.outline !== undefined ? state.outline : initial.outlineSource;
   if (state.outline === undefined && initial.dynamic.outline) {
-    outlineSource = captureOutline(computed, {
+    const outlineCarrier = {
       width: readCarrier(computed, CARRIER.outlineWidth),
       style: readCarrier(computed, CARRIER.outlineStyle),
-      color: readCarrier(computed, CARRIER.outlineColor),
+      color: readColorCarrier(computed, CARRIER.outlineColor),
       offset: readCarrier(computed, CARRIER.outlineOffset),
-    });
+    };
+    outlineSource = captureOutline(
+      computed,
+      Object.values(outlineCarrier).some(Boolean) ? outlineCarrier : {},
+    );
   }
   return Object.freeze({
     radiusSource,
@@ -969,28 +1078,10 @@ function releaseLayerImageLeases(entry, keep = null) {
   }
 }
 
-function nativeQualification(document) {
-  const view = document.defaultView;
-  const syntax = Boolean(view.CSS?.supports?.("corner-shape", "bevel"));
-  const match = /(?:Chrome|Chromium)\/(\d+)/u.exec(view.navigator?.userAgent ?? "");
-  const chromiumVersion = match ? Number(match[1]) : null;
-  const qualified = syntax && chromiumVersion !== null && chromiumVersion >= 139;
-  return Object.freeze({
-    syntax,
-    qualified,
-    chromiumVersion,
-    reason: qualified
-      ? "Shipped Chromium corner-shape implementation is available."
-      : syntax
-        ? "Syntax is recognized, but this engine is not in the conservative native qualification set."
-        : "corner-shape syntax is not recognized.",
-  });
-}
-
-export function detectCornerfillCapabilities(document = globalThis.document) {
+export function detectCornerfillCapabilities(document = globalThis.document, options = {}) {
   if (!document?.defaultView) throw new TypeError("a browser document is required");
   const surfaces = detectSurfaceCapabilities(document);
-  const native = nativeQualification(document);
+  const native = options.nativeQualification ?? qualifyNativeCornerShape(document);
   return Object.freeze({
     schema: "cornerfill-capabilities@2",
     native,
@@ -1002,6 +1093,7 @@ export function detectCornerfillCapabilities(document = globalThis.document) {
       rasterRepeatModes: true,
       rasterSizeAndPosition: true,
       backgroundOriginAndClip: true,
+      oneOpaqueRasterOpaqueColorMultiply: true,
       normalizedLinearGradient: true,
       cssLinearGradient: true,
       cssRadialGradient: true,
@@ -1025,6 +1117,11 @@ export function detectCornerfillCapabilities(document = globalThis.document) {
       fragmentedBoxes: false,
       backdropFilterClipping: false,
     }),
+    implementation: Object.freeze({
+      status: "IMPLEMENTED",
+      scope: "reported paint paths and admitted fallback semantics",
+    }),
+    oracleQualification: CORNERFILL_ORACLE_QUALIFICATION,
     limitations: CORNERFILL_LIMITATIONS,
   });
 }
@@ -1056,29 +1153,148 @@ function ownershipStylesheetText(id) {
     + `}\n`;
 }
 
-function applyOwnedStyles(entry) {
+function applyOwnedStyles(entry, verify = true) {
   const { controller, element, surface } = entry;
   if (!surface) return;
   controller._ensureOwnershipStylesheet(entry.ownershipRoot);
-  element.style.setProperty(LIVE_IMAGE_PROPERTY, surface.cssImage, "important");
+  controller._setOwnershipSurface(entry);
   element.setAttribute(OWNERSHIP_ATTRIBUTE, controller.ownershipId);
   if (entry.border) element.setAttribute(OWNED_BORDER_ATTRIBUTE, controller.ownershipId);
   else element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
-  controller._assertOwnedStylesApplied(entry);
+  if (verify) controller._assertOwnedStylesApplied(entry);
+}
+
+function withAuthoredComputedStyle(view, entry, callback) {
+  const { element, controller } = entry;
+  const ownership = element.getAttribute(OWNERSHIP_ATTRIBUTE);
+  const ownedBorder = element.getAttribute(OWNED_BORDER_ATTRIBUTE);
+  const releaseOwnership = ownership === controller.ownershipId;
+  if (!releaseOwnership) return callback(view.getComputedStyle(element));
+  element.removeAttribute(OWNERSHIP_ATTRIBUTE);
+  element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
+  try {
+    return callback(view.getComputedStyle(element));
+  } finally {
+    element.setAttribute(OWNERSHIP_ATTRIBUTE, ownership);
+    if (ownedBorder !== null) element.setAttribute(OWNED_BORDER_ATTRIBUTE, ownedBorder);
+  }
 }
 
 function surfaceTokenIsApplied(entry) {
   return Boolean(entry.surface)
     && entry.controller._ownershipStylesheetIsConnected(entry.ownershipRoot)
     && entry.element.getAttribute(OWNERSHIP_ATTRIBUTE) === entry.controller.ownershipId
-    && entry.element.style.getPropertyValue(LIVE_IMAGE_PROPERTY) === entry.surface.cssImage
-    && entry.element.style.getPropertyPriority(LIVE_IMAGE_PROPERTY) === "important";
+    && entry.element.getAttribute(OWNED_SURFACE_ATTRIBUTE) === entry.ownershipToken
+    && entry.controller._ownershipSurfaceIsCurrent(entry);
 }
 
 function inlineCarrierSignature(element) {
   return ALL_CARRIERS
     .map((property) => `${property}:${element.style.getPropertyValue(property)}`)
     .join("|");
+}
+
+function visibilityAffectingInlineSignature(value) {
+  return String(value ?? "")
+    .split(";")
+    .map((declaration) => declaration.trim())
+    .filter((declaration) => {
+      const separator = declaration.indexOf(":");
+      if (separator < 0) return false;
+      const property = declaration.slice(0, separator).trim().toLowerCase();
+      return property === "visibility" || property === "all"
+        || (property.startsWith("--") && property !== LIVE_IMAGE_PROPERTY);
+    })
+    .join(";");
+}
+
+function styleMutationMayAffectVisibility(record) {
+  return visibilityAffectingInlineSignature(record.oldValue)
+    !== visibilityAffectingInlineSignature(record.target?.getAttribute?.("style"));
+}
+
+function paintAffectingInlineSignature(value, ignorePositionAxes = false) {
+  return String(value ?? "")
+    .split(";")
+    .map((declaration) => declaration.trim())
+    .filter((declaration) => {
+      const separator = declaration.indexOf(":");
+      if (separator < 0) return false;
+      const property = declaration.slice(0, separator).trim().toLowerCase();
+      if (property === LIVE_IMAGE_PROPERTY
+        || property === "visibility"
+        || (ignorePositionAxes && property === "background-position-x")
+        || (ignorePositionAxes && property === "background-position-y")
+        || property === "opacity"
+        || property === "filter"
+        || property === "will-change"
+        || property === "translate"
+        || property === "rotate"
+        || property === "scale"
+        || property === "perspective"
+        || property === "perspective-origin") return false;
+      return property !== "transform" && !property.startsWith("transform-")
+        && property !== "-webkit-transform" && !property.startsWith("-webkit-transform-");
+    })
+    .join(";");
+}
+
+function styleMutationMayAffectPaint(record, ignorePositionAxes = false) {
+  return paintAffectingInlineSignature(record.oldValue, ignorePositionAxes)
+    !== paintAffectingInlineSignature(record.target?.getAttribute?.("style"), ignorePositionAxes);
+}
+
+function nodeContainsStylesheetSource(node) {
+  return node?.nodeType === 1 && (
+    /^(?:style|link)$/u.test(node.localName)
+    || Boolean(node.querySelector?.("style,link[rel~=stylesheet]"))
+  );
+}
+
+function mutationStylesheetRoot(record) {
+  if (record.type === "characterData") {
+    const style = record.target.parentElement;
+    return style?.localName === "style" ? style.getRootNode() : null;
+  }
+  if (record.type === "attributes") {
+    return /^(?:style|link)$/u.test(record.target.localName) ? record.target.getRootNode() : null;
+  }
+  if (record.target.localName === "style"
+    || [...record.addedNodes, ...record.removedNodes].some(nodeContainsStylesheetSource)) {
+    return record.target.getRootNode();
+  }
+  return null;
+}
+
+function positionAffectingInlineSignature(value) {
+  return String(value ?? "")
+    .split(";")
+    .map((declaration) => declaration.trim())
+    .filter((declaration) => {
+      const separator = declaration.indexOf(":");
+      if (separator < 0) return false;
+      const property = declaration.slice(0, separator).trim().toLowerCase();
+      return property === "background-position-x" || property === "background-position-y";
+    })
+    .join(";");
+}
+
+function styleMutationMayAffectPosition(record) {
+  return positionAffectingInlineSignature(record.oldValue)
+    !== positionAffectingInlineSignature(record.target?.getAttribute?.("style"));
+}
+
+function shadowIncludingContains(ancestor, element) {
+  let current = element;
+  while (current) {
+    if (current === ancestor) return true;
+    if (current.parentNode) {
+      current = current.parentNode;
+      continue;
+    }
+    current = current.getRootNode?.()?.host ?? null;
+  }
+  return false;
 }
 
 function positionAxisSpec(axis, value) {
@@ -1183,8 +1399,11 @@ function entryExplanation(entry) {
     mode: entry.mode,
     backend: entry.native ? "native-corner-shape" : surface?.backend ?? "pending",
     paintOwnership: entry.native ? "browser-native" : "host-background-border-and-contained-effects",
+    implementationStatus: entry.native ? "NATIVE" : "IMPLEMENTED",
+    oracleQualification: CORNERFILL_ORACLE_QUALIFICATION,
     ownershipVerified: entry.native ? true : entry.ownershipVerified === true,
     transformOwnedByCornerfill: false,
+    visible: entry.native ? null : entry.visible,
     limitations: entry.native ? Object.freeze({}) : CORNERFILL_LIMITATIONS,
     lastInvalidationReason: entry.lastInvalidationReason,
     error: entry.error ? `${entry.error.name}: ${entry.error.message}` : null,
@@ -1238,17 +1457,28 @@ class CornerfillController {
       maxWebkitPoolEntries: options.maxWebkitPoolEntries ?? 256,
       maxWebkitPoolPrefixes: options.maxWebkitPoolPrefixes ?? 16,
       idPrefix: options.idPrefix ?? "cornerfill",
+      nonce: options.nonce ?? null,
     });
-    this.capabilities = detectCornerfillCapabilities(this.document);
+    this.capabilities = detectCornerfillCapabilities(this.document, {
+      nativeQualification: options.nativeQualification,
+    });
     this.ownershipId = nextControllerId(this.document);
     this.ownershipStylesheets = new Map();
+    this.ownershipSurfaces = new Map();
+    this.ownershipSurfaceRules = new Map();
+    this.ownershipFreeRules = new Map();
+    this.nextOwnershipToken = 0;
     this.ownershipRootCounts = new Map();
     this.rootObservers = new Map();
+    this.attachmentLifecycleObservers = new Map();
+    this.attachmentLifecycleQueued = false;
     this.entries = new Set();
     this.entryByElement = new WeakMap();
     this.geometryCache = new Map();
     this.dirty = new Set();
     this.preparedDirty = new Set();
+    this.preparedOwnershipVerificationEntries = new Set();
+    this.preparedOwnershipVerification = null;
     this.preparedFlushQueued = false;
     this.activeAnimations = new Map();
     this.flushHandle = null;
@@ -1304,18 +1534,114 @@ class CornerfillController {
     return Boolean(this.ownershipStylesheets.get(root)?.isConnected);
   }
 
+  _setOwnershipSurface(entry) {
+    entry.ownershipToken ??= `${this.ownershipId}-surface-${++this.nextOwnershipToken}`;
+    const previous = this.ownershipSurfaces.get(entry);
+    const next = Object.freeze({ root: entry.ownershipRoot, image: entry.surface.cssImage });
+    if (previous?.root === next.root && previous.image === next.image
+      && entry.element.getAttribute(OWNED_SURFACE_ATTRIBUTE) === entry.ownershipToken
+      && this._ownershipSurfaceRuleIsCurrent(entry, next)) return;
+    if (previous && previous.root !== next.root) this._releaseOwnershipSurfaceRule(entry);
+    this.ownershipSurfaces.set(entry, next);
+    entry.element.setAttribute(OWNED_SURFACE_ATTRIBUTE, entry.ownershipToken);
+    this._ensureOwnershipStylesheet(next.root);
+    this._assignOwnershipSurfaceRule(entry, next);
+  }
+
+  _removeOwnershipSurface(entry) {
+    this._releaseOwnershipSurfaceRule(entry);
+    this.ownershipSurfaces.delete(entry);
+  }
+
+  _ownershipSurfaceSelector(entry) {
+    return `[${OWNERSHIP_ATTRIBUTE}="${this.ownershipId}"]`
+      + `[${OWNED_SURFACE_ATTRIBUTE}="${entry.ownershipToken}"]`;
+  }
+
+  _ownershipSurfaceRuleIsCurrent(entry, surface = this.ownershipSurfaces.get(entry)) {
+    const record = this.ownershipSurfaceRules.get(entry);
+    const stylesheet = this.ownershipStylesheets.get(surface?.root);
+    return Boolean(record && surface && stylesheet?.isConnected
+      && record.root === surface.root
+      && record.rule.parentStyleSheet === stylesheet.sheet
+      && record.rule.selectorText === this._ownershipSurfaceSelector(entry)
+      && record.rule.style.getPropertyValue(LIVE_IMAGE_PROPERTY).trim() === surface.image
+      && record.rule.style.getPropertyPriority(LIVE_IMAGE_PROPERTY) === "important");
+  }
+
+  _assignOwnershipSurfaceRule(entry, surface) {
+    if (this._ownershipSurfaceRuleIsCurrent(entry, surface)) return;
+    this._releaseOwnershipSurfaceRule(entry);
+    const style = this.ownershipStylesheets.get(surface.root);
+    const sheet = style?.sheet;
+    if (!style?.isConnected || !sheet) throw new Error("Cornerfill ownership stylesheet is unavailable");
+    let free = this.ownershipFreeRules.get(surface.root);
+    let rule = free?.pop() ?? null;
+    if (free?.length === 0) this.ownershipFreeRules.delete(surface.root);
+    const selector = this._ownershipSurfaceSelector(entry);
+    if (!rule) {
+      const index = sheet.insertRule(`${selector}{${LIVE_IMAGE_PROPERTY}:${surface.image}!important}`);
+      rule = sheet.cssRules[index];
+    } else {
+      rule.selectorText = selector;
+      rule.style.setProperty(LIVE_IMAGE_PROPERTY, surface.image, "important");
+    }
+    this.ownershipSurfaceRules.set(entry, Object.freeze({ root: surface.root, rule }));
+  }
+
+  _releaseOwnershipSurfaceRule(entry) {
+    const record = this.ownershipSurfaceRules.get(entry);
+    if (!record) return;
+    this.ownershipSurfaceRules.delete(entry);
+    const style = this.ownershipStylesheets.get(record.root);
+    if (!style?.isConnected || record.rule.parentStyleSheet !== style.sheet) return;
+    record.rule.selectorText = ":not(*)";
+    record.rule.style.removeProperty(LIVE_IMAGE_PROPERTY);
+    let free = this.ownershipFreeRules.get(record.root);
+    if (!free) {
+      free = [];
+      this.ownershipFreeRules.set(record.root, free);
+    }
+    free.push(record.rule);
+  }
+
+  _ownershipSurfaceIsCurrent(entry) {
+    const record = this.ownershipSurfaces.get(entry);
+    return Boolean(record)
+      && record.root === entry.ownershipRoot
+      && record.image === entry.surface?.cssImage
+      && this._ownershipSurfaceRuleIsCurrent(entry, record);
+  }
+
+  _repairEntryOwnership(entry) {
+    if (entry.native || entry.disposed || !entry.surface || surfaceTokenIsApplied(entry)) return false;
+    applyOwnedStyles(entry);
+    this.counters.ownershipRepairs += 1;
+    entry.counters.ownershipRepairs += 1;
+    entry.lastInvalidationReason = "ownership-repair-without-repaint";
+    return true;
+  }
+
   _ensureOwnershipStylesheet(root) {
     if (this.destroyed) throw new Error("Cornerfill controller is destroyed");
     const existing = this.ownershipStylesheets.get(root);
     if (existing?.isConnected) return existing;
     existing?.remove();
+    this.ownershipFreeRules.delete(root);
+    for (const [entry, record] of this.ownershipSurfaceRules) {
+      if (record.root === root) this.ownershipSurfaceRules.delete(entry);
+    }
     const style = this.document.createElement("style");
     style.setAttribute("data-cornerfill-ownership-styles", this.ownershipId);
+    if (this.options.nonce) style.setAttribute("nonce", this.options.nonce);
     style.textContent = ownershipStylesheetText(this.ownershipId);
     if (root === this.document) (this.document.head ?? this.document.documentElement).append(style);
     else if (root && typeof root.append === "function") root.append(style);
     else throw new TypeError("Cornerfill ownership requires a Document or ShadowRoot");
     this.ownershipStylesheets.set(root, style);
+    for (const [entry, surface] of this.ownershipSurfaces) {
+      if (!entry.disposed && surface.root === root) this._assignOwnershipSurfaceRule(entry, surface);
+    }
     return style;
   }
 
@@ -1358,6 +1684,34 @@ class CornerfillController {
     entry.ownershipLastVerified = this.view.performance?.now?.() ?? Date.now();
   }
 
+  _verifyPreparedOwnership(entry) {
+    this.preparedOwnershipVerificationEntries.add(entry);
+    if (!this.preparedOwnershipVerification) {
+      this.preparedOwnershipVerification = new Promise((resolve) => {
+        this.view.setTimeout(() => {
+          const failures = new Map();
+          const entries = [...this.preparedOwnershipVerificationEntries];
+          this.preparedOwnershipVerificationEntries.clear();
+          for (const candidate of entries) {
+            if (!this._entryIsCurrent(candidate) || !candidate.surface) continue;
+            try {
+              this._assertOwnedStylesApplied(candidate);
+            } catch (error) {
+              failures.set(candidate, error);
+            }
+          }
+          resolve(failures);
+        }, 0);
+      }).finally(() => {
+        this.preparedOwnershipVerification = null;
+      });
+    }
+    return this.preparedOwnershipVerification.then((failures) => {
+      const failure = failures.get(entry);
+      if (failure) throw failure;
+    });
+  }
+
   _retainOwnershipRoot(root, observe) {
     this.ownershipRootCounts.set(root, (this.ownershipRootCounts.get(root) ?? 0) + 1);
     if (observe) this._installObservers(root);
@@ -1370,8 +1724,16 @@ class CornerfillController {
       return;
     }
     this.ownershipRootCounts.delete(root);
-    this.ownershipStylesheets.get(root)?.remove();
-    this.ownershipStylesheets.delete(root);
+    // Keep the document-scoped rule warm for selector-driven detach/reattach.
+    // Shadow-root rules are released because their hosts can disappear.
+    if (root !== this.document) {
+      this.ownershipStylesheets.get(root)?.remove();
+      this.ownershipStylesheets.delete(root);
+      this.ownershipFreeRules.delete(root);
+      for (const [entry, record] of this.ownershipSurfaceRules) {
+        if (record.root === root) this.ownershipSurfaceRules.delete(entry);
+      }
+    }
     const observer = this.rootObservers.get(root);
     observer?.disconnect();
     this.rootObservers.delete(root);
@@ -1381,6 +1743,49 @@ class CornerfillController {
     }
     for (const event of ["animationend", "animationcancel", "transitionend", "transitioncancel"]) {
       eventRoot?.removeEventListener?.(event, this._onAnimationEnd, true);
+    }
+    this._updateAttachmentLifecycleObservers();
+  }
+
+  _updateAttachmentLifecycleObservers() {
+    if (!this.options.observe || !this.view.MutationObserver || this.destroyed) {
+      for (const observer of this.attachmentLifecycleObservers.values()) observer.disconnect();
+      this.attachmentLifecycleObservers.clear();
+      return;
+    }
+    const desiredRoots = new Set();
+    for (const [ownershipRoot, observer] of this.rootObservers) {
+      if (!observer || ownershipRoot === this.document) continue;
+      let containingRoot = ownershipRoot.host?.getRootNode?.() ?? null;
+      while (containingRoot) {
+        const containingDocument = containingRoot === this.document
+          ? this.document
+          : containingRoot.ownerDocument;
+        if (containingDocument !== this.document
+          || (containingRoot !== this.document && !containingRoot.host)) break;
+        if (!this.rootObservers.has(containingRoot)) desiredRoots.add(containingRoot);
+        if (containingRoot === this.document) break;
+        containingRoot = containingRoot.host?.getRootNode?.() ?? null;
+      }
+    }
+    for (const [root, observer] of this.attachmentLifecycleObservers) {
+      if (desiredRoots.has(root)) continue;
+      observer.disconnect();
+      this.attachmentLifecycleObservers.delete(root);
+    }
+    for (const root of desiredRoots) {
+      if (this.attachmentLifecycleObservers.has(root)) continue;
+      const target = root === this.document ? this.document.documentElement : root;
+      if (!target) continue;
+      const observer = new this.view.MutationObserver(this._onMutation);
+      observer.observe(target, {
+        attributes: true,
+        attributeFilter: ["class", "style"],
+        attributeOldValue: true,
+        childList: true,
+        subtree: true,
+      });
+      this.attachmentLifecycleObservers.set(root, observer);
     }
   }
 
@@ -1398,13 +1803,17 @@ class CornerfillController {
           "data-cornerfill-shape",
           OWNERSHIP_ATTRIBUTE,
           OWNED_BORDER_ATTRIBUTE,
+          OWNED_SURFACE_ATTRIBUTE,
         ],
+        attributeOldValue: true,
         childList: true,
+        characterData: true,
         subtree: true,
       });
       this.rootObservers.set(root, mutationObserver);
     }
     if (!this.rootObservers.has(root)) this.rootObservers.set(root, null);
+    this._updateAttachmentLifecycleObservers();
     const eventRoot = root === this.document ? this.document : root;
     for (const event of ["animationstart", "transitionrun"]) {
       eventRoot.addEventListener(event, this._onAnimationStart, true);
@@ -1425,24 +1834,69 @@ class CornerfillController {
 
   _onMutation(records) {
     let childListChanged = false;
+    const stylesheetRoots = new Set();
     const styleEntries = new Set();
+    const visibilityStyleEntries = new Set();
+    const paintStyleEntries = new Set();
+    const visibilityAncestors = new Set();
+    const selectorAncestors = new Set();
+    const semanticEntries = new Set();
     for (const record of records) {
-      if (record.type === "childList") childListChanged = true;
-      else {
+      const stylesheetRoot = mutationStylesheetRoot(record);
+      if (stylesheetRoot) stylesheetRoots.add(stylesheetRoot);
+      if (record.type === "childList" || record.type === "characterData") {
+        if (record.type === "childList") childListChanged = true;
+        const target = record.type === "characterData" ? record.target.parentNode : record.target;
+        const entry = this.entryByElement.get(target);
+        if (entry && !entry.native && !entry.prepared && !entry.disposed) semanticEntries.add(entry);
+      } else {
+        const visibilityInputChanged = record.attributeName === "class"
+          || (record.attributeName === "style" && styleMutationMayAffectVisibility(record));
+        if (visibilityInputChanged) {
+          visibilityAncestors.add(record.target);
+        }
+        if (record.attributeName === "class" || record.attributeName === "style") {
+          selectorAncestors.add(record.target);
+        }
         const entry = this.entryByElement.get(record.target);
         if (!entry || entry.native || entry.prepared || entry.disposed) continue;
         if (record.attributeName !== "style") {
           if ((record.attributeName === OWNERSHIP_ATTRIBUTE
-            || record.attributeName === OWNED_BORDER_ATTRIBUTE)
+            || record.attributeName === OWNED_BORDER_ATTRIBUTE
+            || record.attributeName === OWNED_SURFACE_ATTRIBUTE)
             && surfaceTokenIsApplied(entry)) {
             this.counters.ignoredStyleMutations += 1;
             entry.counters.ignoredStyleMutations += 1;
             continue;
           }
+          if (record.attributeName === "class") this._updateEntryStyleVisibility(entry);
           this._markDirty(entry, "style-selector-input", true);
           continue;
         }
+        const paintInputChanged = styleMutationMayAffectPaint(record, entry.watchPosition);
+        const positionInputChanged = styleMutationMayAffectPosition(record);
+        if (!visibilityInputChanged && !paintInputChanged && !positionInputChanged) {
+          if (entry.initialized && !surfaceTokenIsApplied(entry)) {
+            styleEntries.add(entry);
+            continue;
+          }
+          this.counters.ignoredStyleMutations += 1;
+          entry.counters.ignoredStyleMutations += 1;
+          continue;
+        }
+        if (visibilityInputChanged) visibilityStyleEntries.add(entry);
+        if (paintInputChanged) paintStyleEntries.add(entry);
         styleEntries.add(entry);
+      }
+    }
+    for (const entry of semanticEntries) {
+      this._markDirty(entry, "host-content-semantics", true);
+    }
+    if (stylesheetRoots.size > 0) {
+      for (const entry of this.entries) {
+        if (entry.native || entry.prepared || entry.disposed
+          || !stylesheetRoots.has(entry.ownershipRoot)) continue;
+        this._markDirty(entry, "stylesheet-source", true);
       }
     }
     for (const entry of styleEntries) {
@@ -1459,41 +1913,129 @@ class CornerfillController {
         this.counters.dynamicPaintUpdates += 1;
         entry.counters.dynamicPaintUpdates += 1;
       }
-      let visibilityChanged = false;
-      let nextVisible = entry.visible;
-      if (entry.watchVisibility) {
-        const nextStyleVisible = entry.element.style.visibility !== "hidden";
-        nextVisible = entry.requestedVisible && nextStyleVisible;
-        visibilityChanged = nextVisible !== entry.visible;
-        entry.styleVisible = nextStyleVisible;
-        if (visibilityChanged) {
-          entry.visible = nextVisible;
-          if (nextVisible) entry.needsPaint = true;
-          this.counters.visibilityUpdates += 1;
-          entry.counters.visibilityUpdates += 1;
-        }
-      }
+      const visibilityChanged = entry.watchVisibility && visibilityStyleEntries.has(entry)
+        ? this._updateEntryStyleVisibility(entry)
+        : false;
+      const paintInputChanged = paintStyleEntries.has(entry);
+      const nextVisible = entry.visible;
       const ownershipDamaged = entry.initialized && !surfaceTokenIsApplied(entry);
       if (positionChanged && !entry.visible) entry.needsPaint = true;
-      if (carrierChanged || ownershipDamaged || (positionChanged && entry.visible)
+      if (carrierChanged || ownershipDamaged || paintInputChanged || (positionChanged && entry.visible)
         || (visibilityChanged && nextVisible)) {
         this._markDirty(
           entry,
           positionChanged ? "background-position" : visibilityChanged ? "visibility" : "style",
-          carrierChanged || ownershipDamaged,
+          carrierChanged || ownershipDamaged || paintInputChanged,
         );
       } else {
         this.counters.ignoredStyleMutations += 1;
         entry.counters.ignoredStyleMutations += 1;
       }
     }
-    if (childListChanged) {
-      queueMicrotask(() => {
-        for (const entry of [...this.entries]) {
-          if (!entry.element.isConnected) this.detach(entry.element);
-        }
-      });
+    if (visibilityAncestors.size > 0) {
+      for (const entry of this.entries) {
+        if (entry.native || entry.prepared || entry.disposed || !entry.watchVisibility
+          || visibilityAncestors.has(entry.element)) continue;
+        const inheritedVisibilityMayHaveChanged = [...visibilityAncestors].some((ancestor) => (
+          shadowIncludingContains(ancestor, entry.element)
+        ));
+        if (!inheritedVisibilityMayHaveChanged) continue;
+        const visibilityChanged = this._updateEntryStyleVisibility(entry);
+        if (visibilityChanged && entry.visible) this._markDirty(entry, "visibility", true);
+      }
     }
+    if (selectorAncestors.size > 0) {
+      for (const entry of this.entries) {
+        if (entry.native || entry.prepared || entry.disposed
+          || selectorAncestors.has(entry.element)) continue;
+        const selectorInputMayHaveChanged = [...selectorAncestors].some((ancestor) => (
+          shadowIncludingContains(ancestor, entry.element)
+        ));
+        if (selectorInputMayHaveChanged) {
+          this._markDirty(entry, "ancestor-style-selector-input", true);
+        }
+      }
+    }
+    if (childListChanged) {
+      this._queueAttachmentLifecycleCheck();
+    }
+  }
+
+  _updateEntryStyleVisibility(entry, computed = null) {
+    const nextStyleVisible = (computed ?? this.view.getComputedStyle(entry.element)).visibility !== "hidden";
+    const nextVisible = entry.requestedVisible && nextStyleVisible;
+    const changed = nextVisible !== entry.visible;
+    entry.styleVisible = nextStyleVisible;
+    if (!changed) return false;
+    entry.visible = nextVisible;
+    if (nextVisible) entry.needsPaint = true;
+    this.counters.visibilityUpdates += 1;
+    entry.counters.visibilityUpdates += 1;
+    return true;
+  }
+
+  _reconcileEntryOwnershipRoot(entry) {
+    if (entry.native || entry.disposed) return false;
+    if (entry.element.ownerDocument !== this.document) {
+      throw new Error(
+        "Cornerfill cannot migrate an attached element to another document; dispose it and attach it with that document's controller",
+      );
+    }
+    const nextRoot = entry.element.getRootNode();
+    if (nextRoot === entry.ownershipRoot) return false;
+    const previousRoot = entry.ownershipRoot;
+    this._retainOwnershipRoot(nextRoot, !entry.prepared);
+    entry.ownershipRoot = nextRoot;
+    try {
+      applyOwnedStyles(entry);
+    } catch (error) {
+      entry.ownershipRoot = previousRoot;
+      this._releaseOwnershipRoot(nextRoot);
+      throw error;
+    }
+    this._releaseOwnershipRoot(previousRoot);
+    this.counters.ownershipRepairs += 1;
+    entry.counters.ownershipRepairs += 1;
+    entry.lastInvalidationReason = "attachment-root-migration";
+    return true;
+  }
+
+  _queueAttachmentLifecycleCheck() {
+    if (this.attachmentLifecycleQueued || this.destroyed) return;
+    this.attachmentLifecycleQueued = true;
+    queueMicrotask(() => {
+      this.attachmentLifecycleQueued = false;
+      if (this.destroyed) return;
+      this._updateAttachmentLifecycleObservers();
+      for (const entry of [...this.entries]) {
+        if (entry.native || entry.prepared || entry.disposed) continue;
+        if (!entry.element.isConnected) {
+          this.detach(entry.element);
+          continue;
+        }
+        try {
+          const rootChanged = this._reconcileEntryOwnershipRoot(entry);
+          const visibilityChanged = this._updateEntryStyleVisibility(entry);
+          const ownershipRepaired = !rootChanged && this._repairEntryOwnership(entry);
+          if (rootChanged || (visibilityChanged && entry.visible)) {
+            this._markDirty(entry, rootChanged ? "attachment-root-migration" : "visibility", true);
+          } else if (ownershipRepaired) {
+            this._clearError(entry);
+          }
+        } catch (error) {
+          this._recordError(entry, error);
+          entry.lastInvalidationReason = "attachment-root-migration-error";
+          let reported = error;
+          try {
+            this.detach(entry.element);
+          } catch (cleanupError) {
+            reported = new AggregateError([error, cleanupError], "Cornerfill attachment migration failed");
+          }
+          if (typeof this.view.reportError === "function") this.view.reportError(reported);
+          else queueMicrotask(() => { throw reported; });
+        }
+      }
+    });
   }
 
   _onResize(records) {
@@ -1619,6 +2161,9 @@ class CornerfillController {
             continue;
           }
           this._recordError(entry, error);
+          this._removeOwnershipSurface(entry);
+          restoreOwnershipState(entry.element, entry.ownershipSnapshot);
+          entry.ownershipVerified = false;
           this._settleWaiters(entry, revision, error);
         }
       }
@@ -1742,13 +2287,21 @@ class CornerfillController {
   }
 
   async _snapshot(entry, revision = null) {
-    const computed = this.view.getComputedStyle(entry.element);
-    const composition = inspectFallbackHost(this.view, entry.element, computed);
-    const { width, height } = measureBorderBox(entry.element, computed);
+    const authored = withAuthoredComputedStyle(this.view, entry, (computed) => {
+      const composition = inspectFallbackHost(this.view, entry.element, computed);
+      const size = measureBorderBox(entry.element, computed);
+      return Object.freeze({
+        computed: Object.freeze({ visibility: computed.visibility }),
+        composition,
+        size,
+        sources: currentSources(entry, computed),
+        flow: flowFromComputed(computed),
+        boxMetrics: backgroundBoxMetrics(computed),
+      });
+    });
+    const { width, height } = authored.size;
     const dpr = this.view.devicePixelRatio || 1;
-    const sources = currentSources(entry, computed);
-    const flow = flowFromComputed(computed);
-    const boxMetrics = backgroundBoxMetrics(computed);
+    const { sources, flow, boxMetrics } = authored;
     const radii = resolveRadiusSource(sources.radiusSource, width, height, flow);
     const shapes = resolveCornerShape(sources.shapeSource, flow);
     const { key: nextGeometryKey, geometry } = this._geometry(width, height, dpr, radii, shapes);
@@ -1761,9 +2314,10 @@ class CornerfillController {
     const nextBorderKey = border ? JSON.stringify(border) : "none";
     const shadow = normalizeInsetShadow(sources.shadowSource);
     const outline = normalizeContainedOutline(sources.outlineSource);
+    assertOutlineHost(this.view, entry.element, outline);
     const nextEffectsKey = JSON.stringify([shadow, outline]);
     return Object.freeze({
-      computed,
+      computed: authored.computed,
       width,
       height,
       dpr,
@@ -1777,7 +2331,7 @@ class CornerfillController {
       outline,
       effectsKey: nextEffectsKey,
       boxMetrics,
-      composition,
+      composition: authored.composition,
     });
   }
 
@@ -1847,6 +2401,7 @@ class CornerfillController {
           return entryExplanation(entry);
         }
         this._recordError(entry, error);
+        this._removeOwnershipSurface(entry);
         restoreOwnershipState(entry.element, entry.ownershipSnapshot);
         entry.imageLease?.release();
         entry.imageLease = null;
@@ -1924,7 +2479,8 @@ class CornerfillController {
 
   _refreshEntry(entry, revision) {
     const reason = entry.pendingReason;
-    const needsFullRefresh = entry.fullRefreshPending;
+    const rootChanged = this._reconcileEntryOwnershipRoot(entry);
+    const needsFullRefresh = entry.fullRefreshPending || rootChanged;
     entry.pendingReason = null;
     entry.fullRefreshPending = false;
     const dynamicPaintOnly = entry.initial.dynamic.paintPosition
@@ -1942,6 +2498,7 @@ class CornerfillController {
     entry.counters.styleChecks += 1;
     const snapshot = await this._snapshot(entry, revision);
     this._assertEntryCurrent(entry, revision);
+    this._updateEntryStyleVisibility(entry, snapshot.computed);
     const geometryChanged = snapshot.geometryKey !== entry.geometryKey;
     const paintChanged = snapshot.paintKey !== entry.paintKey;
     const borderChanged = snapshot.borderKey !== entry.borderKey;
@@ -2008,7 +2565,7 @@ class CornerfillController {
     return "none";
   }
 
-  _createPreparedSurface(entry) {
+  _createPreparedSurface(entry, verifyOwnership = true) {
     if (entry.surface) return false;
     entry.surface = createSurface(this.document, {
       cssWidth: entry.width,
@@ -2021,7 +2578,7 @@ class CornerfillController {
       maxWebkitPoolEntries: this.options.maxWebkitPoolEntries,
       maxWebkitPoolPrefixes: this.options.maxWebkitPoolPrefixes,
     });
-    this._paintPreparedFull(entry);
+    this._paintPreparedFull(entry, verifyOwnership);
     if (entry.surfaceWasDeferred) {
       entry.surfaceWasDeferred = false;
       this.counters.deferredSurfaceEntries -= 1;
@@ -2029,7 +2586,7 @@ class CornerfillController {
     return true;
   }
 
-  _paintPreparedFull(entry) {
+  _paintPreparedFull(entry, verifyOwnership = true) {
     const paint = entry.preparedResolvedPaint.kind === "image"
       ? {
         ...entry.preparedResolvedPaint,
@@ -2048,7 +2605,7 @@ class CornerfillController {
       preparePreparedOpaqueImageContext(entry.surface.context, entry.preparedPaintProgram);
     }
     entry.surface.commit();
-    applyOwnedStyles(entry);
+    applyOwnedStyles(entry, verifyOwnership);
     this._clearError(entry);
     entry.needsPaint = false;
     entry.counters.paints += 1;
@@ -2060,7 +2617,9 @@ class CornerfillController {
   }
 
   _paintPreparedEntry(entry) {
-    if (entry.disposed || !entry.initialized || !entry.visible) return;
+    if (entry.disposed || !entry.initialized) return;
+    this._reconcileEntryOwnershipRoot(entry);
+    if (!entry.visible) return;
     if (this._createPreparedSurface(entry)) {
       entry.lastInvalidationReason = "prepared-first-visible-paint";
       return;
@@ -2281,6 +2840,9 @@ class CornerfillController {
     }
     const paintSource = config.paint ?? entry.preparedPaintSource;
     const descriptor = normalizePaintDescriptor(paintSource);
+    if (descriptor.blendMode === "multiply") {
+      throw new TypeError("prepared paint requires normal background blending");
+    }
     let paint = await this._resolvedPaint(entry, descriptor, width, height, revision);
     this._assertEntryCurrent(entry, revision);
     const preservePosition = !initial && config.paint === undefined && paint.kind === "image";
@@ -2296,6 +2858,7 @@ class CornerfillController {
     const outlineSource = config.outline === undefined ? entry.preparedOutlineSource : config.outline;
     const shadow = normalizeInsetShadow(shadowSource ?? null);
     const outline = normalizeContainedOutline(outlineSource ?? null);
+    assertOutlineHost(this.view, entry.element, outline);
     const program = paint.kind === "image" && paint.opaque === true && !border && !shadow && !outline
       ? createPreparedOpaqueImageProgram({ geometry, paint, dpr })
       : null;
@@ -2318,6 +2881,7 @@ class CornerfillController {
 
   _commitPreparedLayout(entry, snapshot, reason) {
     this._assertEntryCurrent(entry);
+    this._reconcileEntryOwnershipRoot(entry);
     const resized = entry.surface?.resize(snapshot.width, snapshot.height, snapshot.dpr) ?? false;
     if (resized) {
       this.counters.surfaceResizes += 1;
@@ -2410,7 +2974,11 @@ class CornerfillController {
       entry.positionY = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[1] : 0;
       entry.preparedPaintProgram = snapshot.program;
       entry.initialized = true;
-      if (entry.visible || !entry.deferHiddenSurface) this._createPreparedSurface(entry);
+      if (entry.visible || !entry.deferHiddenSurface) {
+        this._createPreparedSurface(entry, false);
+        await this._verifyPreparedOwnership(entry);
+        this._assertEntryCurrent(entry, revision);
+      }
       else {
         entry.surfaceWasDeferred = true;
         entry.needsPaint = true;
@@ -2428,6 +2996,7 @@ class CornerfillController {
         return entryExplanation(entry);
       }
       this._recordError(entry, error);
+      this._removeOwnershipSurface(entry);
       restoreOwnershipState(entry.element, entry.ownershipSnapshot);
       entry.imageLease?.release();
       entry.imageLease = null;
@@ -2478,6 +3047,7 @@ class CornerfillController {
       state: null,
       ownershipSnapshot: captureOwnershipState(element),
       ownershipRoot: element.getRootNode(),
+      ownershipToken: null,
       surface: null,
       geometry: null,
       geometryKey: null,
@@ -2723,7 +3293,16 @@ class CornerfillController {
       },
       verify() {
         if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
-        if (!entry.native) controller._assertOwnedStylesApplied(entry);
+        if (!entry.native) {
+          const computed = controller.view.getComputedStyle(entry.element);
+          inspectFallbackHost(controller.view, entry.element, computed);
+          assertOutlineHost(controller.view, entry.element, entry.outline);
+          if (controller._reconcileEntryOwnershipRoot(entry) && !entry.prepared) {
+            controller._markDirty(entry, "attachment-root-migration", true);
+          }
+          controller._repairEntryOwnership(entry);
+          controller._assertOwnedStylesApplied(entry);
+        }
         return entryExplanation(entry);
       },
       explain() { return entryExplanation(entry); },
@@ -2771,6 +3350,7 @@ class CornerfillController {
       inlineBackgroundPositionY: element.style.getPropertyValue("background-position-y").trim(),
       ownershipSnapshot: captureOwnershipState(element),
       ownershipRoot: element.getRootNode(),
+      ownershipToken: null,
       surface: null,
       geometry: null,
       geometryKey: null,
@@ -2851,6 +3431,7 @@ class CornerfillController {
       }
       this.counters.nativeEntries -= 1;
     } else {
+      this._removeOwnershipSurface(entry);
       restoreOwnershipState(element, entry.ownershipSnapshot);
       try { entry.surface?.dispose(); } catch (error) { cleanupError = error; }
       entry.surface = null;
@@ -2921,14 +3502,20 @@ class CornerfillController {
     }
     for (const observer of this.rootObservers.values()) observer?.disconnect();
     this.rootObservers.clear();
+    for (const observer of this.attachmentLifecycleObservers.values()) observer.disconnect();
+    this.attachmentLifecycleObservers.clear();
     this.resizeObserver?.disconnect();
     if (this._onWindowResize) this.view.removeEventListener("resize", this._onWindowResize);
     if (this.flushHandle !== null) this.view.cancelAnimationFrame(this.flushHandle);
     if (this.animationHandle !== undefined) this.view.cancelAnimationFrame(this.animationHandle);
     for (const stylesheet of this.ownershipStylesheets.values()) stylesheet.remove();
     this.ownershipStylesheets.clear();
+    this.ownershipSurfaces.clear();
+    this.ownershipSurfaceRules.clear();
+    this.ownershipFreeRules.clear();
     this.ownershipRootCounts.clear();
     this.preparedDirty.clear();
+    this.preparedOwnershipVerificationEntries.clear();
     try { this.images.destroy(); } catch (error) { errors.push(error); }
     this.geometryCache.clear();
     if (errors.length > 0) throw new AggregateError(errors, "Cornerfill teardown encountered backend errors");

@@ -180,7 +180,9 @@ function listItem(list, index) {
 function normalizeLayerCommon(paint) {
   const blendMode = String(paint.blendMode ?? "normal").trim().toLowerCase();
   const attachment = String(paint.attachment ?? "scroll").trim().toLowerCase();
-  if (blendMode !== "normal") throw new TypeError(`unsupported background-blend-mode: ${blendMode}`);
+  if (blendMode !== "normal" && blendMode !== "multiply") {
+    throw new TypeError(`unsupported background-blend-mode: ${blendMode}`);
+  }
   if (attachment !== "scroll") throw new TypeError(`unsupported background-attachment: ${attachment}`);
   return Object.freeze({
     backgroundSizeSpec: paint.backgroundSizeSpec
@@ -241,8 +243,20 @@ function normalizeGradientLayer(paint) {
 
 function normalizeLayer(paint) {
   if (!paint || typeof paint !== "object") throw new TypeError("background layer is required");
-  if (paint.kind === "none") return Object.freeze({ ...paint, ...normalizeLayerCommon(paint) });
-  if (GRADIENT_KINDS.has(paint.kind)) return normalizeGradientLayer(paint);
+  if (paint.kind === "none") {
+    const layer = { ...paint, ...normalizeLayerCommon(paint) };
+    if (layer.blendMode !== "normal") {
+      throw new TypeError("multiply requires exactly one raster background image");
+    }
+    return Object.freeze(layer);
+  }
+  if (GRADIENT_KINDS.has(paint.kind)) {
+    const layer = normalizeGradientLayer(paint);
+    if (layer.blendMode !== "normal") {
+      throw new TypeError("multiply requires exactly one raster background image");
+    }
+    return layer;
+  }
   if (paint.kind !== "image") throw new TypeError(`unsupported background layer kind: ${paint.kind}`);
   if (!paint.image && !paint.url) throw new TypeError("image paint requires a decoded image or URL");
   return Object.freeze({
@@ -252,6 +266,13 @@ function normalizeLayer(paint) {
   });
 }
 
+function canvasImageSmoothing(value) {
+  const normalized = String(value ?? "auto").trim().toLowerCase();
+  if (["pixelated", "crisp-edges", "-webkit-optimize-contrast"].includes(normalized)) return false;
+  if (["", "auto", "smooth", "high-quality"].includes(normalized)) return true;
+  throw new TypeError(`unsupported image-rendering value: ${normalized}`);
+}
+
 export function captureComputedPaint(computedStyle, carriers = {}) {
   const imageLayers = layerList(carriers.image || computedStyle.backgroundImage, "none");
   const sizes = layerList(carriers.size || computedStyle.backgroundSize, "auto");
@@ -259,8 +280,8 @@ export function captureComputedPaint(computedStyle, carriers = {}) {
   const repeats = layerList(carriers.repeat || computedStyle.backgroundRepeat, "repeat");
   const origins = layerList(carriers.origin || computedStyle.backgroundOrigin, "padding-box");
   const clips = layerList(carriers.clip || computedStyle.backgroundClip, "border-box");
-  const blends = layerList(computedStyle.backgroundBlendMode, "normal");
-  const attachments = layerList(computedStyle.backgroundAttachment, "scroll");
+  const blends = layerList(carriers.blendMode || computedStyle.backgroundBlendMode, "normal");
+  const attachments = layerList(carriers.attachment || computedStyle.backgroundAttachment, "scroll");
   const color = carriers.color || computedStyle.backgroundColor || "transparent";
   const layers = imageLayers.map((image, index) => {
     const common = {
@@ -277,7 +298,7 @@ export function captureComputedPaint(computedStyle, carriers = {}) {
     return normalizeLayer({
       kind: "image",
       url: parseCssUrl(image),
-      imageSmoothing: carriers.smoothing !== "pixelated",
+      imageSmoothing: canvasImageSmoothing(carriers.smoothing || computedStyle.imageRendering),
       ...common,
     });
   });
@@ -286,6 +307,30 @@ export function captureComputedPaint(computedStyle, carriers = {}) {
   }
   if (layers.length === 1) return Object.freeze({ ...layers[0], color });
   return Object.freeze({ kind: "layers", color, layers: Object.freeze(layers) });
+}
+
+function opaqueBlendColor(input) {
+  const value = String(input).trim().toLowerCase();
+  const hex = /^#([\da-f]+)$/u.exec(value)?.[1];
+  if (hex) {
+    if (hex.length === 3 || hex.length === 6) return true;
+    if (hex.length === 4) return hex[3] === "f";
+    if (hex.length === 8) return hex.endsWith("ff");
+    return false;
+  }
+  const functional = /^(rgba?)\((.*)\)$/su.exec(value);
+  if (!functional) return false;
+  const body = functional[2];
+  const slash = body.lastIndexOf("/");
+  let alpha = slash < 0 ? null : body.slice(slash + 1).trim();
+  if (alpha === null) {
+    const parts = splitTopLevelCommas(body);
+    if (parts.length === 4) alpha = parts[3];
+    else if (functional[1] === "rgba") return false;
+  }
+  if (alpha === null) return true;
+  if (alpha.endsWith("%")) return Number(alpha.slice(0, -1)) === 100;
+  return Number(alpha) === 1;
 }
 
 export function normalizePaintDescriptor(paint) {
@@ -308,14 +353,25 @@ export function normalizePaintDescriptor(paint) {
     if (blendModes.some((mode) => String(mode).trim().toLowerCase() !== "normal")) {
       throw new TypeError("only normal background layer blending is supported");
     }
+    const layers = paint.layers.map(normalizeLayer);
+    if (layers.some(({ blendMode }) => blendMode !== "normal")) {
+      throw new TypeError("multiply requires exactly one raster background image");
+    }
     return Object.freeze({
       kind: "layers",
       color: String(paint.color ?? "transparent"),
-      layers: Object.freeze(paint.layers.map(normalizeLayer)),
+      layers: Object.freeze(layers),
     });
   }
   const layer = normalizeLayer(paint);
-  return Object.freeze({ ...layer, color: paint.color ?? "transparent" });
+  const color = String(paint.color ?? "transparent");
+  if (layer.blendMode === "multiply" && layer.opaque !== true) {
+    throw new TypeError("multiply requires an explicitly opaque raster image");
+  }
+  if (layer.blendMode === "multiply" && !opaqueBlendColor(color)) {
+    throw new TypeError("multiply requires an opaque rgb() or hex background color");
+  }
+  return Object.freeze({ ...layer, color });
 }
 
 function resolveSize(spec, areaWidth, areaHeight, intrinsicWidth, intrinsicHeight) {
@@ -641,6 +697,8 @@ function backgroundLayerKey(descriptor) {
       crossOrigin: descriptor.crossOrigin ?? null,
       smoothing: descriptor.imageSmoothing,
       opaque: descriptor.opaque === true,
+      blendMode: descriptor.blendMode,
+      attachment: descriptor.attachment,
     };
   }
   return descriptor;

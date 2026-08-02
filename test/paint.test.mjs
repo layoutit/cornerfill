@@ -4,6 +4,7 @@ import {
   createPreparedOpaqueImageProgram,
   drawPreparedOpaqueImage,
   explainPreparedOpaqueImage,
+  paintOwnedLayer,
   preparePreparedOpaqueImageContext,
   repaintPreparedOpaqueImage,
 } from "../src/paint.mjs";
@@ -78,4 +79,25 @@ test("prepared retained-surface crop hot path is exactly one draw call", () => {
   context.calls.length = 0;
   drawPreparedOpaqueImage(context, program, -40, -60);
   assert.deepEqual(context.calls, [["drawImage", image, 20, 30, 5, 5, 0, 0, 10, 10]]);
+});
+
+test("multiply uses Canvas compositing only on the admitted raster layer", () => {
+  const image = { width: 4, height: 4 };
+  const context = contextRecorder();
+  const result = paintOwnedLayer(context, {
+    kind: "image",
+    image,
+    backgroundSize: [4, 4],
+    tilePlan: { x: [0], y: [0] },
+    repeat: { x: "no-repeat", y: "no-repeat" },
+    blendMode: "multiply",
+  }, 4, 4);
+  assert.equal(result.blendMode, "multiply");
+  assert.deepEqual(context.calls, [
+    ["save"],
+    ["globalCompositeOperation", "multiply"],
+    ["imageSmoothingEnabled", true],
+    ["drawImage", image, 0, 0, 4, 4, 0, 0, 4, 4],
+    ["restore"],
+  ]);
 });

@@ -1,0 +1,5 @@
+.cornerfill-import-grandchild {
+  corner-shape: superellipse(2);
+  border-radius: 5px;
+  background: purple;
+}

@@ -273,13 +273,24 @@ export function paintOwnedLayer(context, paint, width, height) {
   }
   if (paint.kind === "none") return Object.freeze({ kind: "none" });
   if (paint.kind === "image") {
-    return drawRasterImage(context, paint, width, height);
+    if (paint.blendMode !== "multiply") return drawRasterImage(context, paint, width, height);
+    context.save();
+    context.globalCompositeOperation = "multiply";
+    try {
+      return Object.freeze({
+        ...drawRasterImage(context, paint, width, height),
+        blendMode: "multiply",
+      });
+    } finally {
+      context.restore();
+    }
   }
   throw new TypeError(`unsupported paint kind: ${paint.kind}`);
 }
 
 function fullyCoversBox(paint, width, height) {
   if (paint.kind !== "image" || paint.opaque !== true || !noRepeat(paint.repeat)
+    || paint.blendMode === "multiply"
     || (paint.clipArea && paint.clipArea.name !== "border-box")) return false;
   const [backgroundWidth, backgroundHeight] = paint.backgroundSize ?? [];
   const [positionX, positionY] = paint.backgroundPosition ?? [];

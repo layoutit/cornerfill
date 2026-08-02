@@ -137,3 +137,23 @@ test("WebKit reuse pools are bounded and every released canvas is shrunk", () =>
   assert.equal(stats.retainedPixels, 3);
   assert.equal(stats.shrinkFailures, 0);
 });
+
+test("separate module copies share a collision-resistant document ID registry", async () => {
+  const firstModule = await import("../src/backends.mjs?copy=first");
+  const secondModule = await import("../src/backends.mjs?copy=second");
+  const document = firefoxDocument();
+  const first = firstModule.createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 10,
+    cssHeight: 10,
+  });
+  const second = secondModule.createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 10,
+    cssHeight: 10,
+  });
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.id, "cornerfill-1");
+  first.dispose();
+  second.dispose();
+});

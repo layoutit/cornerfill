@@ -78,6 +78,40 @@ test("zero-sized raster backgrounds draw no tiles", () => {
   assert.deepEqual(resolved.tilePlan, { x: [], y: [] });
 });
 
+test("computed pixelated raster backgrounds disable Canvas smoothing", () => {
+  const descriptor = captureComputedPaint({
+    backgroundColor: "transparent",
+    backgroundImage: 'url("/atlas.webp")',
+    backgroundSize: "64px 64px",
+    backgroundPosition: "0px 0px",
+    backgroundRepeat: "no-repeat",
+    backgroundOrigin: "padding-box",
+    backgroundClip: "border-box",
+    backgroundBlendMode: "normal",
+    backgroundAttachment: "scroll",
+    imageRendering: "pixelated",
+  });
+  assert.equal(descriptor.imageSmoothing, false);
+});
+
+test("computed crisp-edge raster modes disable Canvas smoothing", () => {
+  for (const imageRendering of ["crisp-edges", "-webkit-optimize-contrast"]) {
+    const paint = captureComputedPaint({
+      backgroundAttachment: "scroll",
+      backgroundBlendMode: "normal",
+      backgroundClip: "border-box",
+      backgroundColor: "transparent",
+      backgroundImage: 'url("atlas.png")',
+      backgroundOrigin: "padding-box",
+      backgroundPosition: "0% 0%",
+      backgroundRepeat: "no-repeat",
+      backgroundSize: "auto",
+      imageRendering,
+    });
+    assert.equal(paint.imageSmoothing, false, `${imageRendering} enabled smoothing`);
+  }
+});
+
 test("linear, radial, and conic layers retain CSS order and per-layer geometry", () => {
   const descriptor = captureComputedPaint({
     backgroundImage: "linear-gradient(to right, red 0%, blue 100%), radial-gradient(circle closest-side at 25% 75%, white 0%, black 100%), conic-gradient(from 45deg at center, red 0deg, lime 120deg, blue 1turn)",
@@ -122,6 +156,32 @@ test("linear, radial, and conic layers retain CSS order and per-layer geometry",
       backgroundBlendMode: "multiply",
       backgroundAttachment: "scroll",
     }),
-    /background-blend-mode/u,
+    /multiply requires/u,
+  );
+
+  const multiply = captureComputedPaint({
+    backgroundImage: "url(tiles.png)",
+    backgroundColor: "rgb(40, 80, 120)",
+    backgroundSize: "20px 10px",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+    backgroundOrigin: "padding-box",
+    backgroundClip: "border-box",
+    backgroundBlendMode: "multiply",
+    backgroundAttachment: "scroll",
+  });
+  assert.equal(multiply.blendMode, "multiply");
+  assert.equal(normalizePaintDescriptor({ ...multiply, opaque: true }).blendMode, "multiply");
+  assert.throws(
+    () => normalizePaintDescriptor(multiply),
+    /explicitly opaque raster/u,
+  );
+  assert.throws(
+    () => normalizePaintDescriptor({
+      ...multiply,
+      opaque: true,
+      color: "rgb(40, 80, 120, .5)",
+    }),
+    /opaque/u,
   );
 });

@@ -6,6 +6,9 @@ import {
 const CORNER_COUNT = 4;
 const DEFAULT_SEGMENTS = 64;
 const INTERSECTION_EPSILON = 1e-9;
+const FLOATING_SHAPE_LIMIT = 54;
+const CONCAVE_SAFETY_SEGMENTS = 256;
+const CONCAVE_SAFETY_MARGIN = 1e-5;
 
 function finiteNonNegative(value, label) {
   if (!Number.isFinite(value) || value < 0) {
@@ -94,10 +97,10 @@ export function sampleCanonicalCorner({ rx, ry, s }, {
   finiteNonNegative(ry, "corner.ry");
   validShapeParameter(s, "corner.s");
   if (rx === 0 || ry === 0) return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, ry)]);
-  if (s === Number.POSITIVE_INFINITY) {
+  if (s === Number.POSITIVE_INFINITY || s >= FLOATING_SHAPE_LIMIT) {
     return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, 0), frozenPoint(0, ry)]);
   }
-  if (s === Number.NEGATIVE_INFINITY) {
+  if (s === Number.NEGATIVE_INFINITY || s <= -FLOATING_SHAPE_LIMIT) {
     return Object.freeze([frozenPoint(rx, 0), frozenPoint(rx, ry), frozenPoint(0, ry)]);
   }
   if (s === 0) return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, ry)]);
@@ -184,14 +187,23 @@ function projection(polygon, axisX, axisY) {
   return [min, max];
 }
 
+function normalizedAxis(current, next) {
+  const axisX = -(next[1] - current[1]);
+  const axisY = next[0] - current[0];
+  const length = Math.hypot(axisX, axisY);
+  if (length <= INTERSECTION_EPSILON) return null;
+  return [axisX / length, axisY / length];
+}
+
 export function convexPolygonsOverlap(first, second, epsilon = INTERSECTION_EPSILON) {
   if (first.length < 3 || second.length < 3) return false;
   for (const polygon of [first, second]) {
     for (let index = 0; index < polygon.length; index += 1) {
       const current = polygon[index];
       const next = polygon[(index + 1) % polygon.length];
-      const axisX = -(next[1] - current[1]);
-      const axisY = next[0] - current[0];
+      const axis = normalizedAxis(current, next);
+      if (!axis) continue;
+      const [axisX, axisY] = axis;
       const [firstMin, firstMax] = projection(first, axisX, axisY);
       const [secondMin, secondMax] = projection(second, axisX, axisY);
       if (firstMax <= secondMin + epsilon || secondMax <= firstMin + epsilon) return false;
@@ -202,25 +214,18 @@ export function convexPolygonsOverlap(first, second, epsilon = INTERSECTION_EPSI
 
 function normalizedInnerCornerHull(shapeParameter) {
   if (!(shapeParameter < 0)) return [[1, 1], [1, 0], [0, 1]];
-  if (shapeParameter === Number.NEGATIVE_INFINITY) {
-    return [[1, 1], [1, 0], [1, 1], [0, 1]];
-  }
   // The draft's signed interpolation coordinate points the concave hull in the
   // wrong direction. Use the unflipped convex half-corner called out in CSSWG
   // issue 14157 while retaining the draft's tangent-intersection construction.
-  const exponent = 2 ** Math.abs(shapeParameter);
-  const half = 0.5 ** (1 / exponent);
-  const other = 1 - half;
-  const denominatorA = other;
-  const denominatorB = half;
-  const intersectionA = [
-    1,
-    other - (half * (1 - half)) / denominatorA,
-  ];
-  const intersectionB = [
-    half - (other * (1 - other)) / denominatorB,
-    1,
-  ];
+  // Simplifying the tangent intersections avoids the 0 / 0 discontinuity as
+  // finite parameters approach notch. At floating-point precision, |s| >= 54
+  // is indistinguishable from the corresponding exact limiting keyword.
+  const half = shapeParameter <= -FLOATING_SHAPE_LIMIT
+    ? 1
+    : 0.5 ** (1 / (2 ** Math.abs(shapeParameter)));
+  const tangentExtent = 2 * half - 1;
+  const intersectionA = [1, -tangentExtent];
+  const intersectionB = [tangentExtent, 1];
   return [[1, 1], [1, 0], intersectionA, intersectionB, [0, 1]];
 }
 
@@ -246,11 +251,61 @@ function mappedInnerHull(index, width, height, radius, shapeParameter) {
   };
 }
 
-function scaledHull({ origin, polygon }, scale) {
-  return polygon.map(([x, y]) => [
-    origin[0] + (x - origin[0]) * scale,
-    origin[1] + (y - origin[1]) * scale,
-  ]);
+function scaleOverlapTester(first, second) {
+  const axes = [];
+  for (const polygon of [first.polygon, second.polygon]) {
+    for (let index = 0; index < polygon.length; index += 1) {
+      const current = polygon[index];
+      const next = polygon[(index + 1) % polygon.length];
+      const axis = normalizedAxis(current, next);
+      if (!axis) continue;
+      const [axisX, axisY] = axis;
+      axes.push({
+        firstProjection: projection(first.polygon, axisX, axisY),
+        secondProjection: projection(second.polygon, axisX, axisY),
+        firstOrigin: first.origin[0] * axisX + first.origin[1] * axisY,
+        secondOrigin: second.origin[0] * axisX + second.origin[1] * axisY,
+      });
+    }
+  }
+  return (scale) => {
+    if (first.polygon.length < 3 || second.polygon.length < 3) return false;
+    for (const axis of axes) {
+      const firstMin = axis.firstOrigin + (axis.firstProjection[0] - axis.firstOrigin) * scale;
+      const firstMax = axis.firstOrigin + (axis.firstProjection[1] - axis.firstOrigin) * scale;
+      const secondMin = axis.secondOrigin + (axis.secondProjection[0] - axis.secondOrigin) * scale;
+      const secondMax = axis.secondOrigin + (axis.secondProjection[1] - axis.secondOrigin) * scale;
+      if (firstMax <= secondMin + INTERSECTION_EPSILON
+        || secondMax <= firstMin + INTERSECTION_EPSILON) return false;
+    }
+    return true;
+  };
+}
+
+function highestNonOverlappingScale(first, second, maximum = 1) {
+  const overlaps = scaleOverlapTester(first, second);
+  if (!overlaps(maximum)) return maximum;
+  let low = 0;
+  let high = maximum;
+  for (let iteration = 0; iteration < 52; iteration += 1) {
+    const middle = (low + high) / 2;
+    if (overlaps(middle)) high = middle;
+    else low = middle;
+  }
+  return low;
+}
+
+function mappedCarveOutHull(index, width, height, radius, shapeParameter) {
+  const origin = outerCorner(index, width, height);
+  return {
+    origin,
+    polygon: convexHull([
+      origin,
+      ...cornerCurve(index, width, height, radius, shapeParameter, {
+        segments: CONCAVE_SAFETY_SEGMENTS,
+      }),
+    ]),
+  };
 }
 
 export function oppositeCornerScaleFactor(width, height, radii, shapeParameters) {
@@ -266,19 +321,27 @@ export function oppositeCornerScaleFactor(width, height, radii, shapeParameters)
     if (!(shapeParameters[first] < 0 && shapeParameters[second] < 0)) continue;
     const firstHull = mappedInnerHull(first, width, height, radii[first], shapeParameters[first]);
     const secondHull = mappedInnerHull(second, width, height, radii[second], shapeParameters[second]);
-    const overlaps = (scale) => convexPolygonsOverlap(
-      scaledHull(firstHull, scale),
-      scaledHull(secondHull, scale),
+    result = Math.min(result, highestNonOverlappingScale(firstHull, secondHull, result));
+
+    // The editor's current tangent hull has a known concave-direction defect.
+    // Enforce its stated no-overlap invariant against the contour Cornerfill
+    // actually paints as a conservative second constraint.
+    const firstCarveOut = mappedCarveOutHull(
+      first,
+      width,
+      height,
+      radii[first],
+      shapeParameters[first],
     );
-    if (!overlaps(1)) continue;
-    let low = 0;
-    let high = 1;
-    for (let iteration = 0; iteration < 52; iteration += 1) {
-      const middle = (low + high) / 2;
-      if (overlaps(middle)) high = middle;
-      else low = middle;
-    }
-    result = Math.min(result, low);
+    const secondCarveOut = mappedCarveOutHull(
+      second,
+      width,
+      height,
+      radii[second],
+      shapeParameters[second],
+    );
+    const safeScale = highestNonOverlappingScale(firstCarveOut, secondCarveOut, result);
+    if (safeScale < result) result = Math.max(0, safeScale - CONCAVE_SAFETY_MARGIN);
   }
   return result;
 }
@@ -442,6 +505,83 @@ function lineIntersection(firstStart, firstEnd, secondStart, secondEnd) {
   const delta = pointSubtract(secondStart, firstStart);
   const t = (delta[0] * second[1] - delta[1] * second[0]) / denominator;
   return pointAdd(firstStart, vectorScale(first, t));
+}
+
+function segmentIntersection(firstStart, firstEnd, secondStart, secondEnd) {
+  const first = pointSubtract(firstEnd, firstStart);
+  const second = pointSubtract(secondEnd, secondStart);
+  const denominator = first[0] * second[1] - first[1] * second[0];
+  if (Math.abs(denominator) < 1e-12) return null;
+  const delta = pointSubtract(secondStart, firstStart);
+  const firstRatio = (delta[0] * second[1] - delta[1] * second[0]) / denominator;
+  const secondRatio = (delta[0] * first[1] - delta[1] * first[0]) / denominator;
+  if (firstRatio < -INTERSECTION_EPSILON || firstRatio > 1 + INTERSECTION_EPSILON
+    || secondRatio < -INTERSECTION_EPSILON || secondRatio > 1 + INTERSECTION_EPSILON) return null;
+  return Object.freeze({
+    firstRatio: Math.min(1, Math.max(0, firstRatio)),
+    secondRatio: Math.min(1, Math.max(0, secondRatio)),
+    point: pointAdd(firstStart, vectorScale(first, Math.min(1, Math.max(0, firstRatio)))),
+  });
+}
+
+function pointDistance(first, second) {
+  return Math.hypot(second[0] - first[0], second[1] - first[1]);
+}
+
+function samePoint(first, second) {
+  return pointDistance(first, second) <= INTERSECTION_EPSILON;
+}
+
+function trimAdjacentCurves(previous, next) {
+  if (previous.length < 2 || next.length < 2) return { previous, next };
+  const previousSuffix = new Array(previous.length).fill(0);
+  for (let index = previous.length - 2; index >= 0; index -= 1) {
+    previousSuffix[index] = previousSuffix[index + 1] + pointDistance(previous[index], previous[index + 1]);
+  }
+  const nextPrefix = new Array(next.length).fill(0);
+  for (let index = 1; index < next.length; index += 1) {
+    nextPrefix[index] = nextPrefix[index - 1] + pointDistance(next[index - 1], next[index]);
+  }
+  let best = null;
+  for (let previousIndex = 0; previousIndex < previous.length - 1; previousIndex += 1) {
+    for (let nextIndex = 0; nextIndex < next.length - 1; nextIndex += 1) {
+      const intersection = segmentIntersection(
+        previous[previousIndex],
+        previous[previousIndex + 1],
+        next[nextIndex],
+        next[nextIndex + 1],
+      );
+      if (!intersection) continue;
+      const score = pointDistance(intersection.point, previous[previousIndex + 1])
+        + previousSuffix[previousIndex + 1]
+        + nextPrefix[nextIndex]
+        + pointDistance(next[nextIndex], intersection.point);
+      if (!best || score < best.score) {
+        best = { intersection, nextIndex, previousIndex, score };
+      }
+    }
+  }
+  if (!best) return { previous, next };
+  const previousTrimmed = previous.slice(0, best.previousIndex + 1);
+  if (!samePoint(previousTrimmed.at(-1), best.intersection.point)) {
+    previousTrimmed.push(best.intersection.point);
+  }
+  const nextTrimmed = [best.intersection.point];
+  for (const point of next.slice(best.nextIndex + 1)) {
+    if (!samePoint(nextTrimmed.at(-1), point)) nextTrimmed.push(point);
+  }
+  return { previous: previousTrimmed, next: nextTrimmed };
+}
+
+function resolveAdjacentCurveIntersections(curves) {
+  const resolved = curves.map((curve) => [...curve]);
+  for (let index = 0; index < resolved.length; index += 1) {
+    const nextIndex = (index + 1) % resolved.length;
+    const trimmed = trimAdjacentCurves(resolved[index], resolved[nextIndex]);
+    resolved[index] = trimmed.previous;
+    resolved[nextIndex] = trimmed.next;
+  }
+  return resolved;
 }
 
 function cornerVertices(index, width, height, radius, shapeParameter) {
@@ -640,11 +780,11 @@ export function insetCornerGeometry(geometry, insets, {
     startInsets[index],
     endInsets[index],
   ));
-  const curves = corners.map((corner, index) => sampleAdjustedCorner(
+  const curves = resolveAdjacentCurveIntersections(corners.map((corner, index) => sampleAdjustedCorner(
     corner,
     geometry.shapeParameters[index],
     tolerance,
-  ));
+  )));
   const points = [curves[0].at(-1)];
   points.push(curves[1][0]);
   append(points, curves[1]);

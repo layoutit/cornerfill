@@ -1,0 +1,16 @@
+@layer cornerfill-imported, cornerfill-unused, cornerfill-local;
+@import "./child.css" layer(cornerfill-imported) supports(corner-shape: bevel) screen and (min-width: 1px);
+@import url("./child.css") layer(cornerfill-unused) not all;
+
+@layer cornerfill-local {
+  .cornerfill-import-order {
+    corner-shape: scoop;
+    background: blue;
+  }
+}
+
+.cornerfill-import-root {
+  corner-shape: notch;
+  border-radius: 5px;
+  background: green;
+}

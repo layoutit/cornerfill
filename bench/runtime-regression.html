@@ -6,7 +6,13 @@
   <script>
     const fail = event => {
       document.documentElement.dataset.runtimeRegressions = "fail";
-      document.querySelector("#status").textContent = event.reason?.stack || event.error?.stack || event.message || "runtime regression failed";
+      const error = event.reason || event.error;
+      const stage = globalThis.__CORNERFILL_TEST_STAGE__
+        ? `\nstage: ${globalThis.__CORNERFILL_TEST_STAGE__}`
+        : "";
+      document.querySelector("#status").textContent = error
+        ? `${error.message || "runtime regression failed"}\n${error.stack || ""}${stage}`
+        : event.message || "runtime regression failed";
     };
     addEventListener("error", fail);
     addEventListener("unhandledrejection", fail);

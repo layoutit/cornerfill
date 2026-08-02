@@ -1,6 +1,19 @@
-oracle/results/
-.playwright-cli/
-output/
-node_modules/
+# Local research, oracle, and browser evidence
+/notes/
+/oracle/
+/bench/mario-firefox-trace.mjs
+/scripts/compare.mjs
+/scripts/mario-server.mjs
+/scripts/oracle.mjs
+/scripts/png.mjs
+/scripts/serve-firefox-mario.mjs
+/scripts/trace-firefox-mario.mjs
+/test/mario-server.test.mjs
+/test/png.test.mjs
+
+# Generated and machine-local files
+/.playwright-cli/
+/output/
+/node_modules/
 *.tgz
 .DS_Store
