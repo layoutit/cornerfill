@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Cornerfill runtime hardening regressions</title>
+<body>
+  <output id="status">running</output>
+  <script>
+    const fail = event => {
+      document.documentElement.dataset.runtimeRegressions = "fail";
+      document.querySelector("#status").textContent = event.reason?.stack || event.error?.stack || event.message || "runtime regression failed";
+    };
+    addEventListener("error", fail);
+    addEventListener("unhandledrejection", fail);
+  </script>
+  <script type="module" src="./runtime-regression.mjs"></script>
+</body>
