@@ -1,20 +1,41 @@
 {
   "name": "cornerfill",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Live CSS-image corner-shape fallback for Safari and Firefox",
+  "version": "0.1.0",
+  "description": "Canvas-backed corner-shape polyfill for Safari and Firefox",
   "license": "MIT",
   "type": "module",
+  "sideEffects": [
+    "./src/auto.mjs"
+  ],
   "files": [
     "src/"
   ],
   "exports": {
-    ".": "./src/index.mjs",
+    ".": "./src/auto.mjs",
+    "./runtime": "./src/index.mjs",
     "./geometry": "./src/geometry.mjs",
     "./values": "./src/values.mjs"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/layoutit/cornerfill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/layoutit/cornerfill/issues"
+  },
+  "homepage": "https://github.com/layoutit/cornerfill#readme",
+  "keywords": [
+    "css",
+    "corner-shape",
+    "polyfill",
+    "safari",
+    "firefox"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "test": "node --test",

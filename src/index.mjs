@@ -6,6 +6,11 @@ export {
 } from "./runtime.mjs";
 
 export {
+  installCornerfillAuto,
+  transportCornerShapeDeclarations,
+} from "./auto-runtime.mjs";
+
+export {
   CORNER_SHAPE_PARAMETERS,
   diagonalToShapeParameter,
   interpolateCornerShape,

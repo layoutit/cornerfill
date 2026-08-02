@@ -7,11 +7,11 @@ Goal: `./goal.md`
 
 ## Active Checklist
 
-- [ ] **B4 | Prove and approval-gate the upstream baseline**
-  - Files/search: Git inventory, packed files, existing browser/oracle output, repository owner/visibility/remote.
-  - Action: Run the existing source, browser, and cross-engine proof; present the exact tracked inventory and proposed remote action. Pause for immediate approval before repository creation or push.
-  - Done/delete when: The approved baseline commit is reproducible from a clean clone and its package hash is recorded without weakened tolerances.
-  - Validate: `npm test`; `npm run test:browser:runtime`; `npm run oracle:cross`; `npm pack --dry-run --json`.
+- [ ] **B15 | Publish the plug-and-play npm release**
+  - Files/search: root/runtime exports, author CSS discovery, npm metadata, packed inventory, npm authentication and exact registry state.
+  - Action: Make `import "cornerfill"` auto-apply standard authored `corner-shape` CSS while keeping `cornerfill/runtime` scanner-free for prepared callers; publish `0.1.0` only after exact tarball approval and npm authentication.
+  - Done/delete when: The installed tarball auto-applies in WebKit/Firefox, stays native in Chrome, imports scanner-free through `cornerfill/runtime`, and the registry serves the verified version and integrity.
+  - Validate: `npm test`; the existing serial runtime browser fixture; `npm publish --dry-run --json`; one installed-tarball import smoke.
 
 - [ ] **B11 | Pin a clean PolyCSS baseline**
   - Files/search: `/Users/ekrof/fed/polycss-cornerfill-pr`; PolyCSS package surfaces, adapter conventions, React/Vue entry points, current focused tests/builds.
@@ -39,6 +39,7 @@ Goal: `./goal.md`
 
 ## Completed
 
+- B4 | 2026-08-02T00:33:45-03:00 | Prove and approval-gate the upstream baseline
 - B1 | 2026-08-01T22:20:36-03:00 | Initialize the upstreamable repository boundary
 - B2 | 2026-08-01T22:31:00-03:00 | Complete declaration and value handling
 - B3 | 2026-08-01T22:35:53-03:00 | Add spec-derived interpolation

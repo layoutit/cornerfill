@@ -54,6 +54,22 @@ Outcome:
 Follow-up:
 - B4 | Prove and approval-gate the upstream baseline
 
+## B4 | Prove and approval-gate the upstream baseline
+
+Completed: 2026-08-02T00:33:45-03:00
+Changed:
+- Public repository `https://github.com/layoutit/cornerfill`
+- Git remote/tracking state for local `main`
+Proof:
+- Remote `main` and local baseline both resolved to `4252b115a7c4c1fe65058568aa15213b4842c1be`
+- Clean-clone `npm test`: 38 passed
+- `npm pack --dry-run --json`: 12 files, 52,685 packed bytes, integrity `sha512-Ittzg7huCU6pUFZyOMjCQWJq4IK2+Y0I6IDAQUn/pL3Ua0wL27mZULqhAFQYuAU2Hmechsjac0OArsZHMlzCAw==`
+- Existing serial Chrome, WebKit, Firefox runtime and oracle evidence remained tied to the published source hashes with unchanged tolerances
+Outcome:
+- The approved MIT baseline was published to public `layoutit/cornerfill` on `main`; generated browser output, Mario assets, and machine-local state were excluded.
+Follow-up:
+- B15 | Publish the plug-and-play npm release
+
 ## B5 | Complete raster background semantics
 
 Completed: 2026-08-01T22:56:17-03:00

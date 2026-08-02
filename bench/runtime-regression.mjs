@@ -75,6 +75,38 @@ async function waitFor(predicate, label) {
   }
 }
 
+await test("automatic install consumes standard corner-shape CSS and tears down", async () => {
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = `data:text/css,${encodeURIComponent(".cornerfill-auto-fixture{width:12px;height:10px;border-radius:6px;corner-shape:bevel;background:#f00}")}`;
+  document.head.append(link);
+  const element = document.createElement("div");
+  element.className = "cornerfill-auto-fixture";
+  document.body.append(element);
+  const { cornerfill: auto } = await import("../src/auto.mjs");
+  await auto.ready;
+  const explanation = auto.explain(element);
+  if (auto.explain().mode === "native") {
+    assert(CSS.supports("corner-shape", "bevel"), "automatic native path was selected without native support");
+    assert(explanation === null, "automatic native path unnecessarily attached the element");
+  } else {
+    assert(
+      explanation?.status === "active",
+      `standard CSS element was not attached automatically: ${JSON.stringify(auto.explain())}`,
+    );
+    equal(explanation.geometry.shapeParameters, [0, 0, 0, 0], "automatic CSS transport changed the bevel shape");
+    const paints = explanation.counters.paints;
+    element.style.transform = "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,3,4,0,1)";
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    assert(auto.explain(element).counters.paints === paints, "automatic element repainted for a transform-only change");
+  }
+  auto.destroy();
+  assert(!element.hasAttribute("data-cornerfill-owned"), "automatic teardown retained element ownership");
+  assert(!document.querySelector("style[data-cornerfill-auto-styles]"), "automatic teardown retained a carrier stylesheet");
+  element.remove();
+  link.remove();
+});
+
 await test("disposed generic initialization cannot resurrect", async () => {
   const element = host();
   const controller = installCornerfill(options());

@@ -4,7 +4,8 @@ Repo: `/Users/ekrof/fed/cornerfill`
 
 ## Goal
 
-Publish Cornerfill as the small, reusable `layoutit/cornerfill` repository,
+Publish Cornerfill as the small, reusable `layoutit/cornerfill` repository and
+`cornerfill` npm package,
 close the implementable `corner-shape` support gaps in its paint-owned
 backend, and integrate its prepared API into PolyCSS through an opt-in adapter
 PR.
@@ -45,7 +46,7 @@ must be refused explicitly with the concrete reason.
 - Run one browser engine at a time and close only the exact session opened.
 - Local `git init` is authorized. Repository creation, push, and PR creation
   require immediate confirmation of the exact external action.
-- Do not publish npm in this Burnlist.
+- npm publication requires immediate approval of the exact version and packed integrity.
 
 ## Proof Authority
 
@@ -57,9 +58,9 @@ must be refused explicitly with the concrete reason.
 - The existing final Mario trace and Gecko profile remain performance
   evidence. Re-run only the narrow final integration workload, not a new
   benchmark suite.
-- Repository distribution readiness is `npm pack --dry-run --json` plus one
-  clean import smoke from this folder; this Burnlist does not create a second
-  package or publish npm.
+- Repository distribution readiness is `npm publish --dry-run --json` plus one
+  installed-tarball import smoke; npm publication uses this same package rather
+  than creating a second package or runtime.
 - PolyCSS readiness is focused affected-package tests/builds plus one serial
   browser integration capture. Root-wide unrelated gates are not added.
 
@@ -70,6 +71,10 @@ interpolation gaps. B5-B10 fill and prove the remaining implementable
 paint/composition gaps locally. B4 then becomes the explicit approval gate for
 creating and pushing the completed Cornerfill repository.
 
+B15 adds the standard-CSS automatic entry and publishes the exact verified npm
+tarball. The prepared PolyCSS lane continues through the scanner-free runtime
+entry.
+
 After the immutable Cornerfill baseline exists, B11-B13 build and prove the
 clean PolyCSS integration. B14 closes both lanes against the same Cornerfill
 commit.
@@ -78,6 +83,8 @@ commit.
 
 - Stop before remote repository creation or push until the user confirms the
   exact owner, visibility, license, tracked files, and action.
+- Stop before npm publication until authentication is active and the user
+  confirms the exact version and packed integrity.
 - Stop before PolyCSS push or PR creation until the user confirms the exact
   branch, target, commits, and PR action.
 - Stop if integration requires copying Cornerfill source into PolyCSS, a new

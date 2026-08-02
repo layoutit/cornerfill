@@ -1,12 +1,20 @@
 # Cornerfill
 
-A live CSS `corner-shape` polyfill for Safari and Firefox. Cornerfill paints the spec-derived contour, backgrounds, and borders into a transparent CSS image attached to the original element. Qualified Chrome releases keep using native `corner-shape`, while transforms such as `matrix3d(...)` stay on the real DOM element in every browser.
+A `corner-shape` polyfill for Safari and Firefox. Cornerfill draws the element's shaped background and border onto a transparent canvas and displays it on the original DOM element. Chrome uses the native CSS property. Because Cornerfill never replaces or transforms the element, `matrix3d(...)` animation remains browser-composited.
 
 Cornerfill is built for retained DOM renderers such as [PolyCSS](https://github.com/LayoutitStudio/polycss), but its runtime and geometry are standalone.
 
 ## Use
 
-Browsers may discard unsupported declarations before JavaScript can read them. Keep the native properties and add durable Cornerfill carriers:
+```sh
+npm install cornerfill
+```
+
+Import Cornerfill once, then write ordinary CSS:
+
+```js
+import "cornerfill";
+```
 
 ```css
 .triangle {
@@ -14,16 +22,16 @@ Browsers may discard unsupported declarations before JavaScript can read them. K
   height: 100px;
   border-radius: 50% 50% 0 0 / 100% 100% 0 0;
   corner-shape: bevel bevel round round;
-  --cornerfill-border-radius: 50% 50% 0 0 / 100% 100% 0 0;
-  --cornerfill-corner-shape: bevel bevel round round;
   background: #f05a47;
 }
 ```
 
-Attach Cornerfill to the element and dispose it when the element leaves the page:
+Chrome uses its native implementation. Cornerfill finds the same declaration in readable authored stylesheets and attaches the Safari or Firefox fallback automatically.
+
+Retained renderers can skip stylesheet discovery and use the explicit runtime API:
 
 ```js
-import { installCornerfill } from "cornerfill";
+import { installCornerfill } from "cornerfill/runtime";
 
 const cornerfill = installCornerfill();
 const triangle = cornerfill.attach(document.querySelector(".triangle"));
@@ -37,9 +45,9 @@ triangle.dispose();
 cornerfill.destroy();
 ```
 
-Cornerfill is not published to a package registry yet. Consume it from source or pin a Git commit.
-
 ## How It Works
+
+The default import reads author CSS once and creates a small companion stylesheet containing only the shape values Safari and Firefox would otherwise discard. The browser still resolves selectors, conditions, and the cascade.
 
 Cornerfill parses `border-radius` and `corner-shape`, resolves the CSS radius constraints, builds the contour, and paints the element-owned pixels into a transparent Canvas surface. Safari receives that surface through `-webkit-canvas()`. Firefox receives it through `-moz-element()` and `mozSetImageElement()`.
 
@@ -68,6 +76,8 @@ There is no `clip-path`, CSS mask, SVG or font stencil, or baked-alpha asset wor
 Fallback mode owns the host background, supported border paint, and supported contained effects. It cannot provide descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, shaped `backdrop-filter` clipping, outer shadows, outlines outside the border box, per-side border colors, or non-solid border styles.
 
 Cornerfill refuses cases whose semantics it cannot preserve instead of silently rendering a false result. Inspect `controller.capabilities` and `handle.explain()` for the exact active path and limitations.
+
+Automatic discovery cannot read a cross-origin stylesheet without CORS, imported rules reached through `@import`, constructed/adopted stylesheets, closed shadow roots, or styles blocked by a strict CSP. Those cases can use the explicit runtime API or prepared state.
 
 ## Development
 
