@@ -65,7 +65,7 @@ test("disposed WebKit named canvas identifiers are reused per document and prefi
   second.dispose();
 });
 
-function firefoxDocument({ context = {}, registrationThrows = false } = {}) {
+function firefoxDocument({ context = {}, registrationThrows = false, unregisterThrows = false } = {}) {
   const registrations = [];
   const canvas = {
     id: "",
@@ -90,9 +90,32 @@ function firefoxDocument({ context = {}, registrationThrows = false } = {}) {
     mozSetImageElement(id, element) {
       registrations.push([id, element]);
       if (registrationThrows && element) throw new Error("registration failed");
+      if (unregisterThrows && !element) throw new Error("unregister failed");
     },
   };
 }
+
+test("Firefox support requires live Canvas registration, not syntax alone", () => {
+  const document = {
+    defaultView: {
+      CSS: { supports: () => true },
+      devicePixelRatio: 1,
+    },
+    createElement() {
+      return {
+        getContext: () => ({}),
+        remove() {},
+        setAttribute() {},
+        style: {},
+      };
+    },
+  };
+  assert.throws(() => createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 10,
+    cssHeight: 10,
+  }), /unavailable/u);
+});
 
 test("Firefox validates allocation before registering a live image", () => {
   const document = firefoxDocument();
@@ -117,7 +140,26 @@ test("Firefox registration failure rolls back the exact ID", () => {
   assert.equal(document.registrations[1][1], null);
   assert.equal(document.canvas.width, 1);
   assert.equal(document.canvas.height, 1);
-  assert.equal(getSurfaceResourceStats(document).firefox.registrations, 0);
+  assert.deepEqual(getSurfaceResourceStats(document).firefox, {
+    registrations: 0,
+    unregisterFailures: 0,
+  });
+});
+
+test("Firefox teardown completes and reports an unregister failure", () => {
+  const document = firefoxDocument({ unregisterThrows: true });
+  const surface = createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 10,
+    cssHeight: 10,
+  });
+  assert.doesNotThrow(() => surface.dispose());
+  assert.equal(document.canvas.width, 1);
+  assert.equal(document.canvas.height, 1);
+  assert.deepEqual(getSurfaceResourceStats(document).firefox, {
+    registrations: 1,
+    unregisterFailures: 1,
+  });
 });
 
 test("WebKit reuse pools are bounded and every released canvas is shrunk", () => {

@@ -1,0 +1,19 @@
+{
+  "schema": "cornerfill-oracle-tolerances@1",
+  "calibration": {
+    "approved": true,
+    "maxMeanAlpha": 0,
+    "maxMeanPremultipliedRgb": 0,
+    "maxChangedPixelRatio": 0,
+    "channelThreshold": 0,
+    "note": "Repeated screenshots of the same static native fixture must be byte-pixel exact."
+  },
+  "candidate": {
+    "approved": false,
+    "maxMeanAlpha": 0,
+    "maxMeanPremultipliedRgb": 0,
+    "maxChangedPixelRatio": 0,
+    "channelThreshold": 0,
+    "note": "No native-vs-candidate tolerance is approved yet. Calibrate from evidence before qualification."
+  }
+}

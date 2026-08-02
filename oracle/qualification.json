@@ -1,0 +1,14 @@
+{
+  "schema": "cornerfill-oracle-qualification@1",
+  "nativeCalibration": {
+    "status": "PASS",
+    "scope": "same-fixture native A/A capture",
+    "approvedTolerance": true,
+    "exactZeroTolerance": true
+  },
+  "candidate": {
+    "status": "UNQUALIFIED",
+    "approvedTolerance": false,
+    "reason": "No native-versus-candidate pixel tolerance has been approved."
+  }
+}

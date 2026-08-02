@@ -14,6 +14,17 @@ import type { Four } from "./values.mjs";
 
 export const CORNERFILL_PAINTER_SCHEMA = "cornerfill-production-painter@1";
 
+const ZERO_ALPHA = String.raw`(?:0+(?:\.0*)?|\.0+)(?:e[+-]?\d+)?%?`;
+const ZERO_SLASH_ALPHA = new RegExp(`/\\s*${ZERO_ALPHA}\\s*\\)$`, "iu");
+const ZERO_LEGACY_ALPHA = new RegExp(`^(?:rgba|hsla)\\([\\s\\S]*,\\s*${ZERO_ALPHA}\\s*\\)$`, "iu");
+
+export function isFullyTransparentCssColor(value: string): boolean {
+  const color = String(value).trim();
+  return /^transparent$/iu.test(color)
+    || ZERO_SLASH_ALPHA.test(color)
+    || ZERO_LEGACY_ALPHA.test(color);
+}
+
 export interface RasterPaintState {
   readonly backgroundPosition?: PixelPair | undefined;
   readonly backgroundSize?: PixelPair | undefined;
@@ -99,6 +110,8 @@ export interface BorderPaintState {
 }
 
 export interface OwnedBorderPaintState extends BorderPaintState {
+  readonly colors?: Four<string> | undefined;
+  readonly styles?: Four<string> | undefined;
   readonly widths: Four<number>;
 }
 
@@ -146,6 +159,93 @@ export interface CornerfillPaintOptions {
   readonly shadow?: InsetShadowPaintState | null | undefined;
 }
 
+export type PixelRect = readonly [x: number, y: number, width: number, height: number];
+
+export interface ImageLayerPaintResult {
+  readonly blendMode?: "multiply" | undefined;
+  readonly destinationRect: PixelRect | null;
+  readonly imageSize: PixelPair;
+  readonly kind: "image";
+  readonly repeat?: Readonly<BackgroundRepeat> | "no-repeat" | undefined;
+  readonly sourceRect: PixelRect | null;
+  readonly tileSize?: PixelPair | undefined;
+  readonly tilesDrawn?: number | undefined;
+}
+
+export interface GradientLayerPaintResult {
+  readonly kind: "conic-gradient" | "linear-gradient" | "radial-gradient";
+  readonly tilesDrawn: number;
+}
+
+export interface SolidLayerPaintResult {
+  readonly color: string;
+  readonly kind: "solid";
+}
+
+export interface EmptyLayerPaintResult {
+  readonly kind: "none";
+}
+
+export type OwnedLayerPaintResult =
+  | ImageLayerPaintResult
+  | GradientLayerPaintResult
+  | SolidLayerPaintResult
+  | EmptyLayerPaintResult;
+
+export interface EmptyClipPaintResult {
+  readonly emptyClip: true;
+  readonly kind: OwnedPaintLayer["kind"];
+}
+
+export type ClippedOwnedLayerPaintResult = OwnedLayerPaintResult | EmptyClipPaintResult;
+
+export interface LayerStackPaintResult {
+  readonly color: Readonly<ClippedOwnedLayerPaintResult> | null;
+  readonly kind: "layers";
+  readonly layers: readonly Readonly<ClippedOwnedLayerPaintResult>[];
+}
+
+export type PaintLayerResult = OwnedLayerPaintResult | EmptyClipPaintResult | LayerStackPaintResult;
+
+export interface CornerfillPaintResult {
+  readonly border: Readonly<{
+    color: string;
+    kind: "solid-shaped-ring";
+    widths: Four<number>;
+  }> | null;
+  readonly layer: Readonly<PaintLayerResult>;
+  readonly outline: Readonly<ContainedOutlinePaintState> | null;
+  readonly painter: typeof CORNERFILL_PAINTER_SCHEMA;
+  readonly shadow: Readonly<InsetShadowPaintState> | null;
+}
+
+export interface PreparedOpaqueImageExplanation {
+  readonly border: null;
+  readonly layer: Readonly<ImageLayerPaintResult>;
+  readonly painter: typeof CORNERFILL_PAINTER_SCHEMA;
+  readonly update: "prepared-opaque-source-in";
+}
+
+export interface OpaqueCornerfillPaintResult {
+  readonly border: null;
+  readonly layer: Readonly<OwnedLayerPaintResult>;
+  readonly painter: typeof CORNERFILL_PAINTER_SCHEMA;
+  readonly update: "opaque-source-in";
+}
+
+export type CornerfillPaintExplanation =
+  | CornerfillPaintResult
+  | PreparedOpaqueImageExplanation
+  | OpaqueCornerfillPaintResult;
+
+function freezePair(first: number, second: number): PixelPair {
+  return Object.freeze([first, second]);
+}
+
+function freezeRect(x: number, y: number, width: number, height: number): PixelRect {
+  return Object.freeze([x, y, width, height]);
+}
+
 function imageDimensions(image: CornerfillRasterSource): PixelPair {
   const width = image?.naturalWidth ?? image?.videoWidth ?? image?.width;
   const height = image?.naturalHeight ?? image?.videoHeight ?? image?.height;
@@ -153,7 +253,7 @@ function imageDimensions(image: CornerfillRasterSource): PixelPair {
     || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new TypeError("raster paint requires a decoded image with intrinsic dimensions");
   }
-  return [width, height];
+  return freezePair(width, height);
 }
 
 export function traceClosedPoints(
@@ -200,7 +300,7 @@ function drawNoRepeatImage(
   paint: RasterPaintState,
   width: number,
   height: number,
-) {
+): Readonly<ImageLayerPaintResult> {
   const image = paint.image;
   const [intrinsicWidth, intrinsicHeight] = imageDimensions(image);
   if (paint.sourceSize) {
@@ -225,7 +325,7 @@ function drawNoRepeatImage(
   if (destinationRight <= destinationLeft || destinationBottom <= destinationTop) {
     return Object.freeze({
       kind: "image",
-      imageSize: Object.freeze([intrinsicWidth, intrinsicHeight]),
+      imageSize: freezePair(intrinsicWidth, intrinsicHeight),
       sourceRect: null,
       destinationRect: null,
     });
@@ -250,14 +350,14 @@ function drawNoRepeatImage(
   );
   return Object.freeze({
     kind: "image",
-    imageSize: Object.freeze([intrinsicWidth, intrinsicHeight]),
-    sourceRect: Object.freeze([sourceX, sourceY, sourceWidth, sourceHeight]),
-    destinationRect: Object.freeze([
+    imageSize: freezePair(intrinsicWidth, intrinsicHeight),
+    sourceRect: freezeRect(sourceX, sourceY, sourceWidth, sourceHeight),
+    destinationRect: freezeRect(
       destinationLeft,
       destinationTop,
       destinationRight - destinationLeft,
       destinationBottom - destinationTop,
-    ]),
+    ),
   });
 }
 
@@ -271,7 +371,7 @@ function drawRasterImage(
   paint: RasterPaintState,
   width: number,
   height: number,
-) {
+): Readonly<ImageLayerPaintResult> {
   if (noRepeat(paint.repeat)) return drawNoRepeatImage(context, paint, width, height);
   const image = paint.image;
   const [intrinsicWidth, intrinsicHeight] = imageDimensions(image);
@@ -313,13 +413,13 @@ function drawRasterImage(
   }
   return Object.freeze({
     kind: "image",
-    imageSize: Object.freeze([intrinsicWidth, intrinsicHeight]),
-    tileSize: Object.freeze([backgroundWidth, backgroundHeight]),
+    imageSize: freezePair(intrinsicWidth, intrinsicHeight),
+    tileSize: freezePair(backgroundWidth, backgroundHeight),
     tilesDrawn,
     repeat: paint.repeat,
-    sourceRect: tilesDrawn ? Object.freeze([0, 0, intrinsicWidth, intrinsicHeight]) : null,
+    sourceRect: tilesDrawn ? freezeRect(0, 0, intrinsicWidth, intrinsicHeight) : null,
     destinationRect: tilesDrawn
-      ? Object.freeze([xPositions[0], yPositions[0], backgroundWidth, backgroundHeight])
+      ? freezeRect(xPositions[0]!, yPositions[0]!, backgroundWidth, backgroundHeight)
       : null,
   });
 }
@@ -444,7 +544,7 @@ function paintGradient(
   paint: GradientPaintState,
   width: number,
   height: number,
-) {
+): Readonly<GradientLayerPaintResult> {
   const tiles = gradientTiles(paint, width, height);
   for (const [x, y, tileWidth, tileHeight] of tiles) {
     if (paint.kind === "linear-gradient") {
@@ -463,7 +563,7 @@ export function paintOwnedLayer(
   paint: OwnedPaintLayer,
   width: number,
   height: number,
-) {
+): Readonly<OwnedLayerPaintResult> {
   if (!paint || typeof paint !== "object") throw new TypeError("paint state is required");
   if (paint.kind === "solid") {
     fillRect(context, paint.color, width, height);
@@ -571,13 +671,13 @@ function preparedImageRect(
   program: Readonly<PreparedOpaqueImageProgram>,
   positionX: number,
   positionY: number,
-) {
-  return {
+): Readonly<{ sourceHeight: number; sourceWidth: number; sourceX: number; sourceY: number }> {
+  return Object.freeze({
     sourceX: positionX === 0 ? 0 : -positionX * program.sourceScaleX,
     sourceY: positionY === 0 ? 0 : -positionY * program.sourceScaleY,
     sourceWidth: program.sourceWidth,
     sourceHeight: program.sourceHeight,
-  };
+  });
 }
 
 export function preparePreparedOpaqueImageContext(
@@ -615,14 +715,13 @@ export function drawPreparedOpaqueImage(
   positionY: number,
 ): void {
   validatePreparedOpaqueImagePosition(program, positionX, positionY);
-  const sourceX = positionX === 0 ? 0 : -positionX * program.sourceScaleX;
-  const sourceY = positionY === 0 ? 0 : -positionY * program.sourceScaleY;
+  const rect = preparedImageRect(program, positionX, positionY);
   context.drawImage(
     program.image,
-    sourceX,
-    sourceY,
-    program.sourceWidth,
-    program.sourceHeight,
+    rect.sourceX,
+    rect.sourceY,
+    rect.sourceWidth,
+    rect.sourceHeight,
     0,
     0,
     program.width,
@@ -630,34 +729,24 @@ export function drawPreparedOpaqueImage(
   );
 }
 
-export function repaintPreparedOpaqueImage(
-  context: CanvasRenderingContext2D,
-  program: Readonly<PreparedOpaqueImageProgram>,
-  positionX: number,
-  positionY: number,
-): void {
-  preparePreparedOpaqueImageContext(context, program);
-  drawPreparedOpaqueImage(context, program, positionX, positionY);
-}
-
 export function explainPreparedOpaqueImage(
   program: Readonly<PreparedOpaqueImageProgram>,
   positionX: number,
   positionY: number,
-) {
+): Readonly<PreparedOpaqueImageExplanation> {
   const rect = preparedImageRect(program, positionX, positionY);
   return Object.freeze({
     painter: CORNERFILL_PAINTER_SCHEMA,
     layer: Object.freeze({
       kind: "image",
-      imageSize: Object.freeze([program.intrinsicWidth, program.intrinsicHeight]),
-      sourceRect: Object.freeze([
+      imageSize: freezePair(program.intrinsicWidth, program.intrinsicHeight),
+      sourceRect: freezeRect(
         rect.sourceX,
         rect.sourceY,
         rect.sourceWidth,
         rect.sourceHeight,
-      ]),
-      destinationRect: Object.freeze([0, 0, program.width, program.height]),
+      ),
+      destinationRect: freezeRect(0, 0, program.width, program.height),
     }),
     border: null,
     update: "prepared-opaque-source-in",
@@ -678,7 +767,7 @@ export function repaintOpaqueCornerfill(context: CanvasRenderingContext2D, {
   outline?: ContainedOutlinePaintState | null | undefined;
   paint: CornerfillPaintState;
   shadow?: InsetShadowPaintState | null | undefined;
-}>) {
+}>): Readonly<OpaqueCornerfillPaintResult> | null {
   if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
   if (border || shadow || outline || !fullyCoversBox(paint, geometry.width, geometry.height)) return null;
   context.save();
@@ -722,8 +811,8 @@ function supportedBorder(
     throw new TypeError("painted border sides must use solid style");
   }
   return Object.freeze({
-    ...border,
     widths: Object.freeze([...widths]) as Four<number>,
+    width: widths.every((width) => width === widths[0]) ? widths[0]! : null,
     color: String(border.color),
   });
 }
@@ -826,8 +915,6 @@ function clipToBackgroundArea(
   return true;
 }
 
-type PaintLayerResult = Readonly<{ kind: string; [key: string]: unknown }>;
-
 function paintBackground(
   context: CanvasRenderingContext2D,
   geometry: CornerGeometry,
@@ -836,25 +923,23 @@ function paintBackground(
   const paintClipped = (
     layer: OwnedPaintLayer,
     clipArea: Readonly<BackgroundArea> | null | undefined,
-  ): PaintLayerResult => {
+  ): ClippedOwnedLayerPaintResult => {
     context.save();
     const visible = clipToBackgroundArea(context, geometry, clipArea);
     const result = visible
-      ? paintOwnedLayer(context, layer, geometry.width, geometry.height) as PaintLayerResult
+      ? paintOwnedLayer(context, layer, geometry.width, geometry.height)
       : Object.freeze({ kind: layer.kind, emptyClip: true });
     context.restore();
     return result;
   };
   const transparent = (color: string | undefined): boolean => !color
-    || color === "transparent"
-    || /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/iu.test(color)
-    || /\/\s*0(?:\.0+)?\s*\)$/u.test(color);
+    || isFullyTransparentCssColor(color);
   let layer: PaintLayerResult;
   if (paint.kind === "layers") {
     const color = transparent(paint.color)
       ? null
       : paintClipped({ kind: "solid", color: paint.color }, paint.colorClipArea);
-    const results: PaintLayerResult[] = new Array(paint.layers.length);
+    const results: ClippedOwnedLayerPaintResult[] = new Array(paint.layers.length);
     for (let index = paint.layers.length - 1; index >= 0; index -= 1) {
       results[index] = paintClipped(paint.layers[index]!, paint.layers[index]!.clipArea);
     }

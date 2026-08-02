@@ -158,7 +158,42 @@ function freezeLengthPercentage(px: number, percent: number, source: string): Re
 
 const NUMBER = String.raw`(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?`;
 const SIMPLE_LENGTH_PERCENTAGE = new RegExp(`^([+-]?${NUMBER})(px|%)?$`, "iu");
-const CALC_TERM = new RegExp(`([+-]?)(${NUMBER})(px|%)?`, "ig");
+
+interface AdditiveCalcTerm {
+  readonly number: number;
+  readonly unit: string;
+}
+
+function additiveCalcTerms(
+  expression: string,
+  source: string,
+  label: string,
+): readonly Readonly<AdditiveCalcTerm>[] {
+  const first = new RegExp(`^\\s*([+-]?)(${NUMBER})(px|%)?`, "iu").exec(expression);
+  if (!first) throw syntaxError(label, source, "uses unsupported calc() arithmetic");
+  const terms: AdditiveCalcTerm[] = [{
+    number: Number(`${first[1]}${first[2]}`),
+    unit: (first[3] ?? "").toLowerCase(),
+  }];
+  let cursor = first[0].length;
+  const next = new RegExp(`^\\s+([+-])\\s+([+-]?)(${NUMBER})(px|%)?`, "iu");
+  while (cursor < expression.length) {
+    const rest = expression.slice(cursor);
+    if (/^\s*$/u.test(rest)) {
+      cursor = expression.length;
+      break;
+    }
+    const match = next.exec(rest);
+    if (!match) throw syntaxError(label, source, "uses unsupported calc() arithmetic");
+    const binarySign = match[1] === "-" ? -1 : 1;
+    terms.push({
+      number: binarySign * Number(`${match[2]}${match[3]}`),
+      unit: (match[4] ?? "").toLowerCase(),
+    });
+    cursor += match[0].length;
+  }
+  return Object.freeze(terms.map((term) => Object.freeze(term)));
+}
 
 export function parseLengthPercentage(
   input: string,
@@ -177,29 +212,17 @@ export function parseLengthPercentage(
 
   const match = /^calc\((.*)\)$/isu.exec(source);
   if (!match) throw syntaxError(label, source, "is outside the supported px/% syntax");
-  const expression = match[1]!.replaceAll(/\s+/gu, "");
-  if (!expression) throw syntaxError(label, source, "contains an empty calc()");
-  let cursor = 0;
+  const expression = match[1]!;
+  if (!expression.trim()) throw syntaxError(label, source, "contains an empty calc()");
   let px = 0;
   let percent = 0;
-  let terms = 0;
-  CALC_TERM.lastIndex = 0;
-  for (let term = CALC_TERM.exec(expression); term; term = CALC_TERM.exec(expression)) {
-    if (term.index !== cursor || (terms > 0 && !term[1])) {
-      throw syntaxError(label, source, "uses unsupported calc() arithmetic");
-    }
-    const number = Number(`${term[1]}${term[2]}`);
-    const unit = (term[3] ?? "").toLowerCase();
+  for (const term of additiveCalcTerms(expression, source, label)) {
+    const { number, unit } = term;
     if (!Number.isFinite(number) || (!unit && number !== 0)) {
       throw syntaxError(label, source, "requires px, %, or unitless zero terms");
     }
     if (unit === "%") percent += number / 100;
     else px += number;
-    cursor = CALC_TERM.lastIndex;
-    terms += 1;
-  }
-  if (terms === 0 || cursor !== expression.length) {
-    throw syntaxError(label, source, "uses unsupported calc() arithmetic");
   }
   return freezeLengthPercentage(px, percent, source);
 }
@@ -302,7 +325,34 @@ export function resolveCornerRadiusLonghands(
   if (!Array.isArray(values) || values.length !== CORNER_COUNT) {
     throw new TypeError("corner radius longhands must contain four values");
   }
-  return resolveParsedRadii(values.map(parseCornerRadius), width, height);
+  const resolveComputedValue = (source: string, reference: number, label: string): number => {
+    try {
+      return resolveLengthPercentage(source, reference);
+    } catch (originalError) {
+      const match = /^(min|max|clamp)\(([\s\S]*)\)$/iu.exec(source.trim());
+      if (!match) throw originalError;
+      const operation = match[1]!.toLowerCase();
+      const argumentsList = splitTopLevelCommas(match[2]!).map((argument) => (
+        resolveComputedValue(argument, reference, label)
+      ));
+      if (operation === "clamp") {
+        if (argumentsList.length !== 3) throw syntaxError(label, source, "requires three clamp() arguments");
+        return Math.max(argumentsList[0]!, Math.min(argumentsList[1]!, argumentsList[2]!));
+      }
+      if (argumentsList.length < 1) throw syntaxError(label, source, `requires ${operation}() arguments`);
+      return operation === "min" ? Math.min(...argumentsList) : Math.max(...argumentsList);
+    }
+  };
+  return Object.freeze(values.map((source) => {
+    const tokens = splitTopLevelWhitespace(source);
+    if (tokens.length < 1 || tokens.length > 2) {
+      throw syntaxError("corner radius", source, "requires one or two computed values");
+    }
+    return Object.freeze({
+      rx: Math.max(0, resolveComputedValue(tokens[0]!, width, "corner horizontal radius")),
+      ry: Math.max(0, resolveComputedValue(tokens[1] ?? tokens[0]!, height, "corner vertical radius")),
+    });
+  })) as Four<Readonly<ResolvedCornerRadius>>;
 }
 
 const PHYSICAL_CORNER_INDEX = Object.freeze({
@@ -388,7 +438,7 @@ export function parseCornerShapeValue(input: string): number {
   const match = /^superellipse\((.*)\)$/isu.exec(source);
   if (!match) throw syntaxError("corner-shape", input, "contains an unsupported value");
   const argument = match[1]!.trim();
-  if (argument === "infinity" || argument === "+infinity") return Number.POSITIVE_INFINITY;
+  if (argument === "infinity") return Number.POSITIVE_INFINITY;
   if (argument === "-infinity") return Number.NEGATIVE_INFINITY;
   const simpleNumber = new RegExp(`^[+-]?${NUMBER}$`, "iu");
   let value: number;
@@ -398,21 +448,16 @@ export function parseCornerShapeValue(input: string): number {
     if (!calculation) {
       throw syntaxError("corner-shape", input, "requires a finite number or signed infinity");
     }
-    const expression = calculation[1]!.replaceAll(/\s+/gu, "");
-    let cursor = 0;
-    let terms = 0;
+    const expression = calculation[1]!;
+    if (!expression.trim()) {
+      throw syntaxError("corner-shape", input, "contains an empty calc()");
+    }
     value = 0;
-    CALC_TERM.lastIndex = 0;
-    for (let term = CALC_TERM.exec(expression); term; term = CALC_TERM.exec(expression)) {
-      if (term.index !== cursor || term[3] || (terms > 0 && !term[1])) {
+    for (const term of additiveCalcTerms(expression, String(input), "corner-shape")) {
+      if (term.unit) {
         throw syntaxError("corner-shape", input, "uses unsupported calc() arithmetic");
       }
-      value += Number(`${term[1]}${term[2]}`);
-      cursor = CALC_TERM.lastIndex;
-      terms += 1;
-    }
-    if (terms === 0 || cursor !== expression.length) {
-      throw syntaxError("corner-shape", input, "uses unsupported calc() arithmetic");
+      value += term.number;
     }
   }
   if (!Number.isFinite(value)) throw syntaxError("corner-shape", input, "contains an invalid number");

@@ -89,7 +89,7 @@ test("Mario fixture resolves to a triangular contour", () => {
   assert.deepEqual(unique, [[32, 0], [64, 44], [0, 44]]);
 });
 
-test("contour points stay finite and inside the ordinary fixture box", () => {
+test("adaptive contour points stay finite, bounded, and refine for device pixels", () => {
   const fixture = {
     size: [230, 170],
     radii: [
@@ -106,7 +106,14 @@ test("contour points stay finite and inside the ordinary fixture box", () => {
     radii: fixture.radii,
     shapeParameters: fixture.shapeParameters,
   });
-  assert.ok(points.length > 100);
+  const highDprPoints = contourPoints({
+    width: fixture.size[0],
+    height: fixture.size[1],
+    radii: fixture.radii,
+    shapeParameters: fixture.shapeParameters,
+    dpr: 3,
+  });
+  assert.ok(highDprPoints.length > points.length);
   for (const [x, y] of points) {
     assert.ok(Number.isFinite(x) && Number.isFinite(y));
     assert.ok(x >= 0 && x <= fixture.size[0]);

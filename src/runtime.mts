@@ -26,6 +26,7 @@ import type {
   ConcreteSurfaceBackend,
   CornerfillSurface,
   SurfaceBackend,
+  SurfaceResourceStats,
 } from "./backends.mjs";
 import {
   buildCornerGeometry,
@@ -34,12 +35,14 @@ import type { CornerGeometry } from "./geometry.mjs";
 import { ImageCache } from "./images.mjs";
 import type { ImageLease } from "./images.mjs";
 import { nextDocumentId } from "./identity.mjs";
-import { CORNERFILL_ORACLE_QUALIFICATION, qualifyNativeCornerShape } from "./native.mjs";
+import { qualifyNativeCornerShape } from "./native.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
+import { CORNERFILL_ORACLE_QUALIFICATION } from "./qualification.mjs";
 import {
   createPreparedOpaqueImageProgram,
   drawPreparedOpaqueImage,
   explainPreparedOpaqueImage,
+  isFullyTransparentCssColor,
   paintCornerfill,
   preparePreparedOpaqueImageContext,
   repaintOpaqueCornerfill,
@@ -47,6 +50,7 @@ import {
 } from "./paint.mjs";
 import type {
   ContainedOutlinePaintState,
+  CornerfillPaintExplanation,
   InsetShadowPaintState,
   OwnedBorderPaintState,
   PreparedOpaqueImageProgram,
@@ -86,6 +90,39 @@ export type RadiusSource =
   | BorderRadiusDeclarations
   | Readonly<{ kind: "longhands"; values: Four<string> }>;
 export type PaintSource = NormalizedPaintDescriptor;
+export type CornerfillSideValues<T> = T | Four<T> | Readonly<{
+  bottom: T;
+  left: T;
+  right: T;
+  top: T;
+}>;
+
+export interface CornerfillBorderDescriptor {
+  readonly color?: CornerfillSideValues<string> | undefined;
+  readonly colors?: CornerfillSideValues<string> | undefined;
+  readonly style?: CornerfillSideValues<string> | undefined;
+  readonly styles?: CornerfillSideValues<string> | undefined;
+  readonly width?: CornerfillSideValues<number> | null | undefined;
+  readonly widths?: CornerfillSideValues<number> | undefined;
+}
+
+export interface CornerfillInsetShadowDescriptor {
+  readonly blur?: number | undefined;
+  readonly color: string;
+  readonly inset?: true | undefined;
+  readonly kind?: "inset-solid-ring" | undefined;
+  readonly offset?: PixelPair | undefined;
+  readonly offsetX?: number | undefined;
+  readonly offsetY?: number | undefined;
+  readonly spread?: number | undefined;
+}
+
+export interface CornerfillOutlineDescriptor {
+  readonly color: string;
+  readonly offset?: number | string | undefined;
+  readonly style?: "none" | "solid" | undefined;
+  readonly width: number | string;
+}
 
 export interface CornerfillFallbackRequirements {
   readonly backdropFilterClip?: boolean | undefined;
@@ -128,17 +165,17 @@ export interface ResolvedCornerfillOptions {
 }
 
 export interface CornerfillAttachConfig {
-  readonly border?: unknown;
+  readonly border?: Readonly<CornerfillBorderDescriptor> | null | undefined;
   readonly borderRadius?: RadiusSource | undefined;
   readonly cornerShape?: CornerShapeSource | undefined;
   readonly dynamicCarriers?: boolean | undefined;
-  readonly mode?: string | undefined;
+  readonly mode?: "paint" | undefined;
   readonly observeBackgroundPosition?: boolean | undefined;
-  readonly outline?: unknown;
+  readonly outline?: Readonly<CornerfillOutlineDescriptor> | null | undefined;
   readonly paint?: PaintSource | undefined;
   readonly rasterIsOpaque?: boolean | undefined;
   readonly requirements?: Readonly<CornerfillFallbackRequirements> | undefined;
-  readonly shadow?: unknown;
+  readonly shadow?: string | Readonly<CornerfillInsetShadowDescriptor> | null | undefined;
   readonly visible?: boolean | undefined;
 }
 
@@ -177,7 +214,7 @@ interface OwnershipSurfaceRule {
   readonly rule: CSSStyleRule;
 }
 
-interface HostComposition {
+export interface HostComposition {
   readonly filter: "browser-compositor";
   readonly fragmentCount: number;
   readonly opacity: "browser-compositor";
@@ -221,6 +258,9 @@ interface ControllerCounters extends EntryCounters {
   staleRefreshes: number;
 }
 
+export type CornerfillEntryCounters = Readonly<EntryCounters>;
+export type CornerfillControllerCounters = Readonly<ControllerCounters>;
+
 interface EntryWaiter {
   readonly reject: (reason?: unknown) => void;
   readonly resolve: (value: CornerfillEntryExplanation) => void;
@@ -238,7 +278,7 @@ interface EntryDynamicSources {
 }
 
 interface InitialSources {
-  readonly borderSource: unknown;
+  readonly borderSource: Readonly<OwnedBorderPaintState> | null;
   readonly dynamic: Readonly<EntryDynamicSources>;
   readonly dynamicCarriers: boolean;
   readonly initialBackground: Readonly<{
@@ -253,12 +293,12 @@ interface InitialSources {
     backgroundSize: string;
     imageRendering: string;
   }>;
-  readonly outlineSource: unknown;
+  readonly outlineSource: Readonly<ContainedOutlinePaintState> | null;
   readonly paintSource: PaintSource;
   readonly radiusCarrierBaseline: PhysicalRadiusValues | null;
   readonly radiusSource: RadiusSource;
   readonly rasterIsOpaque: boolean;
-  readonly shadowSource: unknown;
+  readonly shadowSource: Readonly<InsetShadowPaintState> | null;
   readonly shapeCarrierBaseline: Readonly<{
     physical: Readonly<Record<string, string>>;
     shorthand: string;
@@ -267,12 +307,12 @@ interface InitialSources {
 }
 
 interface EntryState {
-  border?: unknown;
+  border?: Readonly<CornerfillBorderDescriptor> | null | undefined;
   borderRadius?: RadiusSource | undefined;
   cornerShape?: CornerShapeSource | undefined;
-  outline?: unknown;
+  outline?: Readonly<CornerfillOutlineDescriptor> | null | undefined;
   paint?: PaintSource | undefined;
-  shadow?: unknown;
+  shadow?: string | Readonly<CornerfillInsetShadowDescriptor> | null | undefined;
 }
 
 interface RuntimeEntry {
@@ -308,7 +348,7 @@ interface RuntimeEntry {
   lastError: Error | null;
   lastInvalidationReason: string | null;
   layerImageLeases: Map<string, Readonly<ImageLease>>;
-  mode: string;
+  mode: "paint";
   native: boolean;
   needsFullPreparedPaint: boolean;
   needsPaint: boolean;
@@ -319,20 +359,20 @@ interface RuntimeEntry {
   ownershipToken: string | null;
   ownershipVerified: boolean;
   paintKey: string | null;
-  paintResult: unknown;
+  paintResult: Readonly<CornerfillPaintExplanation> | null;
   pendingReason: string | null;
   positionX: number;
   positionY: number;
   prepared: boolean;
   preparedBorderRadius: RadiusSource | undefined;
-  preparedBorderSource: unknown;
+  preparedBorderSource: Readonly<CornerfillBorderDescriptor> | null;
   preparedCornerShape: CornerShapeSource | undefined;
   preparedLayoutChain: Promise<unknown> | null;
-  preparedOutlineSource: unknown;
+  preparedOutlineSource: Readonly<CornerfillOutlineDescriptor> | null;
   preparedPaintProgram: Readonly<PreparedOpaqueImageProgram> | null;
   preparedPaintSource: PaintSource;
   preparedResolvedPaint: ResolvedPaintDescriptor | null;
-  preparedShadowSource: unknown;
+  preparedShadowSource: string | Readonly<CornerfillInsetShadowDescriptor> | null;
   ready: Promise<CornerfillEntryExplanation> | null;
   requestedVisible: boolean;
   resolvedImage: CornerfillRasterSource | null;
@@ -352,22 +392,57 @@ interface RuntimeEntry {
 }
 
 export interface CornerfillEntryExplanation {
-  readonly backend: string;
+  readonly backend: ConcreteSurfaceBackend | "native-corner-shape" | "pending";
+  readonly border: Readonly<OwnedBorderPaintState> | null;
+  readonly composition: Readonly<HostComposition> | Readonly<{
+    originalElement: true;
+    semantics: "browser-native";
+  }> | null;
+  readonly counters: CornerfillEntryCounters;
+  readonly effects: Readonly<{
+    outline: Readonly<ContainedOutlinePaintState> | null;
+    shadow: Readonly<InsetShadowPaintState> | null;
+  }>;
   readonly error: string | null;
+  readonly geometry: Readonly<{
+    dpr: number;
+    height: number;
+    oppositeScale: number;
+    radii: Four<Radius>;
+    shapeParameters: Four<number>;
+    width: number;
+  }> | null;
   readonly implementationStatus: "IMPLEMENTED" | "NATIVE";
+  readonly lastInvalidationReason: string | null;
   readonly lastError: string | null;
-  readonly mode: string;
+  readonly limitations: Readonly<Partial<typeof CORNERFILL_LIMITATIONS>>;
+  readonly mode: "paint";
+  readonly oracleQualification: typeof CORNERFILL_ORACLE_QUALIFICATION;
   readonly ownershipVerified: boolean;
+  readonly paint: Readonly<CornerfillPaintExplanation> | null;
   readonly paintOwnership: "browser-native" | "host-background-border-and-contained-effects";
+  readonly prepared: Readonly<{
+    backgroundPosition: PixelPair | null;
+    directUpdates: true;
+    layoutUpdates: "explicit";
+    observesStyleMutations: false;
+    surfaceDeferred: boolean;
+    visible: boolean;
+  }> | null;
   readonly runtime: typeof CORNERFILL_RUNTIME_SCHEMA;
   readonly schema: "cornerfill-entry-explanation@2";
   readonly status: "active" | "disposed" | "error" | "initializing";
+  readonly surface: Readonly<{
+    backend: ConcreteSurfaceBackend;
+    id: string;
+    size: Readonly<CornerfillSurface["size"]>;
+  }> | null;
   readonly transformOwnedByCornerfill: false;
-  readonly [property: string]: unknown;
+  readonly visible: boolean | null;
 }
 
 export interface CornerfillHandle {
-  readonly backend: string;
+  readonly backend: ConcreteSurfaceBackend | "native-corner-shape" | "pending";
   readonly ready: Promise<CornerfillEntryExplanation>;
   dispose(): void;
   explain(): Readonly<CornerfillEntryExplanation>;
@@ -385,11 +460,17 @@ export interface CornerfillHandle {
 }
 
 export interface CornerfillControllerStats {
+  readonly activeFallbackEntries: number;
+  readonly activeNativeEntries: number;
+  readonly counters: CornerfillControllerCounters;
   readonly entries: number;
+  readonly geometryCacheEntries: number;
+  readonly imageCache: ReturnType<ImageCache["stats"]>;
   readonly runtime: typeof CORNERFILL_RUNTIME_SCHEMA;
   readonly schema: "cornerfill-controller-stats@2";
+  readonly surfacePixels: number;
+  readonly surfaceResources: Readonly<SurfaceResourceStats>;
   readonly surfaces: number;
-  readonly [property: string]: unknown;
 }
 
 export interface CornerfillControllerHandle {
@@ -453,6 +534,33 @@ interface PreparedLayoutSnapshot {
   readonly program: Readonly<PreparedOpaqueImageProgram> | null;
   readonly shadow: Readonly<InsetShadowPaintState> | null;
   readonly width: number;
+}
+
+function applyPreparedLayoutSnapshot(
+  entry: RuntimeEntry,
+  snapshot: Readonly<PreparedLayoutSnapshot>,
+): void {
+  entry.width = snapshot.width;
+  entry.height = snapshot.height;
+  entry.dpr = snapshot.dpr;
+  entry.geometry = snapshot.geometry;
+  entry.geometryKey = "prepared";
+  entry.border = snapshot.border;
+  entry.borderKey = snapshot.border ? JSON.stringify(snapshot.border) : "none";
+  entry.shadow = snapshot.shadow;
+  entry.outline = snapshot.outline;
+  entry.effectsKey = JSON.stringify([snapshot.shadow, snapshot.outline]);
+  entry.composition = snapshot.composition;
+  entry.preparedResolvedPaint = snapshot.paint;
+  entry.preparedPaintSource = snapshot.descriptor;
+  entry.preparedBorderSource = snapshot.border;
+  entry.preparedShadowSource = snapshot.shadow;
+  entry.preparedOutlineSource = snapshot.outline;
+  entry.preparedBorderRadius = snapshot.borderRadius;
+  entry.preparedCornerShape = snapshot.cornerShape;
+  entry.positionX = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[0] : 0;
+  entry.positionY = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[1] : 0;
+  entry.preparedPaintProgram = snapshot.program;
 }
 
 function createEntryCounters(): EntryCounters {
@@ -939,7 +1047,7 @@ function applyNativeShapeSource(element: CornerfillElement, source: unknown): vo
 
 function readCarrier(computed: CSSStyleDeclaration, name: string): string {
   const value = computed.getPropertyValue(name).trim();
-  return value === "__cornerfill_unset__" ? "" : value;
+  return value === "__cornerfill_unset__" || /^(?:initial|unset)$/iu.test(value) ? "" : value;
 }
 
 function readColorCarrier(computed: CSSStyleDeclaration, name: string): string {
@@ -1381,12 +1489,18 @@ function normalizeBorder(border: unknown): Readonly<OwnedBorderPaintState> | nul
   }
   const color = paintedColors[0];
   if (color === undefined) throw new TypeError("painted border sides require colors");
+  const normalizedColors = colorSides.map((sideColor) => String(sideColor ?? color));
   const normalized: Readonly<OwnedBorderPaintState> = Object.freeze({
     widths: Object.freeze(widths),
     width: widths.every((width) => width === widths[0]) ? widths[0] : null,
     color,
-    colors: Object.freeze(colorSides.map((sideColor) => String(sideColor ?? color))),
-    styles: Object.freeze(styleSides),
+    colors: frozenFour(
+      normalizedColors[0]!,
+      normalizedColors[1]!,
+      normalizedColors[2]!,
+      normalizedColors[3]!,
+    ),
+    styles: frozenFour(styleSides[0]!, styleSides[1]!, styleSides[2]!, styleSides[3]!),
   });
   return normalized;
 }
@@ -1510,17 +1624,20 @@ function captureInitialSources(
     physical: physicalShapeValues(computed),
   });
   const shapeCapture = captureShapeCarriers(computed, shapeBaseline);
-  const radiusSource: RadiusSource = config.borderRadius ?? (radiusCapture?.present
-    ? radiusCapture.source
-    : Object.freeze({
-    kind: "longhands",
+  const computedRadiusSource = Object.freeze({
+    kind: "longhands" as const,
     values: frozenFour(
       computed.borderTopLeftRadius,
       computed.borderTopRightRadius,
       computed.borderBottomRightRadius,
       computed.borderBottomLeftRadius,
     ),
-  }));
+  });
+  const radiusSource: RadiusSource = config.borderRadius ?? (dynamicCarriers
+    ? computedRadiusSource
+    : radiusCapture?.present
+    ? radiusCapture.source
+    : computedRadiusSource);
   const hasComputedShapeLonghands = Object.keys(shapeBaseline.physical).length > 0;
   const shapeSource = config.cornerShape ?? (shapeCapture.present
     ? shapeCapture.source
@@ -1628,8 +1745,8 @@ function currentSources(
   if (!initial || !state) throw new TypeError("current sources require a dynamic Cornerfill entry");
   let radiusSource = state.borderRadius ?? initial.radiusSource;
   if (state.borderRadius === undefined && initial.dynamic.radius) {
-    radiusSource = captureRadiusCarriers(computed, initial.radiusCarrierBaseline)?.source
-      ?? Object.freeze({
+    radiusSource = initial.dynamicCarriers
+      ? Object.freeze({
         kind: "longhands",
         values: Object.freeze([
           computed.borderTopLeftRadius,
@@ -1637,7 +1754,17 @@ function currentSources(
           computed.borderBottomRightRadius,
           computed.borderBottomLeftRadius,
         ]) as Four<string>,
-      });
+      })
+      : captureRadiusCarriers(computed, initial.radiusCarrierBaseline)?.source
+        ?? Object.freeze({
+          kind: "longhands",
+          values: Object.freeze([
+            computed.borderTopLeftRadius,
+            computed.borderTopRightRadius,
+            computed.borderBottomRightRadius,
+            computed.borderBottomLeftRadius,
+          ]) as Four<string>,
+        });
   }
   let shapeSource = state.cornerShape ?? initial.shapeSource;
   if (state.cornerShape === undefined && initial.dynamic.shape) {
@@ -2472,9 +2599,7 @@ class CornerfillController {
       ? image === surface.cssImage
         || image.includes(surface.cssImage.slice(5, -2))
       : image.includes(surface.id);
-    const transparent = computed.backgroundColor === "transparent"
-      || (/^rgba\(/u.test(computed.backgroundColor) && /,\s*0(?:\.0+)?\s*\)$/u.test(computed.backgroundColor))
-      || (/\/\s*0(?:\.0+)?\s*\)$/u.test(computed.backgroundColor));
+    const transparent = isFullyTransparentCssColor(computed.backgroundColor);
     const radiiOwned = RADIUS_LONGHANDS.every((property) => (
       numberFromPx(computed.getPropertyValue(property)) === 0
     ));
@@ -2483,9 +2608,7 @@ class CornerfillController {
       computed.borderRightColor,
       computed.borderBottomColor,
       computed.borderLeftColor,
-    ].every((color) => color === "transparent"
-      || (/^rgba\(/u.test(color) && /,\s*0(?:\.0+)?\s*\)$/u.test(color))
-      || (/\/\s*0(?:\.0+)?\s*\)$/u.test(color)));
+    ].every(isFullyTransparentCssColor);
     const layoutOwned = computed.backgroundRepeat === "no-repeat"
       && computed.backgroundOrigin === "border-box"
       && computed.backgroundClip === "border-box"
@@ -3783,27 +3906,7 @@ class CornerfillController {
       this.counters.surfaceResizes += 1;
       entry.counters.surfaceResizes += 1;
     }
-    entry.width = snapshot.width;
-    entry.height = snapshot.height;
-    entry.dpr = snapshot.dpr;
-    entry.geometry = snapshot.geometry;
-    entry.geometryKey = "prepared";
-    entry.border = snapshot.border;
-    entry.borderKey = snapshot.border ? JSON.stringify(snapshot.border) : "none";
-    entry.shadow = snapshot.shadow;
-    entry.outline = snapshot.outline;
-    entry.effectsKey = JSON.stringify([snapshot.shadow, snapshot.outline]);
-    entry.composition = snapshot.composition;
-    entry.preparedResolvedPaint = snapshot.paint;
-    entry.preparedPaintSource = snapshot.descriptor;
-    entry.preparedBorderSource = snapshot.border;
-    entry.preparedShadowSource = snapshot.shadow;
-    entry.preparedOutlineSource = snapshot.outline;
-    entry.preparedBorderRadius = snapshot.borderRadius;
-    entry.preparedCornerShape = snapshot.cornerShape;
-    entry.positionX = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[0] : 0;
-    entry.positionY = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[1] : 0;
-    entry.preparedPaintProgram = snapshot.program;
+    applyPreparedLayoutSnapshot(entry, snapshot);
     entry.needsPaint = true;
     entry.needsFullPreparedPaint = true;
     if (entry.visible) {
@@ -3855,27 +3958,7 @@ class CornerfillController {
       const revision = entry.revision;
       const snapshot = await this._resolvePreparedLayout(entry, config, revision, true);
       this._assertEntryCurrent(entry, revision);
-      entry.width = snapshot.width;
-      entry.height = snapshot.height;
-      entry.dpr = snapshot.dpr;
-      entry.geometry = snapshot.geometry;
-      entry.geometryKey = "prepared";
-      entry.border = snapshot.border;
-      entry.borderKey = snapshot.border ? JSON.stringify(snapshot.border) : "none";
-      entry.shadow = snapshot.shadow;
-      entry.outline = snapshot.outline;
-      entry.effectsKey = JSON.stringify([snapshot.shadow, snapshot.outline]);
-      entry.composition = snapshot.composition;
-      entry.preparedResolvedPaint = snapshot.paint;
-      entry.preparedPaintSource = snapshot.descriptor;
-      entry.preparedBorderSource = snapshot.border;
-      entry.preparedShadowSource = snapshot.shadow;
-      entry.preparedOutlineSource = snapshot.outline;
-      entry.preparedBorderRadius = snapshot.borderRadius;
-      entry.preparedCornerShape = snapshot.cornerShape;
-      entry.positionX = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[0] : 0;
-      entry.positionY = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[1] : 0;
-      entry.preparedPaintProgram = snapshot.program;
+      applyPreparedLayoutSnapshot(entry, snapshot);
       entry.initialized = true;
       if (entry.visible || !entry.deferHiddenSurface) {
         this._createPreparedSurface(entry, false);

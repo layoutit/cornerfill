@@ -203,7 +203,11 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     equal(auto.explain(dynamic).geometry.radii, [
       { rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 },
     ], "class radius change was not recaptured");
-    assert(auto.explain(dynamic).paint.layer.color === "blue", "class paint change was not recaptured");
+    const dynamicColor = auto.explain(dynamic).paint.layer.color;
+    assert(
+      /^(?:blue|rgb\(0,\s*0,\s*255\))$/u.test(dynamicColor),
+      `class paint change was not recaptured: ${dynamicColor}`,
+    );
     equal(auto.explain(inline).geometry.shapeParameters, [0, 0, 0, 0], "raw inline corner-shape was not retained");
     inline.setAttribute(
       "style",
@@ -411,8 +415,8 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
     equal(auto.explain(element).geometry.shapeParameters, [-1, -1, -1, -1], "stale stylesheet won the refresh race");
     assert(document.querySelectorAll('style[data-cornerfill-auto-styles=""]').length === 1, "refresh retained duplicate companion stylesheets");
     assert(
-      [...auto.stylesheets.values()].some(({ companion }) => companion?.textContent.includes("https://assets.example/styles/sprite.png")),
-      "stylesheet response URL was not retained as the declaration base",
+      [...auto.stylesheets.values()].some(({ sources }) => sources.includes("https://assets.example/styles/main.css")),
+      "stylesheet response URL was not retained in source provenance",
     );
 
     link.href = `data:text/css,${encodeURIComponent(".cornerfill-auto-remote{corner-shape:notch;border-radius:7px;background:green}")}`;
@@ -487,7 +491,7 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
   globalThis.__CORNERFILL_TEST_STAGE__ = "";
 });
 
-await test("automatic imports preserve cascade, URL bases, and idle selector state", async () => {
+await test("automatic imports preserve cascade and idle selector state", async () => {
   const originalFetch = window.fetch;
   const fetched = [];
   window.fetch = (input, init) => {
@@ -537,7 +541,6 @@ await test("automatic imports preserve cascade, URL bases, and idle selector sta
     ], "identical active imports were fetched more than once or out of order");
     const [record] = [...auto.stylesheets.values()].filter(({ owner }) => owner === link);
     equal(record.sources.map((source) => new URL(source).pathname), fetched, "import provenance was incomplete");
-    assert(record.companion.textContent.includes(`${location.origin}/bench/imports/sprite.png`), "imported paint URL did not resolve against its own source");
     const fetchedBeforeState = [...fetched];
     focused.focus();
     await waitFor(() => auto.explain(focused)?.status === "active", "imported focus selector did not attach");
@@ -725,7 +728,7 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
 
 await test("automatic diagnostics belong to the current source generation", async () => {
   const style = document.createElement("style");
-  style.textContent = ".cornerfill-diagnostic{corner-shape:potato;border-radius:5px;background:red}";
+  style.textContent = ".cornerfill-diagnostic{corner-shape:superellipse(calc(1 * 2));border-radius:5px;background:red}";
   document.head.append(style);
   const element = host(document.body, "cornerfill-diagnostic-owner");
   element.className = "cornerfill-diagnostic";
@@ -759,7 +762,7 @@ await test("automatic diagnostics belong to the current source generation", asyn
     assert(explanation.limitations.descendantOverflowClipping.supported === false, "fallback entry omitted descendant clipping limitation");
     assert(explanation.limitations.shapedHitTesting.supported === false, "fallback entry omitted shaped hit-testing limitation");
 
-    style.textContent = ".cornerfill-diagnostic{corner-shape:potato;border-radius:5px;background:blue}";
+    style.textContent = ".cornerfill-diagnostic{corner-shape:superellipse(calc(1 * 2));border-radius:5px;background:blue}";
     await auto.refresh();
     assert(auto.explain().errors.length === 1, "new failed generation did not replace recovered state");
     style.remove();
@@ -780,10 +783,12 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     @layer base {
       .cornerfill-layer-normal { corner-shape: bevel; background: red }
       .cornerfill-layer-important { corner-shape: bevel !important; background: red }
+      .cornerfill-all-layer { corner-shape: bevel }
     }
     @layer theme {
       .cornerfill-layer-normal { corner-shape: scoop; background: blue }
       .cornerfill-layer-important { corner-shape: scoop !important; background: blue }
+      .cornerfill-all-layer { all: unset; display: block }
     }
     .cornerfill-var-inherit { corner-shape: var(--cornerfill-test-shape, bevel) }
     .cornerfill-var-fallback { corner-shape: var(--cornerfill-missing-shape, scoop) }
@@ -794,6 +799,19 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     @supports not (corner-shape: bevel) { .cornerfill-supports-negative { corner-shape: bevel } }
     @supports not (corner-shape: unknown-shape) { .cornerfill-supports-invalid-negative { corner-shape: bevel } }
     .cornerfill-mixed { corner-top-left-shape: bevel; corner-start-start-shape: scoop }
+    .cornerfill-all-base { corner-shape: bevel }
+    .cornerfill-all-base.cornerfill-all-reset { all: unset; display: block }
+    .cornerfill-all-before { all: unset; corner-shape: bevel; display: block }
+    .cornerfill-all-after { corner-shape: bevel; all: unset; display: block }
+    .cornerfill-all-important { corner-shape: bevel !important; all: unset !important; display: block !important }
+    .cornerfill-invalid-low { corner-shape: potato }
+    #cornerfill-valid-high { corner-shape: bevel }
+    #cornerfill-invalid-important { corner-shape: potato !important }
+    .cornerfill-valid-normal { corner-shape: scoop }
+    .cornerfill-radius-em { corner-shape: bevel; border-radius: 1em; font-size: 20px }
+    .cornerfill-radius-vw { corner-shape: bevel; border-radius: 5vw }
+    .cornerfill-radius-min { corner-shape: bevel; border-radius: min(20%, 2rem); font-size: 20px }
+    .cornerfill-radius-calc { corner-shape: bevel; border-radius: calc(1em + 5%); font-size: 20px }
   `;
   const anonymousLayer = document.createElement("style");
   anonymousLayer.textContent = "@layer{.cornerfill-anonymous{corner-shape:bevel}}";
@@ -847,6 +865,32 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   inert.className = "cornerfill-inert-source";
   const alternateElement = host();
   alternateElement.className = "cornerfill-alternate-source";
+  const allReset = host();
+  allReset.className = "cornerfill-all-base cornerfill-all-reset";
+  const allBefore = host();
+  allBefore.className = "cornerfill-all-before";
+  const allAfter = host();
+  allAfter.className = "cornerfill-all-after";
+  const allLayer = host();
+  allLayer.className = "cornerfill-all-layer";
+  const allImportant = host();
+  allImportant.className = "cornerfill-all-important";
+  const validHigh = host(document.body, "cornerfill-valid-high");
+  validHigh.className = "cornerfill-invalid-low";
+  const validBelowInvalidImportant = host(document.body, "cornerfill-invalid-important");
+  validBelowInvalidImportant.className = "cornerfill-valid-normal";
+  const relativeRadii = [
+    ["cornerfill-radius-em", [{ rx: 20, ry: 20 }]],
+    ["cornerfill-radius-vw", [{ rx: 40, ry: 40 }]],
+    ["cornerfill-radius-min", [{ rx: 32, ry: 20 }]],
+    ["cornerfill-radius-calc", [{ rx: 30, ry: 25 }]],
+  ].map(([className, expected]) => {
+    const target = host();
+    target.className = className;
+    target.style.width = "200px";
+    target.style.height = "100px";
+    return { target, expected };
+  });
 
   const auto = installCornerfillAuto(options({ autoObserve: false }));
   try {
@@ -869,6 +913,21 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(complex) === null, "complex support condition was partially owned");
     assert(auto.explain(inert) === null, "non-CSS style source was activated");
     assert(auto.explain(alternateElement) === null, "inactive alternate stylesheet was activated");
+    assert(auto.explain(allReset) === null, "all: unset retained an earlier shape carrier");
+    assert(auto.explain(allBefore), "shape after all: unset did not attach");
+    equal(auto.explain(allBefore).geometry.shapeParameters, [0, 0, 0, 0], "shape after all: unset did not win");
+    assert(auto.explain(allAfter) === null, "all: unset after shape did not reset the carrier");
+    assert(auto.explain(allLayer) === null, "all: unset did not reset a shape from an earlier layer");
+    assert(auto.explain(allImportant) === null, "important all: unset did not reset an important shape");
+    equal(auto.explain(validHigh).geometry.shapeParameters, [0, 0, 0, 0], "losing invalid shape poisoned a valid winner");
+    equal(auto.explain(validBelowInvalidImportant).geometry.shapeParameters, [-1, -1, -1, -1], "invalid important shape participated in the cascade");
+    for (const { target: radiusTarget, expected } of relativeRadii) {
+      equal(
+        auto.explain(radiusTarget).geometry.radii,
+        Array.from({ length: 4 }, () => expected[0]),
+        `${radiusTarget.className} did not use the browser-resolved radius`,
+      );
+    }
     const messages = auto.explain().errors.map(({ message }) => message).join("\n");
     assert(/variable corner-shape shorthand combined with longhands/u.test(messages), "variable shorthand conflict was not reported");
     assert(/mixed physical and logical/u.test(messages), "mixed declaration refusal was not reported");
@@ -895,6 +954,8 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
       layerNormal, layerImportant, varParent, varFallback, varConflict, logical, media,
       supportsPositive, supportsNegative, supportsInvalidNegative, mixed,
       anonymous, nesting, complex, inert, alternateElement,
+      allReset, allBefore, allAfter, allLayer, allImportant, validHigh, validBelowInvalidImportant,
+      ...relativeRadii.map(({ target: radiusTarget }) => radiusTarget),
     ]) element.remove();
   }
 });

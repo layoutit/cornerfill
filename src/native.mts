@@ -1,18 +1,4 @@
 export const CORNERFILL_NATIVE_QUALIFICATION_SCHEMA = "cornerfill-native-qualification@1";
-export const CORNERFILL_ORACLE_QUALIFICATION = Object.freeze({
-  schema: "cornerfill-oracle-qualification@1",
-  nativeCalibration: Object.freeze({
-    status: "PASS",
-    scope: "same-fixture native A/A capture",
-    approvedTolerance: true,
-    exactZeroTolerance: true,
-  }),
-  candidate: Object.freeze({
-    status: "UNQUALIFIED",
-    approvedTolerance: false,
-    reason: "No native-versus-candidate pixel tolerance has been approved.",
-  }),
-});
 
 export interface CornerfillNativeSyntaxProbes {
   readonly shorthand: boolean;
@@ -37,7 +23,23 @@ export interface CornerfillNativeRequirements {
   readonly shapedBehavior: Readonly<CornerfillNativeRequirement>;
 }
 
+export type CornerfillNativeCapabilityStatus = "supported" | "unsupported" | "unobserved";
+
+export interface CornerfillNativeCapabilities {
+  readonly animation: CornerfillNativeCapabilityStatus;
+  readonly backgroundClip: CornerfillNativeCapabilityStatus;
+  readonly computedValues: CornerfillNativeCapabilityStatus;
+  readonly innerBorderContour: CornerfillNativeCapabilityStatus;
+  readonly outerPaint: CornerfillNativeCapabilityStatus;
+  readonly outlines: CornerfillNativeCapabilityStatus;
+  readonly overflowClip: CornerfillNativeCapabilityStatus;
+  readonly shadows: CornerfillNativeCapabilityStatus;
+  readonly shapedHitTesting: CornerfillNativeCapabilityStatus;
+  readonly syntax: CornerfillNativeCapabilityStatus;
+}
+
 export interface CornerfillNativeQualification {
+  readonly capabilities: Readonly<CornerfillNativeCapabilities>;
   readonly schema: typeof CORNERFILL_NATIVE_QUALIFICATION_SCHEMA;
   readonly qualified: boolean;
   readonly requirements: Readonly<CornerfillNativeRequirements>;
@@ -62,6 +64,28 @@ const LONGHANDS = Object.freeze([
   "corner-bottom-left-shape",
 ]);
 const EXPECTED_LONGHANDS = Object.freeze(["bevel", "scoop", "round", "notch"]);
+const EXPECTED_PARAMETERS = Object.freeze([0, -1, 1, Number.NEGATIVE_INFINITY]);
+const SHAPE_ALIASES = Object.freeze({
+  bevel: 0,
+  notch: Number.NEGATIVE_INFINITY,
+  round: 1,
+  scoop: -1,
+  square: Number.POSITIVE_INFINITY,
+  squircle: 2,
+});
+
+function computedShapeParameter(source: string): number | null {
+  const value = source.trim().toLowerCase();
+  if (Object.hasOwn(SHAPE_ALIASES, value)) {
+    return SHAPE_ALIASES[value as keyof typeof SHAPE_ALIASES];
+  }
+  const match = /^superellipse\(\s*(infinity|-infinity|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*\)$/iu.exec(value);
+  if (!match) return null;
+  if (match[1] === "infinity") return Number.POSITIVE_INFINITY;
+  if (match[1] === "-infinity") return Number.NEGATIVE_INFINITY;
+  const number = Number(match[1]);
+  return Number.isFinite(number) ? (Object.is(number, -0) ? 0 : number) : null;
+}
 
 function requirement(
   supported: boolean,
@@ -83,13 +107,28 @@ function qualification(
 ): Readonly<CornerfillNativeQualification> {
   const unresolved = unresolvedRequirements(requirements);
   const qualified = unresolved.length === 0;
+  const observed = (supported: boolean): CornerfillNativeCapabilityStatus => (
+    supported ? "supported" : "unsupported"
+  );
   return Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
+    capabilities: Object.freeze({
+      syntax: observed(requirements.syntax.supported),
+      computedValues: observed(requirements.computedValues.supported),
+      shapedHitTesting: observed(requirements.shapedBehavior.supported),
+      outerPaint: "unobserved",
+      innerBorderContour: "unobserved",
+      backgroundClip: "unobserved",
+      overflowClip: "unobserved",
+      shadows: "unobserved",
+      outlines: "unobserved",
+      animation: "unobserved",
+    }),
     requirements: Object.freeze(requirements),
     unresolved,
     reason: qualified
-      ? "Required corner-shape syntax, computed values, and shaped behavior were observed."
+      ? "The conservative native-selection probes passed; unprobed capabilities remain explicitly unobserved."
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
@@ -106,21 +145,28 @@ function syntaxRequirement(view: Window): Readonly<CornerfillNativeRequirement> 
   return requirement(Object.values(probes).every(Boolean), { probes });
 }
 
+function setProbeStyle(element: HTMLElement, declarations: Readonly<Record<string, string>>): void {
+  for (const [property, value] of Object.entries(declarations)) {
+    element.style.setProperty(property, value, "important");
+  }
+}
+
 function probeElement(document: Document): HTMLDivElement {
   const element = document.createElement("div");
   element.setAttribute("aria-hidden", "true");
-  Object.assign(element.style, {
+  setProbeStyle(element, {
     all: "initial",
     background: "rgb(1, 2, 3)",
     border: "0 solid transparent",
-    boxSizing: "border-box",
+    "box-sizing": "border-box",
     contain: "strict",
     display: "block",
     margin: "0",
+    opacity: "0",
     padding: "0",
-    pointerEvents: "auto",
+    "pointer-events": "auto",
     position: "fixed",
-    zIndex: "2147483647",
+    "z-index": "2147483647",
   });
   return element;
 }
@@ -129,15 +175,17 @@ function computedRequirement(
   document: Document,
   element: HTMLElement,
 ): Readonly<CornerfillNativeRequirement> {
-  element.style.setProperty("corner-shape", EXPECTED_LONGHANDS.join(" "));
+  element.style.setProperty("corner-shape", EXPECTED_LONGHANDS.join(" "), "important");
   const computed = document.defaultView!.getComputedStyle(element);
   const shorthand = computed.getPropertyValue("corner-shape").trim();
   const longhands = Object.freeze(LONGHANDS.map((property) => (
     computed.getPropertyValue(property).trim()
   )));
   return requirement(
-    shorthand === EXPECTED_LONGHANDS.join(" ")
-      && longhands.every((value, index) => value === EXPECTED_LONGHANDS[index]),
+    longhands.every((value, index) => Object.is(
+      computedShapeParameter(value),
+      EXPECTED_PARAMETERS[index],
+    )),
     { shorthand, longhands },
   );
 }
@@ -154,8 +202,8 @@ function behaviorRequirement(
   const size = Math.min(100, available);
   const left = 2;
   const top = 2;
-  Object.assign(element.style, {
-    borderRadius: `${size / 2}px`,
+  setProbeStyle(element, {
+    "border-radius": `${size / 2}px`,
     height: `${size}px`,
     left: `${left}px`,
     top: `${top}px`,
@@ -163,10 +211,10 @@ function behaviorRequirement(
   });
   const x = left + Math.round(size * 0.15);
   const y = top + Math.round(size * 0.2);
-  element.style.setProperty("corner-shape", "bevel");
+  element.style.setProperty("corner-shape", "bevel", "important");
   view.getComputedStyle(element).getPropertyValue("corner-shape");
   const bevelExcludes = document.elementFromPoint(x, y) !== element;
-  element.style.setProperty("corner-shape", "round");
+  element.style.setProperty("corner-shape", "round", "important");
   view.getComputedStyle(element).getPropertyValue("corner-shape");
   const roundIncludes = document.elementFromPoint(x, y) === element;
   return requirement(bevelExcludes && roundIncludes, {
@@ -182,12 +230,12 @@ function isolatedProbeDocument(document: Document): Readonly<{
 }> {
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
-  Object.assign(frame.style, {
+  setProbeStyle(frame, {
     border: "0",
     height: "128px",
     left: "0",
     opacity: "0",
-    pointerEvents: "none",
+    "pointer-events": "none",
     position: "fixed",
     top: "0",
     width: "128px",
@@ -232,6 +280,7 @@ export function qualifyNativeCornerShape(
     result = qualification({
       syntax,
       computedValues: computedRequirement(isolated.document, element),
+      // Paint-only fallback cannot supply hit testing, so partial native behavior must not qualify.
       shapedBehavior: behaviorRequirement(isolated.document, element),
     });
   } catch (error) {

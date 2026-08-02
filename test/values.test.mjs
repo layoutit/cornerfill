@@ -9,6 +9,7 @@ import {
   parseLengthPercentage,
   resolveBorderRadius,
   resolveBorderRadiusDeclarations,
+  resolveCornerRadiusLonghands,
   resolveCornerShape,
   resolveCornerShapeDeclarations,
   shapeParameterToDiagonal,
@@ -31,6 +32,20 @@ test("supported calc length-percentages resolve without evaluation", () => {
   const resolved = resolveBorderRadius("calc(50% - 10px)", 200, 100);
   assert.equal(resolved[0].rx, 90);
   assert.equal(resolved[0].ry, 40);
+});
+
+test("browser-computed corner radii resolve min, max, and clamp", () => {
+  assert.deepEqual(resolveCornerRadiusLonghands([
+    "min(20%, 32px)",
+    "max(10%, 12px)",
+    "clamp(8px, 15%, 40px)",
+    "calc(5% + 20px)",
+  ], 200, 100), [
+    { rx: 32, ry: 20 },
+    { rx: 20, ry: 12 },
+    { rx: 30, ry: 15 },
+    { rx: 30, ry: 25 },
+  ]);
 });
 
 test("corner-shape expands keywords and arbitrary superellipse parameters", () => {
@@ -73,6 +88,7 @@ test("logical corner longhands resolve through writing mode and direction", () =
 
 test("corner-shape accepts supported numeric calc values", () => {
   assert.deepEqual(parseCornerShape("superellipse(calc(1 + 1))"), [2, 2, 2, 2]);
+  assert.deepEqual(parseCornerShape("superellipse(calc(1 - 1))"), [0, 0, 0, 0]);
 });
 
 test("corner-shape interpolation is linear in the diagonal coordinate", () => {
@@ -96,6 +112,11 @@ test("unsupported value grammar is rejected explicitly", () => {
   assert.throws(() => parseBorderRadius("1em"), /supported px\/% syntax/u);
   assert.throws(() => parseBorderRadius("-1px"), /cannot be negative/u);
   assert.throws(() => parseCornerShape("url(shape)"), /unsupported value/u);
+  assert.throws(() => parseCornerShape("superellipse(+infinity)"), /finite number or signed infinity/u);
+  assert.throws(() => parseCornerShape("superellipse(calc(1+1))"), /unsupported calc/u);
+  assert.throws(() => parseCornerShape("superellipse(calc(1 * 2))"), /unsupported calc/u);
+  assert.throws(() => parseCornerShape("superellipse(calc(infinity))"), /unsupported calc/u);
+  assert.throws(() => parseLengthPercentage("calc(10px+2%)"), /unsupported calc/u);
   assert.throws(() => parseLengthPercentage("calc(10px * 2)"), /unsupported calc/u);
   assert.throws(() => logicalCornerToPhysical("start-start", { direction: "auto" }), /unsupported direction/u);
 });

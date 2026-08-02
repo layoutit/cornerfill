@@ -1,18 +1,15 @@
-# Local research, oracle, and browser evidence
-/notes/
-/oracle/
+# Local process notes and generated browser evidence
+/notes/burnlists/
+/oracle/results/
 /bench/mario-firefox-trace.mjs
-/scripts/compare.mjs
 /scripts/mario-server.mjs
-/scripts/oracle.mjs
-/scripts/png.mjs
 /scripts/serve-firefox-mario.mjs
 /scripts/trace-firefox-mario.mjs
 /test/mario-server.test.mjs
-/test/png.test.mjs
 
 # Generated and machine-local files
 /dist/
+/src/qualification.mts
 /.playwright-cli/
 /output/
 /node_modules/

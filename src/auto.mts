@@ -1,5 +1,6 @@
-import { CORNERFILL_ORACLE_QUALIFICATION, qualifyNativeCornerShape } from "./native.mjs";
+import { qualifyNativeCornerShape } from "./native.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
+import { CORNERFILL_ORACLE_QUALIFICATION } from "./qualification.mjs";
 import type {
   CornerfillAutoControllerHandle,
   CornerfillAutoExplanation,
