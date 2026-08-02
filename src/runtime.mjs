@@ -83,6 +83,10 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
     supported: false,
     reason: "Borders require one solid color; per-side colors and non-solid styles need corner-region partitioning not provided by this slice.",
   }),
+  insetContourTopology: Object.freeze({
+    supported: false,
+    reason: "Fallback painting refuses clipped inner border contours that self-intersect and require multiple boolean components.",
+  }),
   borderImagePaint: Object.freeze({
     supported: false,
     reason: "Fallback mode cannot combine a native border-image with the shaped border pixels it owns.",
@@ -160,7 +164,7 @@ const LIVE_IMAGE_PROPERTY = "--cornerfill-live-image";
 const OWNERSHIP_ATTRIBUTE = "data-cornerfill-owned";
 const OWNED_BORDER_ATTRIBUTE = "data-cornerfill-owned-border";
 const OWNED_SURFACE_ATTRIBUTE = "data-cornerfill-owned-surface";
-const elementOwners = new WeakMap();
+const ELEMENT_OWNER_REGISTRY = Symbol.for("layoutit.cornerfill.element-owner-registry.v1");
 
 class StaleEntryWorkError extends Error {
   constructor() {
@@ -622,23 +626,36 @@ function assertCooperativeOwnership(element) {
   }
 }
 
+function elementOwnerRegistry(element) {
+  const { ownerDocument } = element;
+  let registry = ownerDocument[ELEMENT_OWNER_REGISTRY];
+  if (registry) return registry;
+  registry = new WeakMap();
+  Object.defineProperty(ownerDocument, ELEMENT_OWNER_REGISTRY, { value: registry });
+  return registry;
+}
+
 function claimElement(entry) {
-  const existing = elementOwners.get(entry.element);
+  const registry = elementOwnerRegistry(entry.element);
+  const existing = registry.get(entry.element);
   if (existing && existing !== entry && !existing.disposed) {
     throw new Error("element is already attached to another Cornerfill controller");
   }
-  elementOwners.set(entry.element, entry);
+  registry.set(entry.element, entry);
+  entry.elementOwnerRegistry = registry;
 }
 
 function assertElementAvailable(element) {
-  const existing = elementOwners.get(element);
+  const existing = elementOwnerRegistry(element).get(element);
   if (existing && !existing.disposed) {
     throw new Error("element is already attached to another Cornerfill controller");
   }
 }
 
 function releaseElement(entry) {
-  if (elementOwners.get(entry.element) === entry) elementOwners.delete(entry.element);
+  if (entry.elementOwnerRegistry?.get(entry.element) === entry) {
+    entry.elementOwnerRegistry.delete(entry.element);
+  }
 }
 
 function captureBorder(computed, colorOverride = "") {
@@ -1308,14 +1325,27 @@ function captureBackgroundPosition(entry) {
   const xValue = style.getPropertyValue("background-position-x").trim();
   const yValue = style.getPropertyValue("background-position-y").trim();
   if (xValue === entry.inlineBackgroundPositionX && yValue === entry.inlineBackgroundPositionY) return false;
+  const xChanged = xValue !== entry.inlineBackgroundPositionX;
+  const yChanged = yValue !== entry.inlineBackgroundPositionY;
   const previous = entry.dynamicBackgroundPositionSpec;
   const components = previous?.kind === "components"
     ? previous
     : parseBackgroundPosition("0px 0px");
   let x = components.x;
   let y = components.y;
-  if (xValue && xValue !== entry.inlineBackgroundPositionX) x = positionAxisSpec("x", xValue);
-  if (yValue && yValue !== entry.inlineBackgroundPositionY) y = positionAxisSpec("y", yValue);
+  let authored = null;
+  if ((xChanged && !xValue) || (yChanged && !yValue)) {
+    authored = withAuthoredComputedStyle(entry.controller.view, entry, (computed) => (
+      parseBackgroundPosition(
+        computed.getPropertyValue("background-position").trim()
+          || computed.backgroundPosition
+          || entry.initial.initialBackground.backgroundPosition
+          || "0% 0%",
+      )
+    ));
+  }
+  if (xChanged) x = xValue ? positionAxisSpec("x", xValue) : authored.x;
+  if (yChanged) y = yValue ? positionAxisSpec("y", yValue) : authored.y;
   entry.inlineBackgroundPositionX = xValue;
   entry.inlineBackgroundPositionY = yValue;
   const next = Object.freeze({ kind: "components", x, y });
@@ -2084,7 +2114,7 @@ class CornerfillController {
     return !this.destroyed
       && !entry.disposed
       && this.entryByElement.get(entry.element) === entry
-      && elementOwners.get(entry.element) === entry
+      && entry.elementOwnerRegistry?.get(entry.element) === entry
       && (revision === null || entry.revision === revision);
   }
 
@@ -2324,6 +2354,7 @@ class CornerfillController {
       geometry,
       geometryKey: nextGeometryKey,
       paint,
+      paintSource: sources.paintSource,
       paintKey: nextPaintKey,
       border,
       borderKey: nextBorderKey,
@@ -2362,6 +2393,7 @@ class CornerfillController {
         entry.width = snapshot.width;
         entry.height = snapshot.height;
         entry.dpr = snapshot.dpr;
+        entry.dynamicPaintSource = snapshot.paintSource;
         entry.paintKey = snapshot.paintKey;
         entry.borderKey = snapshot.borderKey;
         entry.border = snapshot.border;
@@ -2416,7 +2448,7 @@ class CornerfillController {
 
   _refreshDynamicPaint(entry, reason) {
     const paintSource = Object.freeze({
-      ...entry.initial.paintSource,
+      ...entry.dynamicPaintSource,
       backgroundPositionSpec: entry.dynamicBackgroundPositionSpec,
       image: entry.resolvedImage,
     });
@@ -2483,8 +2515,9 @@ class CornerfillController {
     const needsFullRefresh = entry.fullRefreshPending || rootChanged;
     entry.pendingReason = null;
     entry.fullRefreshPending = false;
-    const dynamicPaintOnly = entry.initial.dynamic.paintPosition
-      && !entry.initial.dynamic.paint
+    const dynamicPaintOnly = reason === "background-position"
+      && entry.initial.dynamic.paintPosition
+      && entry.dynamicPaintSource.kind === "image"
       && entry.state.paint === undefined
       && !needsFullRefresh;
     if (dynamicPaintOnly) {
@@ -2515,6 +2548,10 @@ class CornerfillController {
     entry.width = snapshot.width;
     entry.height = snapshot.height;
     entry.dpr = snapshot.dpr;
+    entry.dynamicPaintSource = snapshot.paintSource;
+    if (snapshot.paintSource.kind === "image") {
+      entry.dynamicBackgroundPositionSpec = snapshot.paintSource.backgroundPositionSpec;
+    }
     entry.paintKey = snapshot.paintKey;
     entry.borderKey = snapshot.borderKey;
     entry.border = snapshot.border;
@@ -3155,6 +3192,7 @@ class CornerfillController {
       lastError: null,
       revision: 0,
       committedRevision: 0,
+      waiters: [],
       saved,
       lastInvalidationReason: "native-qualified",
       counters: { paints: 0, styleChecks: 0, ignoredStyleChanges: 0, surfaceResizes: 0, ownershipRepairs: 0 },
@@ -3339,6 +3377,7 @@ class CornerfillController {
       mode: config.mode ?? "paint",
       state: {},
       initial,
+      dynamicPaintSource: initial.paintSource,
       dynamicBackgroundPositionSpec: initial.paintSource.kind === "image"
         ? initial.paintSource.backgroundPositionSpec
         : null,

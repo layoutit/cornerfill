@@ -4,10 +4,12 @@ import {
   createPreparedOpaqueImageProgram,
   drawPreparedOpaqueImage,
   explainPreparedOpaqueImage,
+  paintCornerfill,
   paintOwnedLayer,
   preparePreparedOpaqueImageContext,
   repaintPreparedOpaqueImage,
 } from "../src/paint.mjs";
+import { buildCornerGeometry } from "../src/geometry.mjs";
 
 function contextRecorder() {
   const calls = [];
@@ -100,4 +102,46 @@ test("multiply uses Canvas compositing only on the admitted raster layer", () =>
     ["drawImage", image, 0, 0, 4, 4, 0, 0, 4, 4],
     ["restore"],
   ]);
+});
+
+function assertUnsupportedInsetPaint({ width, height, borderRadius, cornerShape, widths }) {
+  const geometry = buildCornerGeometry({ width, height, borderRadius, cornerShape });
+  const context = contextRecorder();
+  const paint = () => paintCornerfill(context, {
+    geometry,
+    paint: { kind: "solid", color: "#123456" },
+    border: {
+      widths,
+      styles: ["solid", "solid", "solid", "solid"],
+      color: "#abcdef",
+    },
+  });
+  assert.throws(paint, /shaped inset contour self-intersects after clipping and is unsupported/u);
+  assert.throws(paint, /shaped inset contour self-intersects after clipping and is unsupported/u);
+  assert.deepEqual(context.calls, []);
+}
+
+test("crossing all-scoop inset geometry is refused before surface mutation", () => {
+  assertUnsupportedInsetPaint({
+    width: 100,
+    height: 10,
+    borderRadius: "20px / 80px",
+    cornerShape: [-1, -1, -1, -1],
+    widths: [1, 2, 5, 1],
+  });
+});
+
+test("global clipped-contour crossings are refused before surface mutation", () => {
+  assertUnsupportedInsetPaint({
+    width: 39.105241601622424,
+    height: 211.3169662447694,
+    borderRadius: [
+      { rx: 1.3225144041088894, ry: 153.08962407738628 },
+      { rx: 5.57310388412243, ry: 184.650892110809 },
+      { rx: 16.512622098688556, ry: 39.40128968658898 },
+      { rx: 7.304793159782682, ry: 87.42960496571885 },
+    ],
+    cornerShape: [8, -2, 2, -2],
+    widths: [8.34886265579794, 5.063831898145306, 65.41168509124148, 20.733630000645288],
+  });
 });

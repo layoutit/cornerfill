@@ -469,47 +469,11 @@ function supportedBorder(border) {
   return Object.freeze({ ...border, widths: Object.freeze([...widths]), color: String(border.color) });
 }
 
-function clipPolygonEdge(points, inside, intersection) {
-  if (points.length === 0) return points;
-  const output = [];
-  let previous = points.at(-1);
-  let previousInside = inside(previous);
-  for (const point of points) {
-    const pointInside = inside(point);
-    if (pointInside !== previousInside) output.push(intersection(previous, point));
-    if (pointInside) output.push(point);
-    previous = point;
-    previousInside = pointInside;
-  }
-  return output;
-}
-
-function clipContourToRect(points, rect) {
-  const left = rect.x;
-  const top = rect.y;
-  const right = rect.x + rect.width;
-  const bottom = rect.y + rect.height;
-  const verticalIntersection = (x) => (first, second) => {
-    const ratio = (x - first[0]) / (second[0] - first[0]);
-    return [x, first[1] + (second[1] - first[1]) * ratio];
-  };
-  const horizontalIntersection = (y) => (first, second) => {
-    const ratio = (y - first[1]) / (second[1] - first[1]);
-    return [first[0] + (second[0] - first[0]) * ratio, y];
-  };
-  let clipped = [...points];
-  clipped = clipPolygonEdge(clipped, ([x]) => x >= left, verticalIntersection(left));
-  clipped = clipPolygonEdge(clipped, ([x]) => x <= right, verticalIntersection(right));
-  clipped = clipPolygonEdge(clipped, ([, y]) => y >= top, horizontalIntersection(top));
-  clipped = clipPolygonEdge(clipped, ([, y]) => y <= bottom, horizontalIntersection(bottom));
-  return clipped;
-}
-
 function contourAtInsets(geometry, insets) {
   if (insets.every((value) => value === 0)) return geometry.contour;
   const inset = insetCornerGeometry(geometry, insets);
   if (inset.contour.length < 2 || inset.targetRect.width <= 0 || inset.targetRect.height <= 0) return [];
-  return clipContourToRect(inset.contour, inset.targetRect);
+  return inset.contour;
 }
 
 function paintContourRing(context, outerContour, innerContour, color) {
@@ -628,8 +592,9 @@ export function paintCornerfill(context, {
 }) {
   if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
   const { width, height } = geometry;
-  clearSurface(context, width, height, dpr);
   const ownedBorder = supportedBorder(border);
+  const borderInnerContour = ownedBorder ? contourAtInsets(geometry, ownedBorder.widths) : null;
+  clearSurface(context, width, height, dpr);
 
   const layer = paintBackground(context, geometry, paint);
   const shadowResult = paintInsetShadow(context, geometry, shadow, ownedBorder);
@@ -638,7 +603,7 @@ export function paintCornerfill(context, {
     paintContourRing(
       context,
       geometry.contour,
-      contourAtInsets(geometry, ownedBorder.widths),
+      borderInnerContour,
       ownedBorder.color,
     );
     borderResult = Object.freeze({

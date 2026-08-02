@@ -9,6 +9,10 @@ const INTERSECTION_EPSILON = 1e-9;
 const FLOATING_SHAPE_LIMIT = 54;
 const CONCAVE_SAFETY_SEGMENTS = 256;
 const CONCAVE_SAFETY_MARGIN = 1e-5;
+const MAX_INSET_CACHE_ENTRIES = 16;
+const UNSUPPORTED_INSET_TOPOLOGY = Symbol("unsupported inset topology");
+const INSET_TOPOLOGY_ERROR = "shaped inset contour self-intersects after clipping and is unsupported";
+const insetGeometryCache = new WeakMap();
 
 function finiteNonNegative(value, label) {
   if (!Number.isFinite(value) || value < 0) {
@@ -584,6 +588,82 @@ function resolveAdjacentCurveIntersections(curves) {
   return resolved;
 }
 
+function clipPolygonEdge(points, inside, intersection) {
+  if (points.length === 0) return points;
+  const output = [];
+  let previous = points.at(-1);
+  let previousInside = inside(previous);
+  for (const point of points) {
+    const pointInside = inside(point);
+    if (pointInside !== previousInside) output.push(intersection(previous, point));
+    if (pointInside) output.push(point);
+    previous = point;
+    previousInside = pointInside;
+  }
+  return output;
+}
+
+function clipContourToRect(points, rect) {
+  const left = rect.x;
+  const top = rect.y;
+  const right = rect.x + rect.width;
+  const bottom = rect.y + rect.height;
+  const verticalIntersection = (x) => (first, second) => {
+    const ratio = (x - first[0]) / (second[0] - first[0]);
+    return [x, first[1] + (second[1] - first[1]) * ratio];
+  };
+  const horizontalIntersection = (y) => (first, second) => {
+    const ratio = (y - first[1]) / (second[1] - first[1]);
+    return [first[0] + (second[0] - first[0]) * ratio, y];
+  };
+  let clipped = [...points];
+  clipped = clipPolygonEdge(clipped, ([x]) => x >= left, verticalIntersection(left));
+  clipped = clipPolygonEdge(clipped, ([x]) => x <= right, verticalIntersection(right));
+  clipped = clipPolygonEdge(clipped, ([, y]) => y >= top, horizontalIntersection(top));
+  clipped = clipPolygonEdge(clipped, ([, y]) => y <= bottom, horizontalIntersection(bottom));
+  return clipped;
+}
+
+function normalizedClosedContour(points) {
+  const normalized = [];
+  for (const point of points) {
+    if (!normalized.length || !samePoint(normalized.at(-1), point)) normalized.push(point);
+  }
+  if (normalized.length > 1 && samePoint(normalized[0], normalized.at(-1))) normalized.pop();
+  return normalized;
+}
+
+function properContourIntersection(points) {
+  for (let first = 0; first < points.length; first += 1) {
+    const firstNext = (first + 1) % points.length;
+    for (let second = first + 2; second < points.length; second += 1) {
+      const secondNext = (second + 1) % points.length;
+      if (first === 0 && secondNext === 0) continue;
+      const intersection = segmentIntersection(
+        points[first],
+        points[firstNext],
+        points[second],
+        points[secondNext],
+      );
+      if (!intersection
+        || intersection.firstRatio <= INTERSECTION_EPSILON
+        || intersection.firstRatio >= 1 - INTERSECTION_EPSILON
+        || intersection.secondRatio <= INTERSECTION_EPSILON
+        || intersection.secondRatio >= 1 - INTERSECTION_EPSILON) continue;
+      return { first, second, intersection };
+    }
+  }
+  return null;
+}
+
+function rememberInsetGeometry(geometry, cache, key, value) {
+  if (!Object.isFrozen(geometry)) return;
+  const nextCache = cache ?? new Map();
+  nextCache.set(key, value);
+  while (nextCache.size > MAX_INSET_CACHE_ENTRIES) nextCache.delete(nextCache.keys().next().value);
+  if (!cache) insetGeometryCache.set(geometry, nextCache);
+}
+
 function cornerVertices(index, width, height, radius, shapeParameter) {
   const { rx, ry } = radius;
   if (index === 0) return { start: [0, ry], outer: [0, 0], end: [rx, 0], center: [rx, ry] };
@@ -762,6 +842,15 @@ export function insetCornerGeometry(geometry, insets, {
 } = {}) {
   if (!geometry || typeof geometry !== "object") throw new TypeError("outer corner geometry is required");
   const [top, right, bottom, left] = normalizeInsets(insets);
+  const cacheKey = `${top}\n${right}\n${bottom}\n${left}\n${tolerance}`;
+  const cache = Object.isFrozen(geometry) ? insetGeometryCache.get(geometry) : null;
+  const cached = cache?.get(cacheKey);
+  if (cached !== undefined) {
+    cache.delete(cacheKey);
+    cache.set(cacheKey, cached);
+    if (cached === UNSUPPORTED_INSET_TOPOLOGY) throw new TypeError(INSET_TOPOLOGY_ERROR);
+    return cached;
+  }
   const targetRect = Object.freeze({
     x: Math.min(geometry.width, left),
     y: Math.min(geometry.height, top),
@@ -769,7 +858,9 @@ export function insetCornerGeometry(geometry, insets, {
     height: Math.max(0, geometry.height - top - bottom),
   });
   if (targetRect.width === 0 || targetRect.height === 0) {
-    return Object.freeze({ targetRect, contour: Object.freeze([]), corners: Object.freeze([]) });
+    const empty = Object.freeze({ targetRect, contour: Object.freeze([]), corners: Object.freeze([]) });
+    rememberInsetGeometry(geometry, cache, cacheKey, empty);
+    return empty;
   }
   const startInsets = [left, top, right, bottom];
   const endInsets = [top, right, bottom, left];
@@ -794,9 +885,14 @@ export function insetCornerGeometry(geometry, insets, {
   append(points, curves[3]);
   points.push(curves[0][0]);
   append(points, curves[0]);
-  return Object.freeze({
+  const resolvedPoints = normalizedClosedContour(clipContourToRect(points, targetRect));
+  if (properContourIntersection(resolvedPoints)) {
+    rememberInsetGeometry(geometry, cache, cacheKey, UNSUPPORTED_INSET_TOPOLOGY);
+    throw new TypeError(INSET_TOPOLOGY_ERROR);
+  }
+  const result = Object.freeze({
     targetRect,
-    contour: Object.freeze(points.map(([x, y]) => frozenPoint(x, y))),
+    contour: Object.freeze(resolvedPoints.map(([x, y]) => frozenPoint(x, y))),
     corners: Object.freeze(corners.map((corner) => Object.freeze({
       start: frozenPoint(...corner.start),
       outer: frozenPoint(...corner.outer),
@@ -804,4 +900,6 @@ export function insetCornerGeometry(geometry, insets, {
       center: frozenPoint(...corner.center),
     }))),
   });
+  rememberInsetGeometry(geometry, cache, cacheKey, result);
+  return result;
 }

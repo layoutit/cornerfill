@@ -1194,6 +1194,8 @@ class CornerfillAutoController {
     this.sourceRequests = new Map();
     this.importRequests = new Map();
     this.sourceApplyPromise = null;
+    this.sourceApplyFrame = null;
+    this.sourceApplyFrameResolve = null;
     this.sourceApplyRequested = false;
     this.handleSignatures = new Map();
     this.candidates = new Set();
@@ -1825,7 +1827,15 @@ class CornerfillAutoController {
     this.sourceApplyRequested = true;
     if (!this.sourceApplyPromise) {
       const task = (async () => {
-        await new Promise((resolve) => this.document.defaultView.requestAnimationFrame(resolve));
+        await new Promise((resolve) => {
+          this.sourceApplyFrameResolve = resolve;
+          this.sourceApplyFrame = this.document.defaultView.requestAnimationFrame(() => {
+            this.sourceApplyFrame = null;
+            const settle = this.sourceApplyFrameResolve;
+            this.sourceApplyFrameResolve = null;
+            settle?.();
+          });
+        });
         while (this.sourceApplyRequested && !this.destroyed) {
           this.sourceApplyRequested = false;
           this._reconcileCandidates();
@@ -2542,6 +2552,13 @@ class CornerfillAutoController {
     for (const record of this.importRequests.values()) record.controller.abort();
     this.importRequests.clear();
     this.sourceApplyRequested = false;
+    if (this.sourceApplyFrame !== null) {
+      this.document.defaultView.cancelAnimationFrame(this.sourceApplyFrame);
+    }
+    this.sourceApplyFrame = null;
+    const settleSourceApplyFrame = this.sourceApplyFrameResolve;
+    this.sourceApplyFrameResolve = null;
+    settleSourceApplyFrame?.();
     for (const controller of this.pendingFetches) controller.abort();
     this.pendingFetches.clear();
     for (const cancel of this.pendingStylesheetWaits) cancel();

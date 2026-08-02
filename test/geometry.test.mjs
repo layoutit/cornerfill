@@ -13,6 +13,32 @@ const close = (actual, expected, epsilon = 1e-9) => {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} is not within ${epsilon} of ${expected}`);
 };
 
+function properIntersection(firstStart, firstEnd, secondStart, secondEnd) {
+  const first = [firstEnd[0] - firstStart[0], firstEnd[1] - firstStart[1]];
+  const second = [secondEnd[0] - secondStart[0], secondEnd[1] - secondStart[1]];
+  const denominator = first[0] * second[1] - first[1] * second[0];
+  if (Math.abs(denominator) < 1e-9) return false;
+  const delta = [secondStart[0] - firstStart[0], secondStart[1] - firstStart[1]];
+  const firstRatio = (delta[0] * second[1] - delta[1] * second[0]) / denominator;
+  const secondRatio = (delta[0] * first[1] - delta[1] * first[0]) / denominator;
+  return firstRatio > 1e-8 && firstRatio < 1 - 1e-8
+    && secondRatio > 1e-8 && secondRatio < 1 - 1e-8;
+}
+
+function assertSimpleContour(points) {
+  for (let first = 0; first < points.length; first += 1) {
+    for (let second = first + 2; second < points.length; second += 1) {
+      if (first === 0 && second === points.length - 1) continue;
+      assert.equal(properIntersection(
+        points[first],
+        points[(first + 1) % points.length],
+        points[second],
+        points[(second + 1) % points.length],
+      ), false, `segments ${first} and ${second} intersect`);
+    }
+  }
+}
+
 test("ordinary radius overlap scaling is deterministic", () => {
   const resolved = resolveRadii(100, 80, [
     { rx: 80, ry: 60 },
@@ -166,38 +192,18 @@ test("adjacent inset curves are trimmed before they can self-intersect", () => {
     cornerShape: [-0.5, 0.5, 1, 1],
   });
   const points = insetCornerGeometry(geometry, 1).contour;
-  const properIntersection = (firstStart, firstEnd, secondStart, secondEnd) => {
-    const first = [firstEnd[0] - firstStart[0], firstEnd[1] - firstStart[1]];
-    const second = [secondEnd[0] - secondStart[0], secondEnd[1] - secondStart[1]];
-    const denominator = first[0] * second[1] - first[1] * second[0];
-    if (Math.abs(denominator) < 1e-9) return false;
-    const delta = [secondStart[0] - firstStart[0], secondStart[1] - firstStart[1]];
-    const firstRatio = (delta[0] * second[1] - delta[1] * second[0]) / denominator;
-    const secondRatio = (delta[0] * first[1] - delta[1] * first[0]) / denominator;
-    return firstRatio > 1e-8 && firstRatio < 1 - 1e-8
-      && secondRatio > 1e-8 && secondRatio < 1 - 1e-8;
-  };
-  for (let first = 0; first < points.length; first += 1) {
-    for (let second = first + 2; second < points.length; second += 1) {
-      if (first === 0 && second === points.length - 1) continue;
-      assert.equal(properIntersection(
-        points[first],
-        points[(first + 1) % points.length],
-        points[second],
-        points[(second + 1) % points.length],
-      ), false, `segments ${first} and ${second} intersect`);
-    }
-  }
+  assertSimpleContour(points);
 });
 
 test("purpose-specific inset contours honor unequal side insets", () => {
   const radii = Array.from({ length: 4 }, () => ({ rx: 30, ry: 20 }));
-  const round = insetCornerGeometry(buildCornerGeometry({
+  const roundGeometry = buildCornerGeometry({
     width: 100,
     height: 80,
     borderRadius: radii,
     cornerShape: [1, 1, 1, 1],
-  }), [5, 10, 15, 20]);
+  });
+  const round = insetCornerGeometry(roundGeometry, [5, 10, 15, 20]);
   assert.deepEqual(round.targetRect, { x: 20, y: 5, width: 70, height: 60 });
   assert.deepEqual(round.corners[0], {
     start: [20, 20],
@@ -214,4 +220,7 @@ test("purpose-specific inset contours honor unequal side insets", () => {
   }), [5, 10, 15, 20]);
   close(bevel.corners[0].start[0], 20);
   close(bevel.corners[0].end[1], 5);
+  assert.equal(insetCornerGeometry(roundGeometry, [5, 10, 15, 20]), round);
+  for (let inset = 1; inset <= 16; inset += 1) insetCornerGeometry(roundGeometry, inset);
+  assert.notEqual(insetCornerGeometry(roundGeometry, [5, 10, 15, 20]), round);
 });
