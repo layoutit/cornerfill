@@ -184,9 +184,12 @@ Cornerfill refuses unsupported cases instead of painting a result with different
 ## Development
 
 ```sh
+npm run build
 npm test
 npm run test:browser:runtime
 ```
+
+TypeScript `.mts` modules are the source of truth. The build writes browser-ready `.mjs` files and matching declarations to `dist/`.
 
 ## License
 

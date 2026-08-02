@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ImageCache } from "../src/images.mjs";
+import { ImageCache } from "../dist/images.mjs";
 
 class FakeImage {
   constructor() {

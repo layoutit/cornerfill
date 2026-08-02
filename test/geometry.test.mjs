@@ -7,7 +7,7 @@ import {
   insetCornerGeometry,
   resolveRadii,
   sampleCanonicalCorner,
-} from "../src/geometry.mjs";
+} from "../dist/geometry.mjs";
 
 const close = (actual, expected, epsilon = 1e-9) => {
   assert.ok(Math.abs(actual - expected) <= epsilon, `${actual} is not within ${epsilon} of ${expected}`);

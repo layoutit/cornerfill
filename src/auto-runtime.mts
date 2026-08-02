@@ -1,10 +1,315 @@
 import { installCornerfill } from "./runtime.mjs";
+import type {
+  CornerfillControllerHandle,
+  CornerfillEntryExplanation,
+  CornerfillHandle,
+  CornerfillInstallOptions,
+} from "./runtime.mjs";
 import { CORNERFILL_ORACLE_QUALIFICATION } from "./native.mjs";
+import type { CornerfillNativeQualification } from "./native.mjs";
 import {
   parseCornerShape,
   parseCornerShapeValue,
   serializeShapeParameter,
 } from "./values.mjs";
+
+type RuntimeWindow = Window & typeof globalThis;
+type RuntimeDocument = Document & Readonly<{ defaultView: RuntimeWindow }>;
+type AutoRoot = Document | ShadowRoot;
+type StylesheetOwner = HTMLStyleElement | HTMLLinkElement;
+type DiagnosticOwner = object | string;
+type EventListenerTarget = EventTarget & Readonly<{
+  addEventListener(
+    type: string,
+    callback: EventListenerOrEventListenerObject | null,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  removeEventListener(
+    type: string,
+    callback: EventListenerOrEventListenerObject | null,
+    options?: EventListenerOptions | boolean,
+  ): void;
+}>;
+
+interface TextReplacement {
+  readonly end: number;
+  readonly start: number;
+  readonly value: string;
+}
+
+interface SelectorObservation {
+  readonly attributes: readonly string[];
+  readonly characterData: boolean;
+  readonly conservative: boolean;
+  readonly events: readonly string[];
+}
+
+interface SelectorRecord {
+  readonly declaration: string | null;
+  readonly selector: string;
+  readonly source: string;
+}
+
+interface ElementDiagnostic {
+  readonly declaration: string | null;
+  readonly selector: string | null;
+  readonly source: string;
+}
+
+interface CarrierCompilation {
+  readonly css: string;
+  readonly imports?: number | undefined;
+  readonly mediaQueries: readonly string[];
+  readonly observation: Readonly<SelectorObservation>;
+  readonly selectorRecords: readonly Readonly<SelectorRecord>[];
+  readonly selectors: readonly string[];
+  readonly sources?: readonly string[] | undefined;
+}
+
+interface CarrierRule extends CSSRule {
+  readonly cssRules?: CSSRuleList | undefined;
+  readonly keyText?: string | undefined;
+  readonly selectorText?: string | undefined;
+  readonly style?: CSSStyleDeclaration | undefined;
+}
+
+interface InlineCarrierCompilation {
+  readonly authoredShape: string;
+  readonly declarations: readonly Readonly<{
+    readonly priority: string;
+    readonly property: string;
+    readonly value: string;
+  }>[];
+  readonly shape: boolean;
+  readonly signature: string;
+}
+
+interface ImportUrlParse {
+  readonly rest: string;
+  readonly url: string;
+}
+
+interface ImportFunctionParse {
+  readonly rest: string;
+  readonly value: string;
+}
+
+interface CompiledSourceTree extends CarrierCompilation {
+  readonly imports: number;
+  readonly sources: readonly string[];
+}
+
+interface StylesheetSource {
+  readonly baseUrl: string;
+  readonly sourceUrl: string;
+  readonly text: string;
+}
+
+interface ImportStatement {
+  readonly end: number;
+  readonly prelude: string;
+  readonly start: number;
+}
+
+interface ParsedImport {
+  readonly layer: string | null;
+  readonly media: string;
+  readonly supports: string | null;
+  readonly url: string;
+}
+
+interface DiagnosticDetails {
+  readonly bucket?: DiagnosticOwner | undefined;
+  readonly declaration?: string | null | undefined;
+  readonly owner?: DiagnosticOwner | undefined;
+  readonly ownerIdentity?: string | undefined;
+  readonly selector?: string | null | undefined;
+  readonly source?: string | undefined;
+}
+
+interface DiagnosticRecord {
+  readonly context: string;
+  readonly declaration: string | null;
+  readonly message: string;
+  readonly name: string;
+  readonly owner: string;
+  readonly selector: string | null;
+  readonly source: string;
+}
+
+type DiagnosticError = Error & Readonly<{ cornerfillDiagnostic?: DiagnosticDetails | undefined }>;
+
+interface CssomInsertMutation {
+  readonly index: number;
+  readonly kind: "insert";
+  readonly rule: string;
+}
+
+interface CssomDeleteMutation {
+  readonly index: number;
+  readonly kind: "delete";
+}
+
+type CssomMutation = CssomDeleteMutation | CssomInsertMutation;
+
+interface CssomHook {
+  active: boolean;
+  readonly baseUrl: string;
+  modelSource: string;
+  readonly owner: StylesheetOwner;
+  readonly restore: () => void;
+  readonly sheet: CSSStyleSheet;
+}
+
+interface StylesheetRecord {
+  readonly adopted?: true | undefined;
+  readonly companion: HTMLStyleElement | null;
+  readonly cssomHook: CssomHook | null;
+  readonly failed: boolean;
+  readonly identity?: string | undefined;
+  readonly imports: number;
+  readonly key: string;
+  readonly media: string;
+  readonly mediaQueries: readonly string[];
+  readonly observation: Readonly<SelectorObservation>;
+  readonly owner: CSSStyleSheet | StylesheetOwner;
+  readonly selectorRecords: readonly Readonly<SelectorRecord>[];
+  readonly selectors: readonly string[];
+  readonly sources: readonly string[];
+}
+
+interface WriteStylesheetOptions {
+  readonly cssomHook?: CssomHook | null | undefined;
+  readonly existing?: Readonly<StylesheetRecord> | undefined;
+  readonly key?: string | undefined;
+}
+
+interface RefreshRequestOptions {
+  readonly attachments?: boolean | undefined;
+  readonly candidates?: boolean | undefined;
+  readonly retryFailed?: boolean | undefined;
+  readonly sources?: boolean | undefined;
+}
+
+export interface RegisterRootOptions {
+  readonly adoptedStyleSheets?: boolean | undefined;
+  readonly autoObserve?: boolean | undefined;
+  readonly nonce?: string | null | undefined;
+  readonly onError?: ((error: unknown, context: string) => void) | undefined;
+}
+
+interface InlineDeclaration {
+  readonly previousPriority: string;
+  readonly previousValue: string;
+  readonly priority: string;
+  readonly property: string;
+  readonly value: string;
+}
+
+interface InlineRecord {
+  readonly appliedAttribute: string;
+  readonly authoredShape: string;
+  readonly declarations: readonly Readonly<InlineDeclaration>[];
+  readonly shape: boolean;
+  readonly signature: string;
+}
+
+interface ImportRequestRecord {
+  readonly consumers: Set<SourceRequest>;
+  readonly controller: AbortController;
+  readonly key: string;
+  promise: Promise<Readonly<StylesheetSource>> | null;
+  settled: boolean;
+}
+
+interface SourceRequest {
+  aborted: boolean;
+  cancelWait: (() => void) | null;
+  readonly controller: AbortController | null;
+  readonly importCache: Map<string, Promise<Readonly<CompiledSourceTree>>>;
+  readonly importRecords: Set<ImportRequestRecord>;
+  readonly key: string;
+  promise: Promise<void> | null;
+  readonly provenance: Set<string>;
+}
+
+interface CarrierRegistration {
+  references: number;
+  readonly style: HTMLStyleElement;
+}
+
+interface EventListenerRecord {
+  readonly listener: EventListener;
+  readonly options: AddEventListenerOptions | boolean;
+  readonly target: EventListenerTarget;
+  readonly type: string;
+}
+
+interface MediaListenerRecord {
+  readonly legacy: boolean;
+  readonly list: MediaQueryList;
+  readonly listener: (event: MediaQueryListEvent) => void;
+}
+
+interface ObservationState extends SelectorObservation {
+  readonly mediaQueries: readonly string[];
+}
+
+interface AutomaticCounters {
+  attachmentPasses: number;
+  candidatePasses: number;
+  computedChecks: number;
+  handleAttaches: number;
+  handleDetaches: number;
+  handleRefreshes: number;
+  sourceCompiles: number;
+  sourcePasses: number;
+  sourceReads: number;
+}
+
+export interface CornerfillAutoOptions extends CornerfillInstallOptions {
+  readonly adoptedStyleSheets?: boolean | undefined;
+  readonly autoObserve?: boolean | undefined;
+  readonly controller?: CornerfillControllerHandle | undefined;
+  readonly onError?: ((error: unknown, context: string) => void) | undefined;
+  readonly root?: AutoRoot | undefined;
+}
+
+interface InternalCornerfillAutoOptions extends CornerfillAutoOptions {
+  readonly parentAuto?: CornerfillAutoController | null | undefined;
+}
+
+export interface CornerfillAutoExplanation {
+  readonly attached: number;
+  readonly errors: readonly Readonly<DiagnosticRecord>[];
+  readonly fallbackLoaded: boolean;
+  readonly inlineElements: number;
+  readonly mode: "fallback" | "native";
+  readonly schema: "cornerfill-auto@1";
+  readonly scopes: number;
+  readonly stylesheets: number;
+  readonly [property: string]: unknown;
+}
+
+export interface CornerfillAutoControllerHandle {
+  readonly ready: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  destroy(): void;
+  explain(
+    element?: HTMLElement | null,
+  ): Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null;
+  refresh(
+    options?: Readonly<{ retryFailed?: boolean | undefined }>,
+  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  refreshAdoptedStyleSheet(
+    sheet: CSSStyleSheet,
+    source: string,
+  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  registerRoot(
+    root: ShadowRoot,
+    options?: Readonly<RegisterRootOptions>,
+  ): CornerfillAutoControllerHandle;
+  unregisterRoot(root: ShadowRoot): boolean;
+}
 
 const SHAPE_PROPERTIES = Object.freeze({
   "corner-shape": "--cornerfill-corner-shape",
@@ -18,10 +323,13 @@ const SHAPE_PROPERTIES = Object.freeze({
   "corner-end-start-shape": "--cornerfill-corner-end-start-shape",
 });
 
-const SHAPE_CARRIERS = Object.freeze(Object.values(SHAPE_PROPERTIES));
-const SHAPE_PROPERTY_BY_CARRIER = Object.freeze(Object.fromEntries(
+type ShapeProperty = keyof typeof SHAPE_PROPERTIES;
+type ShapeCarrier = (typeof SHAPE_PROPERTIES)[ShapeProperty];
+
+const SHAPE_CARRIERS: readonly ShapeCarrier[] = Object.freeze(Object.values(SHAPE_PROPERTIES));
+const SHAPE_PROPERTY_BY_CARRIER: Readonly<Record<ShapeCarrier, ShapeProperty>> = Object.freeze(Object.fromEntries(
   Object.entries(SHAPE_PROPERTIES).map(([property, carrier]) => [carrier, property]),
-));
+)) as Readonly<Record<ShapeCarrier, ShapeProperty>>;
 const AUTO_STYLESHEET_ATTRIBUTE = "data-cornerfill-auto-styles";
 const AUTO_UNSET = "__cornerfill_unset__";
 const AUTO_PHYSICAL_SHAPE = "--cornerfill-auto-physical-shape";
@@ -30,23 +338,26 @@ const AUTO_UNSUPPORTED_SHAPE = "--cornerfill-auto-unsupported-shape";
 const AUTO_PHYSICAL_RADIUS = "--cornerfill-auto-physical-radius";
 const AUTO_LOGICAL_RADIUS = "--cornerfill-auto-logical-radius";
 const AUTO_UNSUPPORTED_OWNED = "--cornerfill-auto-unsupported-owned";
-const CARRIER_REGISTRATIONS = new WeakMap();
+const CARRIER_REGISTRATIONS = new WeakMap<Document, CarrierRegistration>();
 
-const PHYSICAL_SHAPE_PROPERTIES = Object.freeze([
+const PHYSICAL_SHAPE_PROPERTIES: readonly ShapeProperty[] = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
   "corner-bottom-right-shape",
   "corner-bottom-left-shape",
 ]);
 
-const LOGICAL_SHAPE_PROPERTIES = Object.freeze([
+const LOGICAL_SHAPE_PROPERTIES: readonly ShapeProperty[] = Object.freeze([
   "corner-start-start-shape",
   "corner-start-end-shape",
   "corner-end-end-shape",
   "corner-end-start-shape",
 ]);
 
-const OWNED_PROPERTY_CARRIERS = Object.freeze([
+type OwnedCarrierKind = "radius-logical" | "radius-physical" | "url";
+type OwnedPropertyCarrier = readonly [property: string, carrier: string, kind?: OwnedCarrierKind];
+
+const OWNED_PROPERTY_CARRIERS: readonly OwnedPropertyCarrier[] = Object.freeze([
   ["border-top-left-radius", "--cornerfill-border-top-left-radius", "radius-physical"],
   ["border-top-right-radius", "--cornerfill-border-top-right-radius", "radius-physical"],
   ["border-bottom-right-radius", "--cornerfill-border-bottom-right-radius", "radius-physical"],
@@ -144,7 +455,11 @@ const CONSERVATIVE_STATE_EVENTS = Object.freeze([
   "toggle",
 ]);
 
-function isCssWhitespaceOrComments(value) {
+function isShapeProperty(value: string): value is ShapeProperty {
+  return Object.hasOwn(SHAPE_PROPERTIES, value);
+}
+
+function isCssWhitespaceOrComments(value: string): boolean {
   return value.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim() === "";
 }
 
@@ -153,16 +468,16 @@ function isCssWhitespaceOrComments(value) {
  * Strings, comments, selectors, @supports conditions, and declaration values
  * are left untouched. The browser still performs the actual CSS parse.
  */
-export function transportCornerShapeDeclarations(source) {
+export function transportCornerShapeDeclarations(source: string): string {
   if (typeof source !== "string") throw new TypeError("CSS source must be a string");
-  const replacements = [];
+  const replacements: TextReplacement[] = [];
   let statementStart = 0;
-  let quote = null;
+  let quote: string | null = null;
   let comment = false;
   let escaped = false;
 
   for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
+    const character = source[index]!;
     const next = source[index + 1];
     if (comment) {
       if (character === "*" && next === "/") {
@@ -190,12 +505,13 @@ export function transportCornerShapeDeclarations(source) {
       const statement = source.slice(statementStart, index);
       const match = /([\w-]+)\s*$/u.exec(statement);
       if (match && isCssWhitespaceOrComments(statement.slice(0, match.index))) {
-        const property = match[1].toLowerCase();
+        const property = match[1]!.toLowerCase();
+        if (!isShapeProperty(property)) continue;
         const carrier = SHAPE_PROPERTIES[property];
         if (carrier) {
           replacements.push(Object.freeze({
             start: statementStart + match.index,
-            end: statementStart + match.index + match[1].length,
+            end: statementStart + match.index + match[1]!.length,
             value: carrier,
           }));
         }
@@ -216,14 +532,14 @@ export function transportCornerShapeDeclarations(source) {
   return output + source.slice(cursor);
 }
 
-function declarationEnd(source, start) {
-  let quote = null;
+function declarationEnd(source: string, start: number): number {
+  let quote: string | null = null;
   let comment = false;
   let escaped = false;
   let parentheses = 0;
   let brackets = 0;
   for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
+    const character = source[index]!;
     const next = source[index + 1];
     if (comment) {
       if (character === "*" && next === "/") {
@@ -256,7 +572,7 @@ function declarationEnd(source, start) {
   return source.length;
 }
 
-function declarationValue(raw) {
+function declarationValue(raw: string): Readonly<{ priority: string; value: string }> {
   const normalized = raw.replaceAll(/\/\*[\s\S]*?\*\//gu, " ").trim();
   const important = /!\s*important\s*$/iu.test(normalized);
   return Object.freeze({
@@ -265,7 +581,7 @@ function declarationValue(raw) {
   });
 }
 
-function shapeCarrierDeclaration(property, rawValue) {
+function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): string {
   const { value, priority } = declarationValue(rawValue);
   try {
     if (/\bvar\s*\(/iu.test(value)) {
@@ -278,11 +594,10 @@ function shapeCarrierDeclaration(property, rawValue) {
     if (property === "corner-shape") {
       const values = parseCornerShape(value);
       return `${PHYSICAL_SHAPE_PROPERTIES.map((longhand, index) => (
-        `${SHAPE_PROPERTIES[longhand]}:${serializeShapeParameter(values[index])}${priority};`
+        `${SHAPE_PROPERTIES[longhand]}:${serializeShapeParameter(values[index]!)}${priority};`
       )).join("")}${AUTO_PHYSICAL_SHAPE}:1${priority};`;
     }
     const carrier = SHAPE_PROPERTIES[property];
-    if (!carrier) return null;
     const parsed = serializeShapeParameter(parseCornerShapeValue(value));
     const marker = LOGICAL_SHAPE_PROPERTIES.includes(property)
       ? AUTO_LOGICAL_SHAPE
@@ -293,17 +608,20 @@ function shapeCarrierDeclaration(property, rawValue) {
   }
 }
 
-function canonicalizeCornerShapeDeclarations(source, authoredDeclarations = null) {
-  const replacements = [];
+function canonicalizeCornerShapeDeclarations(
+  source: string,
+  authoredDeclarations: string[] | null = null,
+): string {
+  const replacements: TextReplacement[] = [];
   let statementStart = 0;
-  let quote = null;
+  let quote: string | null = null;
   let comment = false;
   let escaped = false;
   let parentheses = 0;
   let brackets = 0;
 
   for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
+    const character = source[index]!;
     const next = source[index + 1];
     if (comment) {
       if (character === "*" && next === "/") {
@@ -348,8 +666,8 @@ function canonicalizeCornerShapeDeclarations(source, authoredDeclarations = null
       const statement = source.slice(statementStart, index);
       const match = /([\w-]+)\s*$/u.exec(statement);
       if (!match || !isCssWhitespaceOrComments(statement.slice(0, match.index))) continue;
-      const property = match[1].toLowerCase();
-      if (!Object.hasOwn(SHAPE_PROPERTIES, property)) continue;
+      const property = match[1]!.toLowerCase();
+      if (!isShapeProperty(property)) continue;
       const end = declarationEnd(source, index + 1);
       const start = statementStart + match.index;
       authoredDeclarations?.push(source.slice(start, end).trim());
@@ -375,14 +693,14 @@ function canonicalizeCornerShapeDeclarations(source, authoredDeclarations = null
   return output + source.slice(cursor);
 }
 
-function cssString(value) {
+function cssString(value: unknown): string {
   return `"${String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
 }
 
-function resolveCssUrls(value, baseUrl) {
+function resolveCssUrls(value: string, baseUrl: string): string {
   return String(value).replaceAll(
     /url\(\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|([^\s)'"\\]+))\s*\)/giu,
-    (source, doubleQuoted, singleQuoted, unquoted) => {
+    (source: string, doubleQuoted: string, singleQuoted: string, unquoted: string) => {
       const raw = (doubleQuoted ?? singleQuoted ?? unquoted ?? "").replaceAll(/\\([()'"\\])/gu, "$1");
       try {
         return `url(${cssString(new URL(raw, baseUrl).href)})`;
@@ -393,12 +711,20 @@ function resolveCssUrls(value, baseUrl) {
   );
 }
 
-function serializedDeclaration(style, property, value, outputProperty = property) {
+function serializedDeclaration(
+  style: CSSStyleDeclaration,
+  property: string,
+  value: string,
+  outputProperty = property,
+): string {
   const priority = style.getPropertyPriority(property);
   return `${outputProperty}:${value}${priority ? " !important" : ""};`;
 }
 
-function carrierDeclarations(style, baseUrl) {
+function carrierDeclarations(
+  style: CSSStyleDeclaration | null | undefined,
+  baseUrl: string,
+): Readonly<{ css: string; shape: boolean }> {
   if (!style?.getPropertyValue) return Object.freeze({ css: "", shape: false });
   let css = "";
   let shape = false;
@@ -427,8 +753,8 @@ function carrierDeclarations(style, baseUrl) {
   return Object.freeze({ css, shape });
 }
 
-function diagnosticShapeDeclarations(style) {
-  const declarations = [];
+function diagnosticShapeDeclarations(style: CSSStyleDeclaration): readonly string[] {
+  const declarations: string[] = [];
   for (const carrier of SHAPE_CARRIERS) {
     const value = style.getPropertyValue(carrier).trim();
     if (!value) continue;
@@ -442,17 +768,17 @@ function diagnosticShapeDeclarations(style) {
   return Object.freeze(declarations);
 }
 
-function ruleHeader(rule) {
+function ruleHeader(rule: CSSRule): string {
   const index = rule.cssText.indexOf("{");
   return index < 0 ? "" : rule.cssText.slice(0, index).trim();
 }
 
-function matchingParenthesis(value, start) {
+function matchingParenthesis(value: string, start: number): number {
   let depth = 0;
-  let quote = null;
+  let quote: string | null = null;
   let escaped = false;
   for (let index = start; index < value.length; index += 1) {
-    const character = value[index];
+    const character = value[index]!;
     if (quote !== null) {
       if (escaped) escaped = false;
       else if (character === "\\") escaped = true;
@@ -480,7 +806,7 @@ function matchingParenthesis(value, start) {
   return -1;
 }
 
-function supportsShapeValue(property, value) {
+function supportsShapeValue(property: string, value: string): boolean {
   if (/^(?:inherit|initial|revert|revert-layer|unset)$/iu.test(value)
     || /\bvar\s*\(/iu.test(value)) return true;
   try {
@@ -492,9 +818,9 @@ function supportsShapeValue(property, value) {
   }
 }
 
-function carrierSupportsHeader(header) {
+function carrierSupportsHeader(header: string): string {
   if (!/^@supports\b/iu.test(header) || !/\bcorner-[\w-]*shape\b/iu.test(header)) return header;
-  const replacements = [];
+  const replacements: TextReplacement[] = [];
   let recognized = 0;
   for (let start = header.indexOf("("); start >= 0; start = header.indexOf("(", start + 1)) {
     const end = matchingParenthesis(header, start);
@@ -502,8 +828,8 @@ function carrierSupportsHeader(header) {
     const inner = header.slice(start + 1, end);
     const declaration = /^\s*(corner-(?:top-left|top-right|bottom-right|bottom-left|start-start|start-end|end-end|end-start)-shape|corner-shape)\s*:\s*([\s\S]+?)\s*$/iu.exec(inner);
     if (!declaration) continue;
-    const property = declaration[1].toLowerCase();
-    const value = declaration[2];
+    const property = declaration[1]!.toLowerCase();
+    const value = declaration[2]!;
     const supported = supportsShapeValue(property, value);
     replacements.push(Object.freeze({
       start: start + 1,
@@ -530,19 +856,20 @@ function carrierSupportsHeader(header) {
 }
 
 function serializeCarrierRules(
-  rules,
-  selectors,
-  baseUrl,
-  selectorRecords,
-  sourceIdentity,
-  mediaQueries,
-) {
+  rules: CSSRuleList | readonly CSSRule[],
+  selectors: Set<string>,
+  baseUrl: string,
+  selectorRecords: Readonly<SelectorRecord>[],
+  sourceIdentity: string,
+  mediaQueries: Set<string>,
+): string {
   let output = "";
-  for (const rule of rules) {
+  for (const rawRule of rules) {
+    const rule = rawRule as CarrierRule;
     const header = ruleHeader(rule);
     if (/^@(?:-webkit-)?keyframes\b/iu.test(header)) continue;
     const declarations = carrierDeclarations(rule.style, baseUrl);
-    if (typeof rule.selectorText === "string" && rule.cssRules?.length > 0) {
+    if (typeof rule.selectorText === "string" && (rule.cssRules?.length ?? 0) > 0) {
       throw new SyntaxError(`Automatic CSS cannot preserve nested selector rule: ${rule.selectorText}`);
     }
     const nested = rule.cssRules
@@ -562,7 +889,7 @@ function serializeCarrierRules(
         selectorRecords.push(Object.freeze({
           source: sourceIdentity,
           selector: rule.selectorText,
-          declaration: diagnosticShapeDeclarations(rule.style).join("; ") || null,
+          declaration: rule.style ? diagnosticShapeDeclarations(rule.style).join("; ") || null : null,
         }));
       }
       output += `${rule.selectorText}{${declarations.css}${nested}}`;
@@ -588,7 +915,7 @@ function serializeCarrierRules(
   return output;
 }
 
-const SELECTOR_STATE_EVENTS = Object.freeze({
+const SELECTOR_STATE_EVENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   active: Object.freeze(["pointercancel", "pointerdown", "pointerup"]),
   hover: Object.freeze(["pointerover", "pointerout"]),
   focus: Object.freeze(["focusin", "focusout"]),
@@ -618,16 +945,16 @@ const SELECTOR_STATE_EVENTS = Object.freeze({
   fullscreen: Object.freeze(["fullscreenchange"]),
 });
 
-const STATIC_SELECTOR_PSEUDOS = new Set([
+const STATIC_SELECTOR_PSEUDOS = new Set<string>([
   "any-link", "empty", "first-child", "first-of-type", "has", "is", "lang",
   "last-child", "last-of-type", "link", "local-link", "not", "nth-child",
   "nth-last-child", "nth-last-of-type", "nth-of-type", "only-child",
   "only-of-type", "root", "scope", "where",
 ]);
 
-function selectorObservation(selectors) {
-  const attributes = new Set();
-  const events = new Set();
+function selectorObservation(selectors: Iterable<string>): Readonly<SelectorObservation> {
+  const attributes = new Set<string>();
+  const events = new Set<string>();
   let characterData = false;
   let conservative = false;
   for (const selector of selectors) {
@@ -635,10 +962,10 @@ function selectorObservation(selectors) {
     if (/(?:^|[^\w-])\.[_a-z-]/iu.test(selector)) attributes.add("class");
     if (/(?:^|[^\w-])#[_a-z-]/iu.test(selector)) attributes.add("id");
     const attributeMatches = [...selector.matchAll(/\[\s*([_a-z][\w-]*)/giu)];
-    for (const match of attributeMatches) attributes.add(match[1].toLowerCase());
+    for (const match of attributeMatches) attributes.add(match[1]!.toLowerCase());
     if ((selector.match(/\[/gu)?.length ?? 0) !== attributeMatches.length) conservative = true;
     for (const match of selector.matchAll(/(?:^|[^:]):([a-z-]+)/giu)) {
-      const pseudo = match[1].toLowerCase();
+      const pseudo = match[1]!.toLowerCase();
       const stateEvents = SELECTOR_STATE_EVENTS[pseudo];
       if (stateEvents) {
         for (const event of stateEvents) events.add(event);
@@ -670,15 +997,15 @@ function selectorObservation(selectors) {
 }
 
 function parseCarrierSheet(
-  document,
-  source,
+  document: RuntimeDocument,
+  source: string,
   baseUrl = document.baseURI,
-  nonce = null,
+  nonce: string | null = null,
   sourceIdentity = baseUrl,
-) {
+): Readonly<CarrierCompilation> {
   const transformed = canonicalizeCornerShapeDeclarations(source);
-  let sheet;
-  let parserStyle = null;
+  let sheet: CSSStyleSheet | null;
+  let parserStyle: HTMLStyleElement | null = null;
   try {
     sheet = new document.defaultView.CSSStyleSheet();
     sheet.replaceSync(transformed);
@@ -691,9 +1018,9 @@ function parseCarrierSheet(
     sheet = parserStyle.sheet;
   }
   try {
-    const selectors = new Set();
-    const selectorRecords = [];
-    const mediaQueries = new Set();
+    const selectors = new Set<string>();
+    const selectorRecords: Readonly<SelectorRecord>[] = [];
+    const mediaQueries = new Set<string>();
     const css = serializeCarrierRules(
       sheet?.cssRules ?? [],
       selectors,
@@ -715,13 +1042,13 @@ function parseCarrierSheet(
   }
 }
 
-function cssStatementEnd(source, start) {
-  let quote = null;
+function cssStatementEnd(source: string, start: number): number {
+  let quote: string | null = null;
   let comment = false;
   let escaped = false;
   let parentheses = 0;
   for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
+    const character = source[index]!;
     const next = source[index + 1];
     if (comment) {
       if (character === "*" && next === "/") {
@@ -753,10 +1080,10 @@ function cssStatementEnd(source, start) {
   return -1;
 }
 
-function skipCssTrivia(source, start) {
+function skipCssTrivia(source: string, start: number): number {
   let index = start;
   while (index < source.length) {
-    if (/\s/u.test(source[index])) {
+    if (/\s/u.test(source[index]!)) {
       index += 1;
       continue;
     }
@@ -769,8 +1096,10 @@ function skipCssTrivia(source, start) {
   return index;
 }
 
-function leadingImportStatements(source) {
-  const imports = [];
+function leadingImportStatements(
+  source: string,
+): Readonly<{ imports: readonly Readonly<ImportStatement>[]; local: string }> {
+  const imports: Readonly<ImportStatement>[] = [];
   let cursor = 0;
   while (cursor < source.length) {
     const start = skipCssTrivia(source, cursor);
@@ -786,7 +1115,9 @@ function leadingImportStatements(source) {
       continue;
     }
     if (charsetMatch || layerMatch) {
-      const end = cssStatementEnd(source, start + (charsetMatch ?? layerMatch)[0].length);
+      const matchedRule = charsetMatch ?? layerMatch;
+      if (!matchedRule) break;
+      const end = cssStatementEnd(source, start + matchedRule[0].length);
       if (end >= 0) {
         cursor = end + 1;
         continue;
@@ -806,18 +1137,18 @@ function leadingImportStatements(source) {
   return Object.freeze({ imports: Object.freeze(imports), local });
 }
 
-function unquoteImportUrl(value) {
+function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
   const trimmed = value.trim();
   const quoted = /^(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')/u.exec(trimmed);
   if (quoted) return Object.freeze({
     rest: trimmed.slice(skipCssTrivia(trimmed, quoted[0].length)).trim(),
-    url: decodeCssEscapes(quoted[1] ?? quoted[2]),
+    url: decodeCssEscapes(quoted[1] ?? quoted[2] ?? ""),
   });
   if (!/^url\s*\(/iu.test(trimmed)) {
     const unquoted = /^((?:\\[\s\S]|[^\s"'()])+)/u.exec(trimmed);
     if (unquoted) return Object.freeze({
       rest: trimmed.slice(skipCssTrivia(trimmed, unquoted[0].length)).trim(),
-      url: decodeCssEscapes(unquoted[1]),
+      url: decodeCssEscapes(unquoted[1] ?? ""),
     });
     throw new SyntaxError("Automatic CSS supports quoted or url() @import URLs");
   }
@@ -825,7 +1156,7 @@ function unquoteImportUrl(value) {
   const end = matchingParenthesis(trimmed, start);
   if (end < 0) throw new SyntaxError("Automatic CSS found an unterminated @import url()");
   const inner = trimmed.slice(start + 1, end).trim();
-  const nested = unquoteImportUrl(inner);
+  const nested: Readonly<ImportUrlParse> = unquoteImportUrl(inner);
   if (nested.rest) throw new SyntaxError("Automatic CSS found an invalid @import url()");
   return Object.freeze({
     rest: trimmed.slice(skipCssTrivia(trimmed, end + 1)).trim(),
@@ -833,12 +1164,17 @@ function unquoteImportUrl(value) {
   });
 }
 
-function decodeCssEscapes(value) {
+function decodeCssEscapes(value: string): string {
   return String(value).replaceAll(
     /\\(?:([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|((?:\r\n|[\n\f\r]))|([\s\S]))/giu,
-    (_source, hexadecimal, newline, character) => {
+    (
+      _source: string,
+      hexadecimal: string | undefined,
+      newline: string | undefined,
+      character: string | undefined,
+    ) => {
       if (newline) return "";
-      if (!hexadecimal) return character;
+      if (!hexadecimal) return character ?? "";
       const codePoint = Number.parseInt(hexadecimal, 16);
       return codePoint === 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)
         ? "\ufffd"
@@ -847,7 +1183,7 @@ function decodeCssEscapes(value) {
   );
 }
 
-function consumeImportFunction(value, name) {
+function consumeImportFunction(value: string, name: string): Readonly<ImportFunctionParse> | null {
   if (!new RegExp(`^${name}\\s*\\(`, "iu").test(value)) return null;
   const start = value.indexOf("(");
   const end = matchingParenthesis(value, start);
@@ -858,7 +1194,7 @@ function consumeImportFunction(value, name) {
   });
 }
 
-function parseImportStatement(statement, baseUrl) {
+function parseImportStatement(statement: string, baseUrl: string): Readonly<ParsedImport> {
   const body = statement.replace(/^@import\b/iu, "").replace(/;\s*$/u, "").trim();
   const parsedUrl = unquoteImportUrl(body);
   let rest = parsedUrl.rest;
@@ -886,7 +1222,7 @@ function parseImportStatement(statement, baseUrl) {
   });
 }
 
-function wrapImportedCarrierCss(css, imported) {
+function wrapImportedCarrierCss(css: string, imported: Readonly<ParsedImport>): string {
   let output = css;
   if (imported.media) output = `@media ${imported.media}{${output}}`;
   if (imported.supports) {
@@ -899,9 +1235,11 @@ function wrapImportedCarrierCss(css, imported) {
   return output;
 }
 
-function mergeSelectorObservation(records) {
-  const attributes = new Set();
-  const events = new Set();
+function mergeSelectorObservation(
+  records: readonly Readonly<SelectorObservation>[],
+): Readonly<SelectorObservation> {
+  const attributes = new Set<string>();
+  const events = new Set<string>();
   let characterData = false;
   let conservative = false;
   for (const record of records) {
@@ -918,8 +1256,8 @@ function mergeSelectorObservation(records) {
   });
 }
 
-function annotateDiagnostic(error, details) {
-  const value = error instanceof Error ? error : new Error(String(error));
+function annotateDiagnostic(error: unknown, details: Readonly<DiagnosticDetails>): DiagnosticError {
+  const value = (error instanceof Error ? error : new Error(String(error))) as DiagnosticError;
   const previous = value.cornerfillDiagnostic ?? {};
   Object.defineProperty(value, "cornerfillDiagnostic", {
     configurable: true,
@@ -928,9 +1266,14 @@ function annotateDiagnostic(error, details) {
   return value;
 }
 
-function mutateStylesheetModel(document, source, mutation, nonce = null) {
-  let sheet;
-  let parserStyle = null;
+function mutateStylesheetModel(
+  document: RuntimeDocument,
+  source: string,
+  mutation: Readonly<CssomMutation>,
+  nonce: string | null = null,
+): string {
+  let sheet: CSSStyleSheet | null;
+  let parserStyle: HTMLStyleElement | null = null;
   try {
     sheet = new document.defaultView.CSSStyleSheet();
     sheet.replaceSync(source);
@@ -943,6 +1286,7 @@ function mutateStylesheetModel(document, source, mutation, nonce = null) {
     sheet = parserStyle.sheet;
   }
   try {
+    if (!sheet) throw new Error("temporary CSS parser did not expose a stylesheet");
     if (mutation.kind === "insert") {
       sheet.insertRule(canonicalizeCornerShapeDeclarations(mutation.rule), mutation.index);
     } else sheet.deleteRule(mutation.index);
@@ -952,12 +1296,12 @@ function mutateStylesheetModel(document, source, mutation, nonce = null) {
   }
 }
 
-function computedCarrier(computed, property) {
+function computedCarrier(computed: CSSStyleDeclaration, property: string): string {
   const value = computed.getPropertyValue(property).trim();
   return value === AUTO_UNSET ? "" : value;
 }
 
-function automaticComputedSignature(computed) {
+function automaticComputedSignature(computed: CSSStyleDeclaration): string {
   return [
     computed.visibility,
     computed.direction,
@@ -966,7 +1310,7 @@ function automaticComputedSignature(computed) {
   ].join("\n");
 }
 
-function automaticStyleMutationSignature(value) {
+function automaticStyleMutationSignature(value: unknown): string {
   return String(value ?? "")
     .split(";")
     .map((declaration) => declaration.trim())
@@ -989,7 +1333,7 @@ function automaticStyleMutationSignature(value) {
     .join(";");
 }
 
-function carrierProblem(computed) {
+function carrierProblem(computed: CSSStyleDeclaration): string | null {
   if (computedCarrier(computed, AUTO_UNSUPPORTED_SHAPE)) {
     return "Automatic CSS cannot resolve this corner-shape value; use cornerfill/runtime for explicit state.";
   }
@@ -1013,51 +1357,54 @@ function carrierProblem(computed) {
   return null;
 }
 
-function hasShapeCarrier(computed) {
+function hasShapeCarrier(computed: CSSStyleDeclaration): boolean {
   return SHAPE_CARRIERS.some((property) => computedCarrier(computed, property));
 }
 
-function stylesheetElements(root) {
-  return [...root.querySelectorAll(
+function stylesheetElements(root: AutoRoot): StylesheetOwner[] {
+  return [...root.querySelectorAll<StylesheetOwner>(
     `style:not([${AUTO_STYLESHEET_ATTRIBUTE}]):not([data-cornerfill-ownership-styles]),link[rel~="stylesheet"]`,
   )].filter(stylesheetElementIsEligible);
 }
 
-function stylesheetElementIsEligible(owner) {
+function isStylesheetLink(owner: StylesheetOwner): owner is HTMLLinkElement {
+  return owner.localName === "link";
+}
+
+function stylesheetElementIsEligible(owner: StylesheetOwner): boolean {
   if (!owner?.isConnected || owner.disabled) return false;
   if (owner.localName === "style") {
     const type = (owner.getAttribute("type") ?? "").trim().toLowerCase();
     return type === "" || type === "text/css";
   }
-  if (owner.localName !== "link" || !owner.relList?.contains("stylesheet")) return false;
+  if (!isStylesheetLink(owner) || !owner.relList.contains("stylesheet")) return false;
   return !owner.relList.contains("alternate");
 }
 
-function authoredShapeInlineElements(root) {
-  const elements = [...root.querySelectorAll('[style*="corner-" i][style*="shape" i]')];
-  if (root.nodeType === 1
-    && /corner-/iu.test(root.getAttribute("style") ?? "")
-    && /shape/iu.test(root.getAttribute("style") ?? "")) elements.unshift(root);
-  return elements;
+function authoredShapeInlineElements(root: AutoRoot): Element[] {
+  return [...root.querySelectorAll('[style*="corner-" i][style*="shape" i]')];
 }
 
-function stylesheetMedia(owner) {
+function stylesheetMedia(owner: StylesheetOwner): string {
   return owner.getAttribute("media") ?? "";
 }
 
-function adoptedStylesheetMedia(sheet) {
-  return sheet.media?.mediaText ?? "";
+function adoptedStylesheetMedia(sheet: CSSStyleSheet): string {
+  const media = (sheet as CSSStyleSheet & Readonly<{ media?: MediaList | undefined }>).media;
+  return media?.mediaText ?? "";
 }
 
-function adoptedStylesheetSource(sheet) {
+function adoptedStylesheetSource(sheet: CSSStyleSheet): string {
   return [...sheet.cssRules].map((rule) => rule.cssText).join("\n");
 }
 
-function nonceValue(element) {
-  return element?.nonce || element?.getAttribute?.("nonce") || "";
+function nonceValue(element: Element | null | undefined): string {
+  return (element as (Element & Readonly<{ nonce?: string | undefined }> | null | undefined))?.nonce
+    || element?.getAttribute("nonce")
+    || "";
 }
 
-function assertGeneratedStyleActive(style, context) {
+function assertGeneratedStyleActive(style: HTMLStyleElement, context: string): void {
   try {
     if (!style.sheet || style.sheet.cssRules.length === 0) {
       throw new Error(`${context} was blocked or discarded`);
@@ -1068,10 +1415,11 @@ function assertGeneratedStyleActive(style, context) {
   }
 }
 
-function stylesheetKey(owner) {
-  return owner.localName === "style"
-    ? `style\n${owner.getAttribute("type") ?? ""}\n${stylesheetMedia(owner)}\n${owner.getAttribute("nonce") ?? ""}\n${owner.textContent ?? ""}`
-    : [
+function stylesheetKey(owner: StylesheetOwner): string {
+  if (!isStylesheetLink(owner)) {
+    return `style\n${owner.getAttribute("type") ?? ""}\n${stylesheetMedia(owner)}\n${owner.getAttribute("nonce") ?? ""}\n${owner.textContent ?? ""}`;
+  }
+  return [
       "link",
       owner.rel,
       owner.title,
@@ -1081,23 +1429,26 @@ function stylesheetKey(owner) {
       owner.crossOrigin ?? "",
       owner.integrity ?? "",
       owner.referrerPolicy ?? "",
-    ].join("\n");
+  ].join("\n");
 }
 
-function carrierRegistrationCss() {
+function carrierRegistrationCss(): string {
   return AUTO_CARRIERS.map((property) => (
     `@property ${property}{syntax:"*";inherits:false;initial-value:${AUTO_UNSET};}`
   )).join("");
 }
 
-function inlineCarrierRecords(document, source) {
+function inlineCarrierRecords(
+  document: RuntimeDocument,
+  source: string | null | undefined,
+): Readonly<InlineCarrierCompilation> {
   if (!source) return Object.freeze({
     declarations: Object.freeze([]),
     shape: false,
     signature: "",
     authoredShape: "",
   });
-  const authoredDeclarations = [];
+  const authoredDeclarations: string[] = [];
   const transformed = canonicalizeCornerShapeDeclarations(String(source), authoredDeclarations);
   const scratch = document.createElement("div");
   scratch.setAttribute("style", transformed);
@@ -1126,7 +1477,10 @@ function inlineCarrierRecords(document, source) {
   });
 }
 
-function runtimeOptions(options, document) {
+function runtimeOptions(
+  options: Readonly<InternalCornerfillAutoOptions>,
+  document: RuntimeDocument,
+): CornerfillInstallOptions {
   const {
     root: _root,
     controller: _controller,
@@ -1140,9 +1494,61 @@ function runtimeOptions(options, document) {
 }
 
 class CornerfillAutoController {
-  constructor(options = {}) {
-    this.document = options.document ?? options.root?.ownerDocument ?? globalThis.document;
-    if (!this.document?.defaultView) throw new TypeError("installCornerfillAuto() requires a browser document");
+  declare readonly adoptedStylesheetIds: WeakMap<CSSStyleSheet, string>;
+  declare readonly adoptedStylesheetSources: WeakMap<CSSStyleSheet, string>;
+  declare readonly adoptedStylesheets: Map<CSSStyleSheet, Readonly<StylesheetRecord>>;
+  declare attachmentRequested: boolean;
+  declare readonly autoObserve: boolean;
+  declare automaticCounters: AutomaticCounters;
+  declare candidateProvenance: Map<Element, Readonly<SelectorRecord>[]>;
+  declare candidateRequested: boolean;
+  declare candidates: Set<Element>;
+  declare readonly controller: CornerfillControllerHandle;
+  declare destroyed: boolean;
+  declare readonly diagnosticsByOwner: Map<DiagnosticOwner, Map<string, Readonly<DiagnosticRecord>>>;
+  declare readonly document: RuntimeDocument;
+  declare readonly eventListeners: EventListenerRecord[];
+  declare readonly handleSignatures: Map<HTMLElement, string>;
+  declare readonly handles: Map<HTMLElement, Readonly<CornerfillHandle>>;
+  declare readonly importRequests: Map<string, ImportRequestRecord>;
+  declare readonly includeAdoptedStyleSheets: boolean;
+  declare readonly inline: Map<HTMLElement, Readonly<InlineRecord>>;
+  declare readonly mediaListeners: MediaListenerRecord[];
+  declare native: boolean;
+  declare readonly nativeQualification: Readonly<CornerfillNativeQualification>;
+  declare nextAdoptedStylesheetId: number;
+  declare nextSourceOwnerId: number;
+  declare readonly nonce: string | null;
+  declare observationState: Readonly<ObservationState>;
+  declare observer: MutationObserver | null;
+  declare readonly onError: ((error: unknown, context: string) => void) | null;
+  declare readonly ownsController: boolean;
+  declare readonly parentAuto: CornerfillAutoController | null;
+  declare readonly pendingFetches: Set<AbortController>;
+  declare readonly pendingStylesheetWaits: Set<() => void>;
+  declare readonly ready: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  declare refreshFrame: number | null;
+  declare refreshPromise: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> | null;
+  declare refreshQueued: boolean;
+  declare registrationAcquired: boolean;
+  declare registrationStyle: HTMLStyleElement | null;
+  declare retryFailedRequested: boolean;
+  declare readonly root: AutoRoot;
+  declare readonly scopes: Map<ShadowRoot, CornerfillAutoController>;
+  declare sourceApplyFrame: number | null;
+  declare sourceApplyFrameResolve: (() => void) | null;
+  declare sourceApplyPromise: Promise<void> | null;
+  declare sourceApplyRequested: boolean;
+  declare readonly sourceOwnerIds: WeakMap<object, number>;
+  declare sourceRequested: boolean;
+  declare readonly sourceRequests: Map<StylesheetOwner, SourceRequest>;
+  declare readonly stylesheets: Map<StylesheetOwner, Readonly<StylesheetRecord>>;
+  declare workRequested: boolean;
+
+  constructor(options: Readonly<InternalCornerfillAutoOptions> = {}) {
+    const document = options.document ?? options.root?.ownerDocument ?? globalThis.document;
+    if (!document?.defaultView) throw new TypeError("installCornerfillAuto() requires a browser document");
+    this.document = document as RuntimeDocument;
     this.root = options.root ?? this.document;
     this.nonce = options.nonce ?? stylesheetElements(this.root).map(nonceValue).find(Boolean)
       ?? nonceValue(this.document.querySelector("script[nonce],style[nonce],link[nonce]"))
@@ -1216,14 +1622,22 @@ class CornerfillAutoController {
     this.ready = this._start();
   }
 
-  _ownerIdentity(owner) {
-    if (owner?.localName === "link") return owner.href || "stylesheet link";
-    if (owner?.localName === "style") {
-      let id = this.sourceOwnerIds.get(owner);
+  _ownerIdentity(owner: unknown): string {
+    const sourceOwner = owner !== null && typeof owner === "object"
+      ? owner as Readonly<{ href?: unknown; localName?: unknown }>
+      : null;
+    if (sourceOwner?.localName === "link") {
+      return typeof sourceOwner.href === "string" && sourceOwner.href
+        ? sourceOwner.href
+        : "stylesheet link";
+    }
+    if (sourceOwner?.localName === "style") {
+      const styleOwner = owner as object;
+      let id = this.sourceOwnerIds.get(styleOwner);
       if (!id) {
         id = this.nextSourceOwnerId;
         this.nextSourceOwnerId += 1;
-        this.sourceOwnerIds.set(owner, id);
+        this.sourceOwnerIds.set(styleOwner, id);
       }
       return `${this.document.baseURI}#cornerfill-inline-style-${id}`;
     }
@@ -1233,11 +1647,17 @@ class CornerfillAutoController {
     return typeof owner === "string" ? owner : "automatic runtime";
   }
 
-  _recordError(error, context, details = {}) {
-    const diagnostic = error?.cornerfillDiagnostic ?? {};
+  _recordError(
+    error: unknown,
+    context: string,
+    details: Readonly<DiagnosticDetails> = {},
+  ): void {
+    const diagnostic = error instanceof Error
+      ? (error as DiagnosticError).cornerfillDiagnostic ?? {}
+      : {};
     const bucketOwner = details.bucket ?? details.owner ?? `automatic:${context}`;
     const owner = details.ownerIdentity ?? this._ownerIdentity(details.owner ?? context);
-    const record = Object.freeze({
+    const record: Readonly<DiagnosticRecord> = Object.freeze({
       context,
       owner,
       source: details.source ?? diagnostic.source ?? owner,
@@ -1257,16 +1677,16 @@ class CornerfillAutoController {
     this.onError?.(error, context);
   }
 
-  _clearErrors(owner) {
+  _clearErrors(owner: DiagnosticOwner): void {
     this.diagnosticsByOwner.delete(owner);
   }
 
-  _errors() {
+  _errors(): readonly Readonly<DiagnosticRecord>[] {
     return Object.freeze([...this.diagnosticsByOwner.values()]
       .flatMap((records) => [...records.values()]));
   }
 
-  _elementDiagnostic(element) {
+  _elementDiagnostic(element: HTMLElement): Readonly<ElementDiagnostic> {
     const provenance = this.candidateProvenance.get(element)?.[0];
     if (provenance) return provenance;
     const inline = this.inline.get(element);
@@ -1277,7 +1697,7 @@ class CornerfillAutoController {
     });
   }
 
-  _recordElementError(error, element) {
+  _recordElementError(error: unknown, element: HTMLElement): void {
     const diagnostic = this._elementDiagnostic(element);
     this._recordError(error, this._ownerIdentity(element), {
       bucket: element,
@@ -1286,7 +1706,7 @@ class CornerfillAutoController {
     });
   }
 
-  _ensureCarrierRegistration() {
+  _ensureCarrierRegistration(): void {
     if (this.registrationAcquired && this.registrationStyle?.isConnected) return;
     const shared = CARRIER_REGISTRATIONS.get(this.document);
     if (shared?.style.isConnected) {
@@ -1314,7 +1734,7 @@ class CornerfillAutoController {
     CARRIER_REGISTRATIONS.set(this.document, { references: 1, style });
   }
 
-  _releaseCarrierRegistration() {
+  _releaseCarrierRegistration(): void {
     if (!this.registrationAcquired) return;
     this.registrationAcquired = false;
     const shared = CARRIER_REGISTRATIONS.get(this.document);
@@ -1330,18 +1750,22 @@ class CornerfillAutoController {
     this.registrationStyle = null;
   }
 
-  async _source(owner, request) {
+  async _source(
+    owner: StylesheetOwner,
+    request: SourceRequest,
+  ): Promise<Readonly<StylesheetSource>> {
     this.automaticCounters.sourceReads += 1;
-    if (owner.localName === "style") return Object.freeze({
+    if (!isStylesheetLink(owner)) return Object.freeze({
       text: owner.textContent ?? "",
       baseUrl: this.document.baseURI,
       sourceUrl: this._ownerIdentity(owner),
     });
     const url = new URL(owner.href, this.document.baseURI);
     const controller = request.controller;
+    if (!controller) throw new Error("linked stylesheet request is missing its abort controller");
     this.pendingFetches.add(controller);
     const crossOrigin = owner.crossOrigin;
-    const init = {
+    const init: RequestInit = {
       credentials: crossOrigin === "use-credentials"
         ? "include"
         : crossOrigin === "anonymous"
@@ -1351,11 +1775,11 @@ class CornerfillAutoController {
       signal: controller.signal,
     };
     if (owner.integrity) init.integrity = owner.integrity;
-    if (owner.referrerPolicy) init.referrerPolicy = owner.referrerPolicy;
+    if (owner.referrerPolicy) init.referrerPolicy = owner.referrerPolicy as ReferrerPolicy;
     try {
       const response = await this.document.defaultView.fetch(url.href, init);
       if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}: ${url.href}`);
-      const contentType = response.headers?.get?.("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
+      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
       if (contentType !== "text/css") {
         throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}: ${url.href}`);
       }
@@ -1369,42 +1793,47 @@ class CornerfillAutoController {
     }
   }
 
-  _releaseImportRequests(request) {
-    for (const record of request.importRecords ?? []) {
+  _releaseImportRequests(request: SourceRequest): void {
+    for (const record of request.importRecords) {
       record.consumers.delete(request);
       if (record.consumers.size > 0) continue;
       if (!record.settled) record.controller.abort();
       if (this.importRequests.get(record.key) === record) this.importRequests.delete(record.key);
     }
-    request.importRecords?.clear();
+    request.importRecords.clear();
   }
 
-  _importSource(url, owner, request) {
-    const crossOrigin = owner.crossOrigin;
+  _importSource(
+    url: string,
+    owner: StylesheetOwner,
+    request: SourceRequest,
+  ): Promise<Readonly<StylesheetSource>> {
+    const crossOrigin = isStylesheetLink(owner) ? owner.crossOrigin : null;
     const credentials = crossOrigin === "use-credentials"
       ? "include"
       : crossOrigin === "anonymous"
         ? "omit"
         : new URL(url).origin === new URL(this.document.baseURI).origin ? "same-origin" : "omit";
-    const referrerPolicy = owner.referrerPolicy || "";
+    const referrerPolicy = isStylesheetLink(owner) ? owner.referrerPolicy : "";
     const key = `${credentials}\n${referrerPolicy}\n${url}`;
     let record = this.importRequests.get(key);
     if (!record) {
       const controller = new this.document.defaultView.AbortController();
-      record = {
+      const created: ImportRequestRecord = {
         consumers: new Set(),
         controller,
         key,
         promise: null,
         settled: false,
       };
-      const init = { credentials, mode: "cors", signal: controller.signal };
-      if (referrerPolicy) init.referrerPolicy = referrerPolicy;
+      record = created;
+      const init: RequestInit = { credentials, mode: "cors", signal: controller.signal };
+      if (referrerPolicy) init.referrerPolicy = referrerPolicy as ReferrerPolicy;
       const task = (async () => {
         try {
           const response = await this.document.defaultView.fetch(url, init);
           if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}`);
-          const contentType = response.headers?.get?.("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
+          const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
           if (contentType !== "text/css") {
             throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}`);
           }
@@ -1415,23 +1844,30 @@ class CornerfillAutoController {
             sourceUrl,
           });
         } catch (error) {
-          throw new Error(`@import ${url} failed: ${error.message}`, { cause: error });
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`@import ${url} failed: ${message}`, { cause: error });
         } finally {
-          record.settled = true;
-          if (record.consumers.size === 0 && this.importRequests.get(key) === record) {
+          created.settled = true;
+          if (created.consumers.size === 0 && this.importRequests.get(key) === created) {
             this.importRequests.delete(key);
           }
         }
       })();
-      record.promise = task;
-      this.importRequests.set(key, record);
+      created.promise = task;
+      this.importRequests.set(key, created);
     }
     record.consumers.add(request);
     request.importRecords.add(record);
+    if (!record.promise) throw new Error("stylesheet import request did not start");
     return record.promise;
   }
 
-  async _compileSourceTree(source, owner, request, stack = []) {
+  async _compileSourceTree(
+    source: Readonly<StylesheetSource>,
+    owner: StylesheetOwner,
+    request: SourceRequest,
+    stack: readonly string[] = [],
+  ): Promise<Readonly<CompiledSourceTree>> {
     const identity = source.sourceUrl || source.baseUrl;
     if (stack.includes(identity)) {
       throw new SyntaxError(`Automatic CSS rejected an @import cycle: ${[...stack, identity].join(" -> ")}`);
@@ -1439,9 +1875,9 @@ class CornerfillAutoController {
     const nextStack = [...stack, identity];
     request.provenance.add(identity);
     const split = leadingImportStatements(source.text);
-    const parts = [];
+    const parts: CarrierCompilation[] = [];
     for (const statement of split.imports) {
-      let imported;
+      let imported: Readonly<ParsedImport>;
       try {
         imported = parseImportStatement(statement.prelude, source.baseUrl);
       } catch (error) {
@@ -1468,7 +1904,7 @@ class CornerfillAutoController {
         ]),
       }));
     }
-    let local;
+    let local: Readonly<CarrierCompilation>;
     try {
       local = parseCarrierSheet(this.document, split.local, source.baseUrl, this.nonce, identity);
     } catch (error) {
@@ -1487,14 +1923,14 @@ class CornerfillAutoController {
     });
   }
 
-  _waitForLinkedStylesheet(owner, request) {
-    if (owner.localName !== "link") return Promise.resolve();
+  _waitForLinkedStylesheet(owner: StylesheetOwner, request: SourceRequest): Promise<void> {
+    if (!isStylesheetLink(owner)) return Promise.resolve();
     try {
       if (owner.sheet?.href === owner.href) return Promise.resolve();
     } catch {
       // A cross-origin sheet can hide cssRules while still exposing load/error.
     }
-    return new Promise((resolve, reject) => {
+    return new Promise<void>((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
         owner.removeEventListener("load", loaded);
@@ -1503,7 +1939,7 @@ class CornerfillAutoController {
         this.pendingStylesheetWaits.delete(cancel);
         if (request.cancelWait === cancel) request.cancelWait = null;
       };
-      const finish = (error = null) => {
+      const finish = (error: Error | null = null) => {
         if (settled) return;
         settled = true;
         cleanup();
@@ -1530,11 +1966,15 @@ class CornerfillAutoController {
     });
   }
 
-  _writeStylesheetRecord(owner, compiled, {
+  _writeStylesheetRecord(
+    owner: StylesheetOwner,
+    compiled: Readonly<CarrierCompilation>,
+    {
     key = stylesheetKey(owner),
     existing = this.stylesheets.get(owner),
     cssomHook = existing?.cssomHook ?? null,
-  } = {}) {
+    }: Readonly<WriteStylesheetOptions> = {},
+  ): Readonly<StylesheetRecord> {
     let companion = existing?.companion ?? null;
     if (compiled.css) {
       companion ??= this.document.createElement("style");
@@ -1555,7 +1995,7 @@ class CornerfillAutoController {
       companion?.remove();
       companion = null;
     }
-    const record = Object.freeze({
+    const record: Readonly<StylesheetRecord> = Object.freeze({
       owner,
       companion,
       key,
@@ -1575,10 +2015,14 @@ class CornerfillAutoController {
     return record;
   }
 
-  _writeFailedStylesheetRecord(owner, key, cssomHook = null) {
+  _writeFailedStylesheetRecord(
+    owner: StylesheetOwner,
+    key: string,
+    cssomHook: CssomHook | null = null,
+  ): Readonly<StylesheetRecord> {
     const existing = this.stylesheets.get(owner);
     existing?.companion?.remove();
-    const record = Object.freeze({
+    const record: Readonly<StylesheetRecord> = Object.freeze({
       owner,
       companion: null,
       key,
@@ -1598,7 +2042,7 @@ class CornerfillAutoController {
     return record;
   }
 
-  _adoptedStylesheetIdentity(sheet) {
+  _adoptedStylesheetIdentity(sheet: CSSStyleSheet): string {
     let identity = this.adoptedStylesheetIds.get(sheet);
     if (!identity) {
       identity = `adopted stylesheet ${this.nextAdoptedStylesheetId}`;
@@ -1608,7 +2052,11 @@ class CornerfillAutoController {
     return identity;
   }
 
-  _writeAdoptedStylesheetRecord(sheet, compiled, { key, identity, media }) {
+  _writeAdoptedStylesheetRecord(
+    sheet: CSSStyleSheet,
+    compiled: Readonly<CarrierCompilation>,
+    { key, identity, media }: Readonly<{ identity: string; key: string; media: string }>,
+  ): Readonly<StylesheetRecord> {
     const existing = this.adoptedStylesheets.get(sheet);
     let companion = existing?.companion ?? null;
     if (compiled.css && !sheet.disabled) {
@@ -1631,7 +2079,7 @@ class CornerfillAutoController {
       companion?.remove();
       companion = null;
     }
-    const record = Object.freeze({
+    const record: Readonly<StylesheetRecord> = Object.freeze({
       owner: sheet,
       adopted: true,
       companion,
@@ -1653,9 +2101,13 @@ class CornerfillAutoController {
     return record;
   }
 
-  _writeFailedAdoptedStylesheetRecord(sheet, identity, key = identity) {
+  _writeFailedAdoptedStylesheetRecord(
+    sheet: CSSStyleSheet,
+    identity: string,
+    key = identity,
+  ): Readonly<StylesheetRecord> {
     this.adoptedStylesheets.get(sheet)?.companion?.remove();
-    const record = Object.freeze({
+    const record: Readonly<StylesheetRecord> = Object.freeze({
       owner: sheet,
       adopted: true,
       companion: null,
@@ -1677,14 +2129,14 @@ class CornerfillAutoController {
     return record;
   }
 
-  _processAdoptedStylesheet(sheet, retryFailed = false) {
+  _processAdoptedStylesheet(sheet: CSSStyleSheet, retryFailed = false): void {
     if (this.destroyed) return;
     const existing = this.adoptedStylesheets.get(sheet);
     if (existing?.failed && !retryFailed) return;
     const identity = existing?.identity ?? this._adoptedStylesheetIdentity(sheet);
     this._clearErrors(sheet);
-    let source;
-    let media;
+    let source: string;
+    let media: string;
     try {
       source = this.adoptedStylesheetSources.get(sheet) ?? adoptedStylesheetSource(sheet);
       media = adoptedStylesheetMedia(sheet);
@@ -1712,10 +2164,10 @@ class CornerfillAutoController {
     }
   }
 
-  _discoverAdoptedStylesheets(retryFailed = false) {
+  _discoverAdoptedStylesheets(retryFailed = false): void {
     if (this.destroyed || !this.includeAdoptedStyleSheets) return;
     this._clearErrors(this.adoptedStylesheets);
-    let sheets;
+    let sheets: CSSStyleSheet[];
     try {
       sheets = [...this.root.adoptedStyleSheets];
     } catch (error) {
@@ -1742,14 +2194,19 @@ class CornerfillAutoController {
     }
   }
 
-  _createCssomHook(owner, source, baseUrl) {
+  _createCssomHook(
+    owner: StylesheetOwner,
+    source: string,
+    baseUrl: string,
+  ): CssomHook | null {
     const sheet = owner.sheet;
     if (!sheet?.insertRule || !sheet?.deleteRule) return null;
     const insertDescriptor = Object.getOwnPropertyDescriptor(sheet, "insertRule");
     const deleteDescriptor = Object.getOwnPropertyDescriptor(sheet, "deleteRule");
     const originalInsert = sheet.insertRule;
     const originalDelete = sheet.deleteRule;
-    const hook = {
+    let hook: CssomHook;
+    hook = {
       active: true,
       baseUrl,
       modelSource: canonicalizeCornerShapeDeclarations(source),
@@ -1760,15 +2217,15 @@ class CornerfillAutoController {
         hook.active = false;
         if (sheet.insertRule === wrappedInsert) {
           if (insertDescriptor) Object.defineProperty(sheet, "insertRule", insertDescriptor);
-          else delete sheet.insertRule;
+          else Reflect.deleteProperty(sheet, "insertRule");
         }
         if (sheet.deleteRule === wrappedDelete) {
           if (deleteDescriptor) Object.defineProperty(sheet, "deleteRule", deleteDescriptor);
-          else delete sheet.deleteRule;
+          else Reflect.deleteProperty(sheet, "deleteRule");
         }
       },
     };
-    const applyMutation = (mutation) => {
+    const applyMutation = (mutation: Readonly<CssomMutation>): void => {
       if (!hook.active || this.destroyed || this.stylesheets.get(owner)?.cssomHook !== hook) return;
       this._clearErrors(owner);
       try {
@@ -1785,21 +2242,28 @@ class CornerfillAutoController {
         this._configureObservation();
         this._queueRefresh({ candidates: true, attachments: true });
       } catch (error) {
-        this._recordError(error, owner.href || "inline stylesheet CSSOM mutation", {
+        this._recordError(error, isStylesheetLink(owner) ? owner.href : "inline stylesheet CSSOM mutation", {
           bucket: owner,
           ownerIdentity: this._ownerIdentity(owner),
         });
         this._writeFailedStylesheetRecord(owner, stylesheetKey(owner), hook);
       }
     };
-    const wrappedInsert = function wrappedCornerfillInsert(rule, index) {
+    const wrappedInsert = function wrappedCornerfillInsert(
+      this: CSSStyleSheet,
+      rule: string,
+      index?: number,
+    ): number {
       const result = arguments.length < 2
         ? Reflect.apply(originalInsert, this, [rule])
         : Reflect.apply(originalInsert, this, [rule, index]);
       applyMutation({ kind: "insert", rule: String(rule), index: result });
       return result;
     };
-    const wrappedDelete = function wrappedCornerfillDelete(index) {
+    const wrappedDelete = function wrappedCornerfillDelete(
+      this: CSSStyleSheet,
+      index: number,
+    ): void {
       const result = Reflect.apply(originalDelete, this, [index]);
       applyMutation({ kind: "delete", index });
       return result;
@@ -1822,12 +2286,12 @@ class CornerfillAutoController {
     }
   }
 
-  _scheduleSourceApplication() {
+  _scheduleSourceApplication(): Promise<void> {
     if (this.destroyed) return Promise.resolve();
     this.sourceApplyRequested = true;
     if (!this.sourceApplyPromise) {
       const task = (async () => {
-        await new Promise((resolve) => {
+        await new Promise<void>((resolve) => {
           this.sourceApplyFrameResolve = resolve;
           this.sourceApplyFrame = this.document.defaultView.requestAnimationFrame(() => {
             this.sourceApplyFrame = null;
@@ -1849,7 +2313,7 @@ class CornerfillAutoController {
     return this.sourceApplyPromise;
   }
 
-  _abortSourceRequest(owner) {
+  _abortSourceRequest(owner: StylesheetOwner): void {
     const request = this.sourceRequests.get(owner);
     if (!request) return;
     request.aborted = true;
@@ -1859,7 +2323,7 @@ class CornerfillAutoController {
     this.sourceRequests.delete(owner);
   }
 
-  _abortObsoleteSourceRequests() {
+  _abortObsoleteSourceRequests(): void {
     for (const [owner, request] of this.sourceRequests) {
       if (!stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== request.key) {
         this._abortSourceRequest(owner);
@@ -1867,7 +2331,7 @@ class CornerfillAutoController {
     }
   }
 
-  _processStylesheet(owner, retryFailed = false) {
+  _processStylesheet(owner: StylesheetOwner, retryFailed = false): Promise<void> | undefined {
     if (this.destroyed) return;
     if (!stylesheetElementIsEligible(owner)) {
       this._abortSourceRequest(owner);
@@ -1883,7 +2347,7 @@ class CornerfillAutoController {
     const existing = this.stylesheets.get(owner);
     if (existing?.key === key && (!existing.failed || !retryFailed)) return;
     const active = this.sourceRequests.get(owner);
-    if (active?.key === key) return active.promise;
+    if (active?.key === key) return active.promise ?? undefined;
     if (active) this._abortSourceRequest(owner);
     this._clearErrors(owner);
     if (existing?.key !== key) {
@@ -1892,10 +2356,10 @@ class CornerfillAutoController {
       this.stylesheets.delete(owner);
       this._scheduleSourceApplication();
     }
-    const request = {
+    const request: SourceRequest = {
       aborted: false,
       cancelWait: null,
-      controller: owner.localName === "link"
+      controller: isStylesheetLink(owner)
         ? new this.document.defaultView.AbortController()
         : null,
       importCache: new Map(),
@@ -1913,8 +2377,13 @@ class CornerfillAutoController {
     return task;
   }
 
-  async _runStylesheetRequest(owner, key, existing, request) {
-    let source;
+  async _runStylesheetRequest(
+    owner: StylesheetOwner,
+    key: string,
+    existing: Readonly<StylesheetRecord> | undefined,
+    request: SourceRequest,
+  ): Promise<void> {
+    let source: Readonly<StylesheetSource>;
     try {
       [source] = await Promise.all([
         this._source(owner, request),
@@ -1923,34 +2392,37 @@ class CornerfillAutoController {
     } catch (error) {
       if (this.destroyed || request.aborted || this.sourceRequests.get(owner) !== request
         || !stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== key) return;
-      this._recordError(error, owner.href || "inline stylesheet", {
+      const ownerIdentity = isStylesheetLink(owner) ? owner.href : this._ownerIdentity(owner);
+      this._recordError(error, ownerIdentity || "inline stylesheet", {
         bucket: owner,
         ownerIdentity: this._ownerIdentity(owner),
-        source: owner.href || this._ownerIdentity(owner),
+        source: ownerIdentity || this._ownerIdentity(owner),
       });
       this._writeFailedStylesheetRecord(owner, key);
       return;
     }
     if (this.destroyed || request.aborted || this.sourceRequests.get(owner) !== request
       || !stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== key) return;
-    let compiled;
+    let compiled: Readonly<CompiledSourceTree>;
     try {
       compiled = await this._compileSourceTree(source, owner, request);
       this.automaticCounters.sourceCompiles += 1;
     } catch (error) {
       if (this.destroyed || request.aborted || this.sourceRequests.get(owner) !== request
         || !stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== key) return;
-      this._recordError(error, owner.href || "inline stylesheet", {
+      this._recordError(error, isStylesheetLink(owner) ? owner.href : "inline stylesheet", {
         bucket: owner,
         ownerIdentity: this._ownerIdentity(owner),
-        source: error.cornerfillDiagnostic?.source ?? source.sourceUrl,
+        source: (error instanceof Error
+          ? (error as DiagnosticError).cornerfillDiagnostic?.source
+          : undefined) ?? source.sourceUrl,
       });
       this._writeFailedStylesheetRecord(owner, key);
       return;
     }
     if (this.destroyed || request.aborted || this.sourceRequests.get(owner) !== request
       || !stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== key) return;
-    let cssomHook = null;
+    let cssomHook: CssomHook | null = null;
     try {
       cssomHook = compiled.imports > 0
         ? null
@@ -1958,7 +2430,7 @@ class CornerfillAutoController {
       this._writeStylesheetRecord(owner, compiled, { key, existing, cssomHook });
     } catch (error) {
       cssomHook?.restore();
-      this._recordError(error, owner.href || "inline stylesheet", {
+      this._recordError(error, isStylesheetLink(owner) ? owner.href : "inline stylesheet", {
         bucket: owner,
         ownerIdentity: this._ownerIdentity(owner),
         source: source.sourceUrl,
@@ -1970,7 +2442,7 @@ class CornerfillAutoController {
     this._scheduleSourceApplication();
   }
 
-  _processInline(element, stylesheetCandidate = false) {
+  _processInline(element: Element, stylesheetCandidate = false): void {
     if (this.destroyed) return;
     if (!(element instanceof this.document.defaultView.HTMLElement)) return;
     const existing = this.inline.get(element);
@@ -1996,7 +2468,7 @@ class CornerfillAutoController {
     for (const declaration of declarations) {
       element.style.setProperty(declaration.property, declaration.value, declaration.priority);
     }
-    const record = Object.freeze({
+    const record: Readonly<InlineRecord> = Object.freeze({
       declarations: Object.freeze(declarations),
       shape: compiled.shape,
       signature: compiled.signature,
@@ -2010,7 +2482,7 @@ class CornerfillAutoController {
     }));
   }
 
-  _restoreInlineRecord(element, record) {
+  _restoreInlineRecord(element: HTMLElement, record: Readonly<InlineRecord>): void {
     for (const declaration of record.declarations) {
       const currentValue = element.style.getPropertyValue(declaration.property);
       const currentPriority = element.style.getPropertyPriority(declaration.property);
@@ -2026,9 +2498,9 @@ class CornerfillAutoController {
     }
   }
 
-  _restoreAuthoredInlineShape(element, record) {
+  _restoreAuthoredInlineShape(element: HTMLElement, record: Readonly<InlineRecord>): void {
     if (!record.authoredShape) return;
-    const authored = [];
+    const authored: string[] = [];
     canonicalizeCornerShapeDeclarations(element.getAttribute("style") ?? "", authored);
     if (authored.length > 0) return;
     const current = element.getAttribute("style") ?? "";
@@ -2036,19 +2508,19 @@ class CornerfillAutoController {
     element.setAttribute("style", `${current}${separator}${record.authoredShape}`);
   }
 
-  *_styleRecords() {
+  *_styleRecords(): Generator<Readonly<StylesheetRecord>, void, unknown> {
     yield* this.stylesheets.values();
     yield* this.adoptedStylesheets.values();
   }
 
-  _stylesheetCandidates() {
-    const candidates = new Set();
+  _stylesheetCandidates(): Set<Element> {
+    const candidates = new Set<Element>();
     this.candidateProvenance.clear();
     for (const record of this._styleRecords()) {
       const selectorRecords = record.selectorRecords.length > 0
         ? record.selectorRecords
         : record.selectors.map((selector) => Object.freeze({
-          source: record.sources[0],
+          source: record.sources[0] ?? record.key,
           selector,
           declaration: null,
         }));
@@ -2070,7 +2542,7 @@ class CornerfillAutoController {
         } catch (error) {
           this._recordError(error, `selector ${selectorRecord.selector}`, {
             bucket: record.owner,
-            ownerIdentity: record.sources[0],
+            ownerIdentity: record.sources[0] ?? record.key,
             source: selectorRecord.source,
             selector: selectorRecord.selector,
             declaration: selectorRecord.declaration,
@@ -2081,7 +2553,7 @@ class CornerfillAutoController {
     return candidates;
   }
 
-  async _discoverSources(retryFailed = false) {
+  async _discoverSources(retryFailed = false): Promise<void> {
     if (this.destroyed) return;
     this.automaticCounters.sourcePasses += 1;
     const owners = stylesheetElements(this.root);
@@ -2108,28 +2580,27 @@ class CornerfillAutoController {
     this._configureObservation();
   }
 
-  _reconcileCandidates() {
+  _reconcileCandidates(): boolean {
     if (this.destroyed) return false;
     this.automaticCounters.candidatePasses += 1;
-    for (const [element] of this.inline) {
+    for (const [element, record] of this.inline) {
       if (element.isConnected) continue;
-      const record = this.inline.get(element);
       this._restoreInlineRecord(element, record);
       this._restoreAuthoredInlineShape(element, record);
       this.inline.delete(element);
       this._clearErrors(element);
     }
     const stylesheetCandidates = this._stylesheetCandidates();
-    const inlineCandidates = new Set([
+    const inlineCandidates = new Set<Element>([
       ...this.inline.keys(),
       ...authoredShapeInlineElements(this.root),
-      ...[...stylesheetCandidates].filter((element) => element.hasAttribute?.("style")),
+      ...[...stylesheetCandidates].filter((element) => element.hasAttribute("style")),
     ]);
     for (const element of inlineCandidates) {
-      if (this.destroyed) return;
+      if (this.destroyed) return false;
       this._processInline(element, stylesheetCandidates.has(element));
     }
-    const candidates = new Set([...this.inline]
+    const candidates = new Set<Element>([...this.inline]
       .filter(([, record]) => record.shape)
       .map(([element]) => element));
     for (const element of stylesheetCandidates) candidates.add(element);
@@ -2142,11 +2613,11 @@ class CornerfillAutoController {
     return changed;
   }
 
-  async _refreshAttachments() {
+  async _refreshAttachments(): Promise<void> {
     if (this.native || this.destroyed) return;
     this.automaticCounters.attachmentPasses += 1;
     const candidates = this.candidates;
-    const ready = [];
+    const ready: Promise<unknown>[] = [];
     for (const [element, handle] of [...this.handles]) {
       this.automaticCounters.computedChecks += 1;
       const computed = element.isConnected
@@ -2217,10 +2688,10 @@ class CornerfillAutoController {
     await Promise.all(ready);
   }
 
-  _observationDependencies() {
-    const attributes = new Set(SOURCE_ATTRIBUTE_NAMES);
-    const events = new Set();
-    const mediaQueries = new Set();
+  _observationDependencies(): Readonly<ObservationState> {
+    const attributes = new Set<string>(SOURCE_ATTRIBUTE_NAMES);
+    const events = new Set<string>();
+    const mediaQueries = new Set<string>();
     let characterData = false;
     let conservative = false;
     let hasSelectors = false;
@@ -2245,20 +2716,21 @@ class CornerfillAutoController {
     });
   }
 
-  _handleMutations(records) {
+  _handleMutations(records: readonly MutationRecord[]): void {
     let sources = false;
     const relevant = records.map((record) => {
       if (record.type === "attributes") {
         if (record.attributeName === "data-cornerfill-owned"
           || record.attributeName === "data-cornerfill-owned-border"
           || record.attributeName === "data-cornerfill-owned-surface") return false;
-        if (record.target.localName === "style" || record.target.localName === "link") {
+        const target = record.target as Element;
+        if (target.localName === "style" || target.localName === "link") {
           sources = true;
           return true;
         }
         if (record.attributeName !== "style") return true;
         const previous = automaticStyleMutationSignature(record.oldValue);
-        const current = automaticStyleMutationSignature(record.target.getAttribute?.("style"));
+        const current = automaticStyleMutationSignature(target.getAttribute("style"));
         return previous !== current;
       }
       if (record.type === "characterData") {
@@ -2268,17 +2740,18 @@ class CornerfillAutoController {
         }
         return this.observationState.characterData;
       }
-      if (record.target.localName === "style") {
+      const mutationTarget = record.target as Element;
+      if (mutationTarget.localName === "style") {
         sources = true;
         return true;
       }
       const nodes = [...record.addedNodes, ...record.removedNodes];
-      const elements = nodes.filter((node) => (
+      const elements = nodes.filter((node): node is Element => (
         node.nodeType === this.document.defaultView.Node.ELEMENT_NODE
       ));
       if (elements.some((node) => (
         /^(?:style|link)$/u.test(node.localName)
-        || Boolean(node.querySelector?.("style,link[rel~=stylesheet]"))
+        || Boolean(node.querySelector("style,link[rel~=stylesheet]"))
       ))) sources = true;
       return elements.length > 0 || (this.observationState.characterData && nodes.length > 0);
     }).some(Boolean);
@@ -2286,12 +2759,12 @@ class CornerfillAutoController {
     this._queueRefresh({ sources, candidates: true, attachments: true });
   }
 
-  _configureObservation() {
+  _configureObservation(): void {
     if (!this.observer || !this.autoObserve) return;
     this.observationState = this._observationDependencies();
     this.observer.disconnect();
     const target = this.root === this.document ? this.document.documentElement : this.root;
-    const options = {
+    const options: MutationObserverInit = {
       attributes: true,
       attributeOldValue: true,
       childList: true,
@@ -2299,7 +2772,7 @@ class CornerfillAutoController {
       subtree: true,
     };
     if (!this.observationState.conservative) {
-      options.attributeFilter = this.observationState.attributes;
+      options.attributeFilter = [...this.observationState.attributes];
     }
     this.observer.observe(target, options);
     for (const listener of this.eventListeners) {
@@ -2313,12 +2786,12 @@ class CornerfillAutoController {
     this.mediaListeners.length = 0;
     const eventRoot = this.root === this.document ? this.document : this.root;
     for (const type of this.observationState.events) {
-      const listener = () => this._queueRefresh({ candidates: true, attachments: true });
+      const listener: EventListener = () => this._queueRefresh({ candidates: true, attachments: true });
       const windowEvent = ["hashchange", "popstate", "resize"].includes(type);
       const documentEvent = type === "fullscreenchange";
-      const listenerTarget = windowEvent
+      const listenerTarget = (windowEvent
         ? this.document.defaultView
-        : documentEvent ? this.document : eventRoot;
+        : documentEvent ? this.document : eventRoot) as EventListenerTarget;
       const listenerOptions = windowEvent ? Object.freeze({ passive: true }) : true;
       listenerTarget.addEventListener(type, listener, listenerOptions);
       this.eventListeners.push(Object.freeze({
@@ -2331,7 +2804,9 @@ class CornerfillAutoController {
     for (const query of this.observationState.mediaQueries) {
       const list = this.document.defaultView.matchMedia?.(query);
       if (!list) continue;
-      const listener = () => this._queueRefresh({ candidates: true, attachments: true });
+      const listener = (_event: MediaQueryListEvent) => (
+        this._queueRefresh({ candidates: true, attachments: true })
+      );
       if (typeof list.addEventListener === "function") {
         list.addEventListener("change", listener);
         this.mediaListeners.push(Object.freeze({ list, listener, legacy: false }));
@@ -2342,7 +2817,7 @@ class CornerfillAutoController {
     }
   }
 
-  _installObserver() {
+  _installObserver(): void {
     if (!this.autoObserve || this.observer || !this.document.defaultView.MutationObserver) return;
     this.observer = new this.document.defaultView.MutationObserver((records) => (
       this._handleMutations(records)
@@ -2350,9 +2825,13 @@ class CornerfillAutoController {
     this._configureObservation();
   }
 
-  async _start() {
+  async _start(): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> {
     if (this.document.readyState === "loading") {
-      await new Promise((resolve) => this.document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+      await new Promise<void>((resolve) => this.document.addEventListener(
+        "DOMContentLoaded",
+        () => resolve(),
+        { once: true },
+      ));
     }
     if (this.destroyed || this.native) return this.explain();
     this._ensureCarrierRegistration();
@@ -2361,7 +2840,9 @@ class CornerfillAutoController {
     return result;
   }
 
-  _queueRefresh({ sources = false, candidates = false, attachments = true } = {}) {
+  _queueRefresh(
+    { sources = false, candidates = false, attachments = true }: Readonly<RefreshRequestOptions> = {},
+  ): void {
     if (this.destroyed || this.native) return;
     this.sourceRequested ||= sources;
     this.candidateRequested ||= candidates || sources;
@@ -2382,7 +2863,9 @@ class CornerfillAutoController {
     candidates = false,
     attachments = false,
     retryFailed = false,
-  } = {}) {
+  }: Readonly<RefreshRequestOptions> = {}): Promise<
+    Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null
+  > {
     if (this.destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
     if (this.native) return Promise.resolve(this.explain());
     this.workRequested = true;
@@ -2418,7 +2901,7 @@ class CornerfillAutoController {
     return this.refreshPromise;
   }
 
-  refresh(options = {}) {
+  refresh(options: Readonly<{ retryFailed?: boolean | undefined }> = {}) {
     return this._requestRefresh({
       sources: true,
       candidates: true,
@@ -2427,7 +2910,10 @@ class CornerfillAutoController {
     });
   }
 
-  refreshAdoptedStyleSheet(sheet, source) {
+  refreshAdoptedStyleSheet(
+    sheet: CSSStyleSheet,
+    source: string,
+  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> {
     if (!this.includeAdoptedStyleSheets) {
       return Promise.reject(new TypeError("This automatic scope did not opt in to adopted stylesheets"));
     }
@@ -2441,7 +2927,7 @@ class CornerfillAutoController {
     return this.refresh();
   }
 
-  registerRoot(root, options = {}) {
+  registerRoot(root: ShadowRoot, options: Readonly<RegisterRootOptions> = {}): CornerfillAutoController {
     if (this.destroyed) throw new Error("Cornerfill auto controller is destroyed");
     const ShadowRoot = this.document.defaultView.ShadowRoot;
     if (!(root instanceof ShadowRoot) || root.ownerDocument !== this.document) {
@@ -2461,20 +2947,22 @@ class CornerfillAutoController {
       nonce: options.nonce ?? this.nonce,
       autoObserve: options.autoObserve ?? this.autoObserve,
       adoptedStyleSheets: options.adoptedStyleSheets === true,
-      onError: options.onError ?? this.onError,
+      onError: options.onError ?? this.onError ?? undefined,
     });
     this.scopes.set(root, scope);
     return scope;
   }
 
-  unregisterRoot(root) {
+  unregisterRoot(root: ShadowRoot): boolean {
     const scope = this.scopes.get(root);
     if (!scope) return false;
     scope.destroy();
     return true;
   }
 
-  explain(element = null) {
+  explain(
+    element: HTMLElement | null = null,
+  ): Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null {
     if (element) return this.handles.get(element)?.explain() ?? this.controller.explain(element);
     return Object.freeze({
       schema: "cornerfill-auto@1",
@@ -2509,10 +2997,10 @@ class CornerfillAutoController {
         observedSourceClassStyleStateAndViewportChanges: this.autoObserve,
       }),
       runtime: this.controller.stats(),
-    });
+    }) as Readonly<CornerfillAutoExplanation>;
   }
 
-  destroy() {
+  destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const scope of [...this.scopes.values()]) scope.destroy();
@@ -2564,11 +3052,16 @@ class CornerfillAutoController {
     for (const cancel of this.pendingStylesheetWaits) cancel();
     this.pendingStylesheetWaits.clear();
     this.diagnosticsByOwner.clear();
-    if (this.parentAuto?.scopes.get(this.root) === this) this.parentAuto.scopes.delete(this.root);
+    if (this.parentAuto && this.root instanceof this.document.defaultView.ShadowRoot
+      && this.parentAuto.scopes.get(this.root) === this) {
+      this.parentAuto.scopes.delete(this.root);
+    }
     if (this.ownsController) this.controller.destroy();
   }
 }
 
-export function installCornerfillAuto(options = {}) {
+export function installCornerfillAuto(
+  options: Readonly<CornerfillAutoOptions> = {},
+): CornerfillAutoControllerHandle {
   return new CornerfillAutoController(options);
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseBackgroundPosition } from "../src/background.mjs";
+import { parseBackgroundPosition } from "../dist/background.mjs";
 
 const qualifiedNative = Object.freeze({ qualified: true });
 
@@ -56,7 +56,7 @@ function nativeDocument() {
 }
 
 async function runtimeInternals() {
-  const runtimeUrl = new URL("../src/runtime.mjs", import.meta.url);
+  const runtimeUrl = new URL("../dist/runtime.mjs", import.meta.url);
   const source = readFileSync(runtimeUrl, "utf8")
     .replace(/(from\s+["'])(\.\/[^"']+)(["'])/gu, (_match, start, relative, end) => (
       `${start}${new URL(relative, runtimeUrl).href}${end}`
@@ -66,7 +66,7 @@ async function runtimeInternals() {
 }
 
 test("native handles dispose and controllers destroy without teardown errors", async () => {
-  const { installCornerfill } = await import("../src/runtime.mjs?native-teardown-test");
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-teardown-test");
   const fixture = nativeDocument();
   const first = fixture.element();
   first.style.setProperty("corner-shape", "round");
@@ -96,8 +96,8 @@ test("native handles dispose and controllers destroy without teardown errors", a
 });
 
 test("query-distinct runtime modules share one per-document element owner registry", async () => {
-  const firstRuntime = await import("../src/runtime.mjs?owner-registry-first");
-  const secondRuntime = await import("../src/runtime.mjs?owner-registry-second");
+  const firstRuntime = await import("../dist/runtime.mjs?owner-registry-first");
+  const secondRuntime = await import("../dist/runtime.mjs?owner-registry-second");
   const fixture = nativeDocument();
   const element = fixture.element();
   element.style.setProperty("corner-shape", "round");

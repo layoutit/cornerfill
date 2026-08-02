@@ -3,15 +3,98 @@ import {
   splitTopLevelCommas,
   splitTopLevelWhitespace,
 } from "./values.mjs";
+import type { LengthPercentage } from "./values.mjs";
+
+export type GradientStop = readonly [offset: number, color: string];
+
+export type LinearGradientLine =
+  | Readonly<{ kind: "angle"; radians: number }>
+  | Readonly<{
+    kind: "side";
+    horizontal: "left" | "right" | null;
+    vertical: "top" | "bottom" | null;
+  }>;
+
+export type RadialGradientShape = "circle" | "ellipse";
+export type RadialGradientSizeKeyword =
+  | "closest-side"
+  | "closest-corner"
+  | "farthest-side"
+  | "farthest-corner";
+export type RadialGradientSize =
+  | Readonly<{
+    kind: "explicit";
+    radii: readonly Readonly<LengthPercentage>[];
+  }>
+  | Readonly<{
+    kind: "keyword";
+    value: RadialGradientSizeKeyword;
+  }>;
+
+interface ParsedGradientBase {
+  readonly css: string;
+  readonly stops: readonly GradientStop[];
+}
+
+export interface ParsedLinearGradient extends ParsedGradientBase {
+  readonly kind: "linear-gradient";
+  readonly line: LinearGradientLine;
+}
+
+export interface ParsedRadialGradient extends ParsedGradientBase {
+  readonly centerSource: string;
+  readonly kind: "radial-gradient";
+  readonly shape: RadialGradientShape;
+  readonly size: RadialGradientSize;
+}
+
+export interface ParsedConicGradient extends ParsedGradientBase {
+  readonly angle: number;
+  readonly centerSource: string;
+  readonly kind: "conic-gradient";
+}
+
+export type ParsedCssGradient =
+  | ParsedLinearGradient
+  | ParsedRadialGradient
+  | ParsedConicGradient;
+
+interface GradientCall {
+  readonly body: string;
+  readonly css: string;
+  readonly type: "linear" | "radial" | "conic";
+}
+
+interface MutableStop {
+  color: string;
+  offset: number | null;
+}
+
+interface RadialPrelude {
+  readonly centerSource: string;
+  readonly shape: RadialGradientShape;
+  readonly size: RadialGradientSize;
+}
+
+interface ConicPrelude {
+  readonly angle: number;
+  readonly centerSource: string;
+}
+
+type PositionParser = (input: string) => number;
 
 const ANGLE = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(deg|grad|rad|turn)?$/iu;
 const PERCENTAGE = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)%$/iu;
 
-function angleRadians(input, label, { unitlessZero = true } = {}) {
+function angleRadians(
+  input: unknown,
+  label: string,
+  { unitlessZero = true }: { unitlessZero?: boolean } = {},
+): number {
   const value = String(input).trim();
   const match = ANGLE.exec(value);
   if (!match) throw new SyntaxError(`${label} requires deg, grad, rad, or turn: ${value}`);
-  const number = Number(match[1]);
+  const number = Number(match[1]!);
   const unit = (match[2] ?? "").toLowerCase();
   if (!Number.isFinite(number) || (!unit && (!unitlessZero || number !== 0))) {
     throw new SyntaxError(`${label} requires a finite angle: ${value}`);
@@ -22,22 +105,22 @@ function angleRadians(input, label, { unitlessZero = true } = {}) {
   return number * Math.PI / 180;
 }
 
-function linearStopPosition(input) {
+function linearStopPosition(input: string): number {
   const value = String(input).trim();
   const percent = PERCENTAGE.exec(value);
-  if (percent) return Number(percent[1]) / 100;
+  if (percent) return Number(percent[1]!) / 100;
   const zero = /^[-+]?0(?:\.0+)?(?:px)?$/iu.test(value);
   if (zero) return 0;
   throw new SyntaxError(`gradient stop positions support percentages and zero lengths: ${value}`);
 }
 
-function conicStopPosition(input) {
+function conicStopPosition(input: string): number {
   const percent = PERCENTAGE.exec(String(input).trim());
-  if (percent) return Number(percent[1]) / 100;
+  if (percent) return Number(percent[1]!) / 100;
   return angleRadians(input, "conic gradient stop") / (Math.PI * 2);
 }
 
-function tryPosition(parser, value) {
+function tryPosition(parser: PositionParser, value: string): number | null {
   try {
     return parser(value);
   } catch {
@@ -45,50 +128,59 @@ function tryPosition(parser, value) {
   }
 }
 
-function resolveAutomaticStops(stops) {
-  const resolved = stops.map(({ color, offset }) => ({ color, offset }));
-  if (resolved[0].offset === null) resolved[0].offset = 0;
-  if (resolved.at(-1).offset === null) resolved.at(-1).offset = 1;
-  let previous = resolved[0].offset;
+function resolveAutomaticStops(stops: readonly MutableStop[]): readonly GradientStop[] {
+  const resolved: MutableStop[] = stops.map(({ color, offset }) => ({ color, offset }));
+  const first = resolved[0]!;
+  const last = resolved.at(-1)!;
+  if (first.offset === null) first.offset = 0;
+  if (last.offset === null) last.offset = 1;
+  let previous = first.offset;
   for (let index = 1; index < resolved.length; index += 1) {
-    if (resolved[index].offset !== null) {
-      resolved[index].offset = Math.max(previous, resolved[index].offset);
-      previous = resolved[index].offset;
+    const stop = resolved[index]!;
+    if (stop.offset !== null) {
+      stop.offset = Math.max(previous, stop.offset);
+      previous = stop.offset;
     }
   }
   let index = 1;
   while (index < resolved.length - 1) {
-    if (resolved[index].offset !== null) {
+    if (resolved[index]!.offset !== null) {
       index += 1;
       continue;
     }
     const start = index - 1;
     let end = index + 1;
-    while (resolved[end].offset === null) end += 1;
-    const step = (resolved[end].offset - resolved[start].offset) / (end - start);
+    while (resolved[end]!.offset === null) end += 1;
+    const startOffset = resolved[start]!.offset!;
+    const step = (resolved[end]!.offset! - startOffset) / (end - start);
     for (let cursor = index; cursor < end; cursor += 1) {
-      resolved[cursor].offset = resolved[start].offset + step * (cursor - start);
+      resolved[cursor]!.offset = startOffset + step * (cursor - start);
     }
     index = end + 1;
   }
-  if (resolved.some(({ offset }) => !Number.isFinite(offset) || offset < 0 || offset > 1)) {
+  if (resolved.some((stop) => {
+    const offset = stop.offset!;
+    return !Number.isFinite(offset) || offset < 0 || offset > 1;
+  })) {
     throw new RangeError("gradient stop positions outside 0% through 100% are not supported");
   }
-  return Object.freeze(resolved.map(({ color, offset }) => Object.freeze([offset, color])));
+  return Object.freeze(resolved.map(({ color, offset }) => (
+    Object.freeze([offset!, color] as const)
+  )));
 }
 
-function parseStops(parts, positionParser) {
-  const expanded = [];
+function parseStops(parts: readonly string[], positionParser: PositionParser): readonly GradientStop[] {
+  const expanded: MutableStop[] = [];
   for (const part of parts) {
     const tokens = [...splitTopLevelWhitespace(part)];
-    const positions = [];
+    const positions: number[] = [];
     while (tokens.length > 1 && positions.length < 2) {
-      const position = tryPosition(positionParser, tokens.at(-1));
+      const position = tryPosition(positionParser, tokens.at(-1)!);
       if (position === null) break;
       positions.unshift(position);
       tokens.pop();
     }
-    if (tokens.length === 1 && tryPosition(positionParser, tokens[0]) !== null) {
+    if (tokens.length === 1 && tryPosition(positionParser, tokens[0]!) !== null) {
       throw new SyntaxError("gradient interpolation hints are not supported");
     }
     const color = tokens.join(" ").trim();
@@ -100,26 +192,34 @@ function parseStops(parts, positionParser) {
   return resolveAutomaticStops(expanded);
 }
 
-function gradientCall(input) {
+function gradientCall(input: unknown): Readonly<GradientCall> {
   const value = String(input).trim();
   const match = /^(repeating-)?(linear|radial|conic)-gradient\((.*)\)$/isu.exec(value);
   if (!match) throw new SyntaxError(`unsupported CSS gradient: ${value}`);
   if (match[1]) throw new SyntaxError("repeating gradient functions are not supported");
-  return Object.freeze({ type: match[2].toLowerCase(), body: match[3], css: value });
+  return Object.freeze({
+    type: match[2]!.toLowerCase() as GradientCall["type"],
+    body: match[3]!,
+    css: value,
+  });
 }
 
-function rejectsColorSpacePrelude(value) {
+function rejectsColorSpacePrelude(value: string): boolean {
   return /(?:^|\s)in\s+[a-z]/iu.test(value);
 }
 
-function parseLinear(call) {
+function parseLinear(call: Readonly<GradientCall>): Readonly<ParsedLinearGradient> {
   const parts = [...splitTopLevelCommas(call.body)];
-  let line = Object.freeze({ kind: "angle", radians: Math.PI });
-  const first = parts[0];
+  let line: LinearGradientLine = Object.freeze({ kind: "angle", radians: Math.PI });
+  const first = parts[0]!;
   if (/^to\s+/iu.test(first)) {
     const sides = splitTopLevelWhitespace(first.slice(3)).map((token) => token.toLowerCase());
-    const horizontal = sides.find((side) => side === "left" || side === "right") ?? null;
-    const vertical = sides.find((side) => side === "top" || side === "bottom") ?? null;
+    const horizontal = sides.find((side): side is "left" | "right" => (
+      side === "left" || side === "right"
+    )) ?? null;
+    const vertical = sides.find((side): side is "top" | "bottom" => (
+      side === "top" || side === "bottom"
+    )) ?? null;
     if (sides.length < 1 || sides.length > 2 || sides.some((side) => (
       !new Set(["left", "right", "top", "bottom"]).has(side)
     )) || (sides.length === 2 && (!horizontal || !vertical))) {
@@ -141,7 +241,7 @@ function parseLinear(call) {
   });
 }
 
-function radialPreludeCandidate(value) {
+function radialPreludeCandidate(value: string): boolean {
   const tokens = splitTopLevelWhitespace(value).map((token) => token.toLowerCase());
   if (tokens.includes("at") || tokens.includes("circle") || tokens.includes("ellipse")
     || tokens.some((token) => new Set([
@@ -157,7 +257,7 @@ function radialPreludeCandidate(value) {
     });
 }
 
-function parseRadialPrelude(value) {
+function parseRadialPrelude(value: string): Readonly<RadialPrelude> {
   if (rejectsColorSpacePrelude(value)) {
     throw new SyntaxError("gradient color interpolation spaces are not supported");
   }
@@ -166,9 +266,9 @@ function parseRadialPrelude(value) {
   const geometryTokens = at < 0 ? tokens : tokens.slice(0, at);
   const centerSource = at < 0 ? "center" : tokens.slice(at + 1).join(" ");
   if (!centerSource) throw new SyntaxError("radial-gradient at requires a position");
-  let shape = null;
-  let keyword = null;
-  const radii = [];
+  let shape: RadialGradientShape | null = null;
+  let keyword: RadialGradientSizeKeyword | null = null;
+  const radii: Readonly<LengthPercentage>[] = [];
   for (const token of geometryTokens) {
     const lower = token.toLowerCase();
     if (lower === "circle" || lower === "ellipse") {
@@ -178,7 +278,7 @@ function parseRadialPrelude(value) {
       "closest-side", "closest-corner", "farthest-side", "farthest-corner",
     ]).has(lower)) {
       if (keyword) throw new SyntaxError(`duplicate radial-gradient size: ${value}`);
-      keyword = lower;
+      keyword = lower as RadialGradientSizeKeyword;
     } else {
       radii.push(parseLengthPercentage(token, { label: "radial-gradient radius" }));
     }
@@ -190,7 +290,7 @@ function parseRadialPrelude(value) {
   shape ??= "ellipse";
   if (shape === "circle" && radii.length === 2) throw new SyntaxError("circle radial-gradient requires one radius");
   if (shape === "ellipse" && radii.length === 1) throw new SyntaxError("ellipse radial-gradient requires two radii");
-  if (shape === "circle" && radii.length === 1 && radii[0].percent !== 0) {
+  if (shape === "circle" && radii.length === 1 && radii[0]!.percent !== 0) {
     throw new SyntaxError("circle radial-gradient percentage radii are invalid");
   }
   return Object.freeze({
@@ -202,10 +302,10 @@ function parseRadialPrelude(value) {
   });
 }
 
-function parseRadial(call) {
+function parseRadial(call: Readonly<GradientCall>): Readonly<ParsedRadialGradient> {
   const parts = [...splitTopLevelCommas(call.body)];
-  const prelude = radialPreludeCandidate(parts[0])
-    ? parseRadialPrelude(parts.shift())
+  const prelude = radialPreludeCandidate(parts[0]!)
+    ? parseRadialPrelude(parts.shift()!)
     : parseRadialPrelude("");
   return Object.freeze({
     kind: "radial-gradient",
@@ -215,7 +315,7 @@ function parseRadial(call) {
   });
 }
 
-function parseConicPrelude(value) {
+function parseConicPrelude(value: string): Readonly<ConicPrelude> {
   if (rejectsColorSpacePrelude(value)) {
     throw new SyntaxError("gradient color interpolation spaces are not supported");
   }
@@ -225,7 +325,7 @@ function parseConicPrelude(value) {
   let cursor = 0;
   if (tokens[cursor]?.toLowerCase() === "from") {
     if (!tokens[cursor + 1]) throw new SyntaxError("conic-gradient from requires an angle");
-    angle = angleRadians(tokens[cursor + 1], "conic-gradient angle");
+    angle = angleRadians(tokens[cursor + 1]!, "conic-gradient angle");
     cursor += 2;
   }
   if (tokens[cursor]?.toLowerCase() === "at") {
@@ -237,10 +337,10 @@ function parseConicPrelude(value) {
   return Object.freeze({ angle, centerSource });
 }
 
-function parseConic(call) {
+function parseConic(call: Readonly<GradientCall>): Readonly<ParsedConicGradient> {
   const parts = [...splitTopLevelCommas(call.body)];
-  const hasPrelude = /^(?:from|at|in)\s+/iu.test(parts[0]);
-  const prelude = hasPrelude ? parseConicPrelude(parts.shift()) : parseConicPrelude("");
+  const hasPrelude = /^(?:from|at|in)\s+/iu.test(parts[0]!);
+  const prelude = hasPrelude ? parseConicPrelude(parts.shift()!) : parseConicPrelude("");
   return Object.freeze({
     kind: "conic-gradient",
     css: call.css,
@@ -249,11 +349,11 @@ function parseConic(call) {
   });
 }
 
-export function isCssGradient(input) {
+export function isCssGradient(input: unknown): boolean {
   return /^(?:repeating-)?(?:linear|radial|conic)-gradient\(/iu.test(String(input).trim());
 }
 
-export function parseCssGradient(input) {
+export function parseCssGradient(input: unknown): Readonly<ParsedCssGradient> {
   const call = gradientCall(input);
   if (call.type === "linear") return parseLinear(call);
   if (call.type === "radial") return parseRadial(call);

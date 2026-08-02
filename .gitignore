@@ -12,6 +12,7 @@
 /test/png.test.mjs
 
 # Generated and machine-local files
+/dist/
 /.playwright-cli/
 /output/
 /node_modules/
