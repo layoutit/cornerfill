@@ -4,9 +4,9 @@ CSS `corner-shape` for Safari and Firefox. Import Cornerfill once, write normal 
 
 | Chrome (native) | WebKit (Cornerfill) | Firefox (Cornerfill) |
 | --- | --- | --- |
-| ![Native Chrome triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-native-chrome.png) | ![Cornerfill WebKit triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-webkit.png) | ![Cornerfill Firefox triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-firefox.png) |
+| ![Animated native Chrome triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-native-chrome.gif) | ![Animated Cornerfill WebKit triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-webkit.gif) | ![Animated Cornerfill Firefox triangle](https://raw.githubusercontent.com/layoutit/cornerfill/main/assets/cornerfill-firefox.gif) |
 
-These are real browser captures of the same triangle, not illustrations. They demonstrate the three rendering paths, not certified pixel parity.
+These are real captures of the same `matrix3d()` animation. WebKit and Firefox stayed at one Cornerfill paint across all 24 frames. They demonstrate the three rendering paths, not certified pixel parity.
 
 ## Installation
 
