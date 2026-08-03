@@ -44,94 +44,33 @@ WebKit displays that surface with `-webkit-canvas()`. Firefox registers it with 
 
 Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-alpha assets.
 
-## Browser Paths
-
-| Browser | Path |
-| --- | --- |
-| Qualified native browser | Native CSS; fallback code is not loaded |
-| Safari / WebKit | Canvas surface through `-webkit-canvas()` |
-| Firefox | Canvas surface through `-moz-element()` |
-
-Every path is capability-probed. Test the exact stable browser versions in your support matrix.
-
 ## Supported
 
-- `round`, `squircle`, `square`, `bevel`, `scoop`, `notch`, finite `superellipse()` corners, physical and logical longhands, and browser-computed `border-radius` values.
-- Solid colors, admitted raster and atlas backgrounds, non-repeating gradients, and supported background sizing, positioning, repetition, origin, and clip.
-- One-color solid borders with unequal widths, one contained inset shadow, and one contained solid outline within the documented geometry limits.
-- `<style>`, inline styles, readable linked stylesheets, recursive imports, variables, media rules, named layers, stateful selectors, and explicitly registered open shadow roots.
-- Resize, relevant style changes, teardown, and a caller-clocked prepared path for retained renderers such as [PolyCSS](https://github.com/LayoutitStudio/polycss).
+- `round`, `squircle`, `square`, `bevel`, `scoop`, `notch`, finite `superellipse()` corners, physical and logical properties, and browser-computed `border-radius` values.
+- Solid colors, raster backgrounds, and non-repeating gradients with supported sizing, positioning, repetition, origin, and clip.
+- One-color solid borders with unequal widths, one inset shadow, and one contained solid outline.
+- Inline, embedded, and readable linked CSS, including imports, variables, media queries, layers, stateful selectors, and registered open shadow roots.
+- Resize and relevant style changes update automatically.
 
-Unsupported syntax is reported or left native. Cornerfill does not approximate it.
-
-## Advanced Use
-
-The package root is the zero-configuration path. Use `cornerfill/auto` when you need scanner options:
-
-```js
-import { installCornerfillAuto } from "cornerfill/auto";
-
-const cornerfill = installCornerfillAuto({
-  stylesheetTimeoutMs: 5_000,
-  nonce: document.currentScript?.nonce,
-});
-
-await cornerfill.ready;
-```
-
-Open shadow roots must be registered because discovery does not cross shadow boundaries:
-
-```js
-const scope = cornerfill.registerRoot(shadowRoot);
-await scope.ready;
-```
-
-Constructed stylesheets also require their exact source through `refreshAdoptedStyleSheet(sheet, css)`. Cross-origin stylesheets and imports require CORS. A restrictive CSP must allow linked stylesheet recovery through `connect-src` and generated styles through the configured nonce.
-
-Use `cornerfill/runtime` when your application already owns element state:
-
-```js
-import { installCornerfill } from "cornerfill/runtime";
-
-const runtime = installCornerfill();
-const triangle = runtime.attach(element, { cornerShape: "bevel bevel round round" });
-
-await triangle.ready;
-triangle.dispose();
-runtime.destroy();
-```
-
-Retained renderers can use `attachPrepared()` and `updatePreparedBatch()` to reuse fixed geometry, decoded images, and atlas programs. Pure helpers are exported from `cornerfill/geometry`, `cornerfill/values`, and `cornerfill/spec`.
+Unsupported syntax is reported or left native rather than approximated.
 
 ## Limits
 
-- Cornerfill shapes host paint. It does not provide descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, shaped `backdrop-filter` clipping, or automatic pseudo-element targets.
-- The fallback owns the host background, supported border, radii, shadow, and outline. Conflicting author `!important` declarations are rejected.
-- Outer shadows, outside outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented.
-- Automatic CSS animations and transitions of shape or paint inputs do not reproduce native timing. Use the explicit update or interpolation API when that behavior matters.
-- Closed shadow roots, unreadable cross-origin CSS, and unsupported CSSOM mutations cannot be discovered automatically.
-- Allocation is bounded by active fallback entries and aggregate backing pixels. Unsupported or self-intersecting geometry is refused before surface mutation.
-
-Candidate comparisons remain `UNQUALIFIED`; implemented support is not a native pixel-parity claim.
-
-## Diagnostics and Contracts
-
-`cornerfill.explain()`, element-handle `explain()`, and runtime `stats()` report the selected path, active capabilities, limitations, source errors, and resource counters.
-
-The detailed implementation contract lives in the [polyfill bible](notes/README.md). The [executable oracle contract](oracle/README.md) defines capture and comparison rules.
+- Cornerfill shapes host paint. It does not provide descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, `backdrop-filter` clipping, or automatic pseudo-element targets.
+- Outer shadows and outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented. Conflicting `!important` paint declarations are rejected.
+- CSS animations and transitions of shape or paint inputs do not reproduce native timing.
+- Closed shadow roots, unreadable cross-origin CSS, and direct mutation of existing CSSOM rules cannot be discovered automatically.
 
 ## Development
 
 ```sh
-npm run build
 npm test
 npm run test:package
 npm run test:browser:runtime
-npm run oracle:smoke
 npm run oracle:cross
 ```
 
-Browser and oracle scripts open Chrome, WebKit, and Firefox strictly one at a time. TypeScript `.mts` files are the source of truth; the build emits browser-ready `.mjs` files and declarations to `dist/`.
+Browser tests run Chrome, WebKit, and Firefox one at a time. TypeScript `.mts` files are the source of truth. See the [implementation contract](notes/README.md) and [oracle contract](oracle/README.md) for details.
 
 ## License
 
