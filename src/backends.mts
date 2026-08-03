@@ -1,6 +1,6 @@
 import { nextDocumentId } from "./identity.mjs";
 
-export const CORNERFILL_SURFACE_SCHEMA = "cornerfill-live-surface@2";
+const CORNERFILL_SURFACE_SCHEMA = "cornerfill-live-surface@2";
 
 export type SurfaceBackend = "auto" | ConcreteSurfaceBackend;
 export type ConcreteSurfaceBackend = "webkit-canvas" | "moz-element" | "static-data-url";
@@ -18,7 +18,7 @@ export interface SurfaceCreateOptions {
   readonly maxWebkitPoolPrefixes?: number;
 }
 
-export interface SurfaceSize {
+interface SurfaceSize {
   readonly backingHeight: number;
   readonly backingWidth: number;
   readonly cssHeight: number;

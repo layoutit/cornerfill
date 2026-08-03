@@ -265,18 +265,18 @@ function screenshotCode(paths, { opaquePairs = null } = {}) {
       "document.body.style.setProperty(\"background\",color,\"important\");",
       "}, \"#000\");",
       NEXT_PAINT_CODE,
-      `await page.locator(\"#capture\").screenshot({path:${JSON.stringify(black)},${captureOptions},omitBackground:false});`,
+      `await page.locator("#capture").screenshot({path:${JSON.stringify(black)},${captureOptions},omitBackground:false});`,
       "await page.evaluate(color => {",
       "document.documentElement.style.setProperty(\"background\",color,\"important\");",
       "document.body.style.setProperty(\"background\",color,\"important\");",
       "}, \"#fff\");",
       NEXT_PAINT_CODE,
-      `await page.locator(\"#capture\").screenshot({path:${JSON.stringify(white)},${captureOptions},omitBackground:false});`,
+      `await page.locator("#capture").screenshot({path:${JSON.stringify(white)},${captureOptions},omitBackground:false});`,
     ].join("")).join(NEXT_PAINT_CODE);
   } else {
     captureMethod = "transparent-browser-screenshot";
     calls = paths.map((path) => (
-      `await page.locator(\"#capture\").screenshot({path:${JSON.stringify(path)},${captureOptions},omitBackground:true});`
+      `await page.locator("#capture").screenshot({path:${JSON.stringify(path)},${captureOptions},omitBackground:true});`
     )).join(NEXT_PAINT_CODE);
   }
   const code = [

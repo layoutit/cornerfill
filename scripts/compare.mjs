@@ -7,7 +7,7 @@ import {
 import { basename, join } from "node:path";
 import { comparePngImages, readPng, writePng } from "./png.mjs";
 
-export const COMPARE_REPORT_SCHEMA = "cornerfill-oracle-compare@1";
+const COMPARE_REPORT_SCHEMA = "cornerfill-oracle-compare@1";
 
 function listFrames(directory) {
   return readdirSync(directory)

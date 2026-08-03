@@ -1,6 +1,6 @@
-export const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@2";
+const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@2";
 
-export type ImageCacheRecordState = "loading" | "ready" | "error";
+type ImageCacheRecordState = "loading" | "ready" | "error";
 
 export interface ImageCacheRecord {
   absoluteUrl: string;

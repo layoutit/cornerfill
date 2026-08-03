@@ -12,7 +12,7 @@ import type {
 } from "./background.mjs";
 import type { Four } from "./values.mjs";
 
-export const CORNERFILL_PAINTER_SCHEMA = "cornerfill-production-painter@1";
+const CORNERFILL_PAINTER_SCHEMA = "cornerfill-production-painter@1";
 
 const ZERO_ALPHA = String.raw`(?:0+(?:\.0*)?|\.0+)(?:e[+-]?\d+)?%?`;
 const ZERO_SLASH_ALPHA = new RegExp(`/\\s*${ZERO_ALPHA}\\s*\\)$`, "iu");
@@ -54,33 +54,33 @@ interface GradientPaintStateBase {
   readonly tilePlan?: Readonly<{ x: readonly number[]; y: readonly number[] }> | undefined;
 }
 
-export interface LinearGradientPaintState extends GradientPaintStateBase {
+interface LinearGradientPaintState extends GradientPaintStateBase {
   readonly from?: PixelPair | undefined;
   readonly kind: "linear-gradient";
   readonly line?: LinearGradientLine | undefined;
   readonly to?: PixelPair | undefined;
 }
 
-export interface RadialGradientPaintState extends GradientPaintStateBase {
+interface RadialGradientPaintState extends GradientPaintStateBase {
   readonly gradientCenter: PixelPair;
   readonly gradientRadii: PixelPair;
   readonly kind: "radial-gradient";
   readonly shape?: RadialGradientShape | undefined;
 }
 
-export interface ConicGradientPaintState extends GradientPaintStateBase {
+interface ConicGradientPaintState extends GradientPaintStateBase {
   readonly angle: number;
   readonly gradientCenter: PixelPair;
   readonly kind: "conic-gradient";
 }
 
-export interface SolidPaintState {
+interface SolidPaintState {
   readonly clipArea?: Readonly<BackgroundArea> | undefined;
   readonly color: string;
   readonly kind: "solid";
 }
 
-export interface EmptyPaintState {
+interface EmptyPaintState {
   readonly clipArea?: Readonly<BackgroundArea> | undefined;
   readonly kind: "none";
 }
@@ -93,7 +93,7 @@ export type OwnedPaintLayer =
   | RadialGradientPaintState
   | ConicGradientPaintState;
 
-export interface LayeredPaintState {
+interface LayeredPaintState {
   readonly color: string;
   readonly colorClipArea: Readonly<BackgroundArea>;
   readonly kind: "layers";
@@ -160,9 +160,9 @@ export interface CornerfillPaintOptions {
   readonly shadow?: InsetShadowPaintState | null | undefined;
 }
 
-export type PixelRect = readonly [x: number, y: number, width: number, height: number];
+type PixelRect = readonly [x: number, y: number, width: number, height: number];
 
-export interface ImageLayerPaintResult {
+interface ImageLayerPaintResult {
   readonly blendMode?: "multiply" | undefined;
   readonly destinationRect: PixelRect | null;
   readonly imageSize: PixelPair;
@@ -173,17 +173,17 @@ export interface ImageLayerPaintResult {
   readonly tilesDrawn?: number | undefined;
 }
 
-export interface GradientLayerPaintResult {
+interface GradientLayerPaintResult {
   readonly kind: "conic-gradient" | "linear-gradient" | "radial-gradient";
   readonly tilesDrawn: number;
 }
 
-export interface SolidLayerPaintResult {
+interface SolidLayerPaintResult {
   readonly color: string;
   readonly kind: "solid";
 }
 
-export interface EmptyLayerPaintResult {
+interface EmptyLayerPaintResult {
   readonly kind: "none";
 }
 
@@ -193,14 +193,14 @@ export type OwnedLayerPaintResult =
   | SolidLayerPaintResult
   | EmptyLayerPaintResult;
 
-export interface EmptyClipPaintResult {
+interface EmptyClipPaintResult {
   readonly emptyClip: true;
   readonly kind: OwnedPaintLayer["kind"];
 }
 
-export type ClippedOwnedLayerPaintResult = OwnedLayerPaintResult | EmptyClipPaintResult;
+type ClippedOwnedLayerPaintResult = OwnedLayerPaintResult | EmptyClipPaintResult;
 
-export interface LayerStackPaintResult {
+interface LayerStackPaintResult {
   readonly color: Readonly<ClippedOwnedLayerPaintResult> | null;
   readonly kind: "layers";
   readonly layers: readonly Readonly<ClippedOwnedLayerPaintResult>[];
@@ -208,7 +208,7 @@ export interface LayerStackPaintResult {
 
 export type PaintLayerResult = OwnedLayerPaintResult | EmptyClipPaintResult | LayerStackPaintResult;
 
-export interface CornerfillPaintResult {
+interface CornerfillPaintResult {
   readonly border: Readonly<{
     color: string;
     kind: "solid-shaped-ring";
@@ -257,7 +257,23 @@ function imageDimensions(image: CornerfillRasterSource): PixelPair {
   return freezePair(width, height);
 }
 
-export function traceClosedPoints(
+function verifiedImageDimensions(
+  paint: Pick<RasterPaintState, "image" | "sourceSize">,
+): PixelPair {
+  const dimensions = imageDimensions(paint.image);
+  if (!paint.sourceSize) return dimensions;
+  const [intrinsicWidth, intrinsicHeight] = dimensions;
+  const [expectedWidth, expectedHeight] = paint.sourceSize;
+  if (intrinsicWidth !== expectedWidth || intrinsicHeight !== expectedHeight) {
+    throw new Error(
+      `image dimensions changed: expected ${expectedWidth}x${expectedHeight}, `
+      + `got ${intrinsicWidth}x${intrinsicHeight}`,
+    );
+  }
+  return dimensions;
+}
+
+function traceClosedPoints(
   context: CanvasRenderingContext2D,
   points: readonly Point[],
   offsetX = 0,
@@ -303,16 +319,7 @@ function drawNoRepeatImage(
   height: number,
 ): Readonly<ImageLayerPaintResult> {
   const image = paint.image;
-  const [intrinsicWidth, intrinsicHeight] = imageDimensions(image);
-  if (paint.sourceSize) {
-    const [expectedWidth, expectedHeight] = paint.sourceSize;
-    if (intrinsicWidth !== expectedWidth || intrinsicHeight !== expectedHeight) {
-      throw new Error(
-        `image dimensions changed: expected ${expectedWidth}x${expectedHeight}, `
-        + `got ${intrinsicWidth}x${intrinsicHeight}`,
-      );
-    }
-  }
+  const [intrinsicWidth, intrinsicHeight] = verifiedImageDimensions(paint);
   const [backgroundWidth, backgroundHeight] = paint.backgroundSize ?? [intrinsicWidth, intrinsicHeight];
   const [positionX, positionY] = paint.backgroundPosition ?? [0, 0];
   if (![backgroundWidth, backgroundHeight].every((value) => Number.isFinite(value) && value >= 0)
@@ -375,16 +382,7 @@ function drawRasterImage(
 ): Readonly<ImageLayerPaintResult> {
   if (noRepeat(paint.repeat)) return drawNoRepeatImage(context, paint, width, height);
   const image = paint.image;
-  const [intrinsicWidth, intrinsicHeight] = imageDimensions(image);
-  if (paint.sourceSize) {
-    const [expectedWidth, expectedHeight] = paint.sourceSize;
-    if (intrinsicWidth !== expectedWidth || intrinsicHeight !== expectedHeight) {
-      throw new Error(
-        `image dimensions changed: expected ${expectedWidth}x${expectedHeight}, `
-        + `got ${intrinsicWidth}x${intrinsicHeight}`,
-      );
-    }
-  }
+  const [intrinsicWidth, intrinsicHeight] = verifiedImageDimensions(paint);
   const backgroundSize = paint.backgroundSize;
   const xPositions = paint.tilePlan?.x ?? [];
   const yPositions = paint.tilePlan?.y ?? [];
@@ -656,16 +654,7 @@ export function createPreparedOpaqueImageProgram({
     throw new TypeError("prepared image updates require an explicitly opaque image paint");
   }
   if (!noRepeat(paint.repeat)) throw new TypeError("prepared image updates require no-repeat paint");
-  const [intrinsicWidth, intrinsicHeight] = imageDimensions(paint.image);
-  if (paint.sourceSize) {
-    const [expectedWidth, expectedHeight] = paint.sourceSize;
-    if (intrinsicWidth !== expectedWidth || intrinsicHeight !== expectedHeight) {
-      throw new Error(
-        `image dimensions changed: expected ${expectedWidth}x${expectedHeight}, `
-        + `got ${intrinsicWidth}x${intrinsicHeight}`,
-      );
-    }
-  }
+  const [intrinsicWidth, intrinsicHeight] = verifiedImageDimensions(paint);
   const backgroundSize = paint.backgroundSize;
   const backgroundPosition = paint.backgroundPosition;
   if (!backgroundSize || !backgroundPosition

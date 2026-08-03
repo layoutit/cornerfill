@@ -6,6 +6,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const temporaryRoot = mkdtempSync(join(tmpdir(), "cornerfill-package-"));
@@ -74,15 +75,15 @@ async function browserImport() {
       response.writeHead(404).end();
     }
   });
-  await new Promise((resolvePromise, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolvePromise);
-  });
-  const address = server.address();
-  const origin = `http://127.0.0.1:${address.port}`;
   let browser = null;
   let context = null;
-  try {
+  await runWithCleanup(async () => {
+    await new Promise((resolvePromise, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolvePromise);
+    });
+    const address = server.address();
+    const origin = `http://127.0.0.1:${address.port}`;
     browser = await playwright.chromium.launch({ headless: true });
     context = await browser.newContext();
     const page = await context.newPage();
@@ -106,25 +107,15 @@ async function browserImport() {
     if (requested.some((url) => /\/(?:auto-runtime|runtime)\.mjs(?:$|\?)/u.test(url))) {
       throw new Error("packed native browser import loaded fallback runtime modules");
     }
-  } finally {
-    try {
-      if (context) await context.close();
-    } finally {
-      try {
-        if (browser) {
-          await browser.close();
-          if (browser.isConnected()) throw new Error("packed-consumer Chromium session remained connected");
-        }
-      } finally {
-        await new Promise((resolvePromise, reject) => server.close((error) => (
-          error ? reject(error) : resolvePromise()
-        )));
-      }
-    }
-  }
+  }, [
+    () => closePlaywrightSession(context, browser, "packed-consumer Chromium session"),
+    () => server.listening && new Promise((resolvePromise, reject) => server.close((error) => (
+      error ? reject(error) : resolvePromise()
+    ))),
+  ], "packed browser import and cleanup failed");
 }
 
-try {
+await runWithCleanup(async () => {
   mkdirSync(consumerRoot);
   const pack = JSON.parse(run("npm", [
     "pack",
@@ -185,6 +176,6 @@ try {
   run(process.execPath, [join(projectRoot, "node_modules", "typescript", "bin", "tsc"), "-p", "tsconfig.json"], consumerRoot);
   await browserImport();
   console.log(`packed consumer: PASS ${pack[0].filename}`);
-} finally {
-  rmSync(temporaryRoot, { force: true, recursive: true });
-}
+}, [
+  () => rmSync(temporaryRoot, { force: true, recursive: true }),
+], "packed consumer test and cleanup failed");

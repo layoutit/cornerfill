@@ -9,19 +9,19 @@ import type { GradientStop, LinearGradientLine, RadialGradientShape, RadialGradi
 import type { Four, LengthPercentage } from "./values.mjs";
 
 export type PixelPair = readonly [first: number, second: number];
-export type BackgroundAxis = "x" | "y";
-export type BackgroundBox = "border-box" | "padding-box" | "content-box";
-export type BackgroundRepeatMode = "repeat" | "space" | "round" | "no-repeat";
+type BackgroundAxis = "x" | "y";
+type BackgroundBox = "border-box" | "padding-box" | "content-box";
+type BackgroundRepeatMode = "repeat" | "space" | "round" | "no-repeat";
 export type BackgroundBlendMode = "normal" | "multiply";
 
-export interface PositionComponent {
+interface PositionComponent {
   readonly kind: "position";
   readonly percent: number;
   readonly px: number;
   readonly source: string;
 }
 
-export interface EdgePositionComponent {
+interface EdgePositionComponent {
   readonly edge: "left" | "right" | "top" | "bottom";
   readonly kind: "edge-position";
   readonly offset: Readonly<LengthPercentage>;
@@ -37,7 +37,7 @@ export type BackgroundPositionSpec =
     y: BackgroundPositionComponent;
   }>;
 
-export type BackgroundSizeComponent =
+type BackgroundSizeComponent =
   | Readonly<{ kind: "auto"; source: string }>
   | Readonly<{
     kind: "length-percentage";
@@ -45,7 +45,7 @@ export type BackgroundSizeComponent =
     value: Readonly<LengthPercentage>;
   }>;
 
-export type BackgroundSizeSpec =
+type BackgroundSizeSpec =
   | Readonly<{ height: number; kind: "prepared"; width: number }>
   | Readonly<{ kind: "contain" | "cover" }>
   | Readonly<{
@@ -59,7 +59,7 @@ export interface BackgroundRepeat {
   readonly y: BackgroundRepeatMode;
 }
 
-export type BackgroundBoxSideInput = number | Four<number> | Readonly<{
+type BackgroundBoxSideInput = number | Four<number> | Readonly<{
   bottom: number;
   left: number;
   right: number;
@@ -105,7 +105,7 @@ interface NormalizedLayerCommon {
   readonly repeat: Readonly<BackgroundRepeat>;
 }
 
-export interface NormalizedNoneLayer extends NormalizedLayerCommon {
+interface NormalizedNoneLayer extends NormalizedLayerCommon {
   readonly kind: "none";
 }
 
@@ -124,21 +124,21 @@ interface NormalizedGradientLayerBase extends NormalizedLayerCommon {
   readonly stops: readonly GradientStop[];
 }
 
-export interface NormalizedLinearGradientLayer extends NormalizedGradientLayerBase {
+interface NormalizedLinearGradientLayer extends NormalizedGradientLayerBase {
   readonly from?: PixelPair | undefined;
   readonly kind: "linear-gradient";
   readonly line?: LinearGradientLine | undefined;
   readonly to?: PixelPair | undefined;
 }
 
-export interface NormalizedRadialGradientLayer extends NormalizedGradientLayerBase {
+interface NormalizedRadialGradientLayer extends NormalizedGradientLayerBase {
   readonly centerSpec: BackgroundPositionSpec;
   readonly kind: "radial-gradient";
   readonly shape: RadialGradientShape;
   readonly size: RadialGradientSize;
 }
 
-export interface NormalizedConicGradientLayer extends NormalizedGradientLayerBase {
+interface NormalizedConicGradientLayer extends NormalizedGradientLayerBase {
   readonly angle: number;
   readonly centerSpec: BackgroundPositionSpec;
   readonly kind: "conic-gradient";
@@ -151,27 +151,27 @@ export type NormalizedBackgroundLayer =
   | NormalizedRadialGradientLayer
   | NormalizedConicGradientLayer;
 
-export interface SolidPaintDescriptor {
+interface SolidPaintDescriptor {
   readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly clip: BackgroundBox;
   readonly color: string;
   readonly kind: "solid";
 }
 
-export interface LayeredPaintDescriptor {
+interface LayeredPaintDescriptor {
   readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly color: string;
   readonly kind: "layers";
   readonly layers: readonly NormalizedBackgroundLayer[];
 }
 
-export type SingleLayerPaintDescriptor = NormalizedBackgroundLayer & Readonly<{ color: string }>;
+type SingleLayerPaintDescriptor = NormalizedBackgroundLayer & Readonly<{ color: string }>;
 export type NormalizedPaintDescriptor =
   | SolidPaintDescriptor
   | LayeredPaintDescriptor
   | SingleLayerPaintDescriptor;
 
-export interface BackgroundLayerInputCommon {
+interface BackgroundLayerInputCommon {
   readonly attachment?: "scroll" | undefined;
   readonly backgroundClip?: BackgroundBox | undefined;
   readonly backgroundOrigin?: BackgroundBox | undefined;
@@ -186,7 +186,7 @@ export interface BackgroundLayerInputCommon {
   readonly repeat?: string | Readonly<BackgroundRepeat> | undefined;
 }
 
-export type BackgroundLayerInput = BackgroundLayerInputCommon & Readonly<{
+type BackgroundLayerInput = BackgroundLayerInputCommon & Readonly<{
   readonly angle?: number | undefined;
   readonly centerSource?: string | undefined;
   readonly centerSpec?: BackgroundPositionSpec | undefined;
@@ -206,7 +206,7 @@ export type BackgroundLayerInput = BackgroundLayerInputCommon & Readonly<{
   readonly url?: string | undefined;
 }>;
 
-export interface SolidPaintDescriptorInput {
+interface SolidPaintDescriptorInput {
   readonly backgroundClip?: BackgroundBox | undefined;
   readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly clip?: BackgroundBox | undefined;
@@ -214,7 +214,7 @@ export interface SolidPaintDescriptorInput {
   readonly kind: "solid";
 }
 
-export interface LayeredPaintDescriptorInput {
+interface LayeredPaintDescriptorInput {
   readonly blendMode?: BackgroundBlendMode | readonly BackgroundBlendMode[] | undefined;
   readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly color?: string | undefined;
@@ -227,7 +227,7 @@ export type PaintDescriptorInput =
   | LayeredPaintDescriptorInput
   | (BackgroundLayerInput & Readonly<{ readonly color?: string | undefined }>);
 
-export interface ResolvedLayerCommon {
+interface ResolvedLayerCommon {
   readonly backgroundPosition: PixelPair;
   readonly backgroundSize: PixelPair;
   readonly boxMetrics: Readonly<BackgroundBoxMetrics>;
@@ -236,22 +236,22 @@ export interface ResolvedLayerCommon {
   readonly tilePlan: Readonly<{ x: readonly number[]; y: readonly number[] }>;
 }
 
-export type ResolvedNoneLayer = NormalizedNoneLayer & Readonly<{
+type ResolvedNoneLayer = NormalizedNoneLayer & Readonly<{
   boxMetrics: Readonly<BackgroundBoxMetrics>;
   clipArea: Readonly<BackgroundArea>;
 }>;
-export type ResolvedImageLayer = NormalizedImageLayer & ResolvedLayerCommon & Readonly<{
+type ResolvedImageLayer = NormalizedImageLayer & ResolvedLayerCommon & Readonly<{
   image: CornerfillRasterSource;
 }>;
-export type ResolvedLinearGradientLayer = NormalizedLinearGradientLayer & ResolvedLayerCommon;
-export type ResolvedRadialGradientLayer = NormalizedRadialGradientLayer & ResolvedLayerCommon & Readonly<{
+type ResolvedLinearGradientLayer = NormalizedLinearGradientLayer & ResolvedLayerCommon;
+type ResolvedRadialGradientLayer = NormalizedRadialGradientLayer & ResolvedLayerCommon & Readonly<{
   gradientCenter: PixelPair;
   gradientRadii: PixelPair;
 }>;
-export type ResolvedConicGradientLayer = NormalizedConicGradientLayer & ResolvedLayerCommon & Readonly<{
+type ResolvedConicGradientLayer = NormalizedConicGradientLayer & ResolvedLayerCommon & Readonly<{
   gradientCenter: PixelPair;
 }>;
-export type ResolvedBackgroundLayer =
+type ResolvedBackgroundLayer =
   | ResolvedNoneLayer
   | ResolvedImageLayer
   | ResolvedLinearGradientLayer
@@ -288,7 +288,7 @@ function isFiniteSideTuple(values: readonly unknown[]): values is Four<number> {
   ));
 }
 
-export function parseCssUrl(input: unknown): string {
+function parseCssUrl(input: unknown): string {
   const value = String(input).trim();
   const match = /^url\((.*)\)$/isu.exec(value);
   if (!match) throw new SyntaxError(`only one url() background image is supported: ${value}`);
@@ -443,7 +443,7 @@ function sizeComponent(input: unknown, axis: "width" | "height"): BackgroundSize
   });
 }
 
-export function parseBackgroundSize(input: unknown): BackgroundSizeSpec {
+function parseBackgroundSize(input: unknown): BackgroundSizeSpec {
   if (Array.isArray(input)) {
     if (input.length !== 2 || !input.every((value) => Number.isFinite(value) && value >= 0)) {
       throw new TypeError("prepared background size must contain two finite non-negative pixels");
@@ -786,7 +786,7 @@ function resolvePosition(
   ];
 }
 
-function normalizeSides(input: unknown, label: string): Four<number> {
+export function normalizeSideValues(input: unknown, label: string): Four<number> {
   if (input === undefined || input === null) return Object.freeze([0, 0, 0, 0]);
   if (typeof input === "number" && Number.isFinite(input) && input >= 0) {
     return Object.freeze([input, input, input, input]);
@@ -800,12 +800,12 @@ function normalizeSides(input: unknown, label: string): Four<number> {
   return frozenFour(values[0], values[1], values[2], values[3]);
 }
 
-export function normalizeBackgroundBoxMetrics(
+function normalizeBackgroundBoxMetrics(
   input: Readonly<BackgroundBoxMetricsInput> | undefined = {},
 ): Readonly<BackgroundBoxMetrics> {
   return Object.freeze({
-    border: normalizeSides(input.border, "background box border"),
-    padding: normalizeSides(input.padding, "background box padding"),
+    border: normalizeSideValues(input.border, "background box border"),
+    padding: normalizeSideValues(input.padding, "background box padding"),
   });
 }
 

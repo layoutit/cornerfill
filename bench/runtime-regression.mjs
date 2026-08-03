@@ -589,7 +589,7 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
           owner: owner.localName,
           selectors,
         })),
-      })}`);
+      })}`, { cause: error });
     }
     auto.destroy();
     requests[4].resolve(response(".cornerfill-auto-remote{corner-shape:bevel}"));
@@ -896,7 +896,8 @@ await test("automatic imports preserve cascade and idle selector state", async (
       ["same-origin", "same-origin", "same-origin"],
       "same-origin anonymous stylesheet recovery omitted credentials",
     );
-    const [record] = [...auto.stylesheets.values()].filter(({ owner }) => owner === link);
+    const record = [...auto.stylesheets.values()].find(({ owner }) => owner === link);
+    assert(record, "root import stylesheet record was unavailable");
     equal(record.sources.map((source) => new URL(source).pathname), fetched, "import provenance was incomplete");
     const fetchedBeforeState = [...fetched];
     focused.focus();

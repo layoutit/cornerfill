@@ -14,6 +14,7 @@ import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLAYWRIGHT_CLI_PACKAGE = "@playwright/cli@0.1.17";
@@ -38,6 +39,7 @@ const SOURCE_FILES = Object.freeze([
   "bench/imports/root.css",
   "bench/imports/unsafe-semantics.css",
   "bench/imports/unsafe-supports.css",
+  "scripts/run-with-cleanup.mjs",
   "scripts/runtime-regressions.mjs",
   ...moduleFiles("src", ".mts"),
   ...moduleFiles("dist", ".mjs"),
@@ -148,7 +150,7 @@ const playwrightModule = await import(pathToFileURL(locatePlaywrightModule()).hr
 const playwright = playwrightModule.default ?? playwrightModule;
 const server = await startServer();
 const reports = [];
-try {
+await runWithCleanup(async () => {
   for (const browserName of selected) {
     const session = `cornerfill-runtime-${process.pid}-${browserName}`;
     const backend = browserName === "chrome" ? "static-data-url" : browserName === "webkit" ? "webkit-canvas" : "moz-element";
@@ -157,7 +159,7 @@ try {
     let browser = null;
     let context = null;
     const errors = [];
-    try {
+    await runWithCleanup(async () => {
       browser = await browserType.launch({ headless: true });
       context = await browser.newContext({ viewport: { width: 800, height: 600 } });
       const page = await context.newPage();
@@ -181,17 +183,13 @@ try {
       const report = await page.evaluate(() => globalThis.__CORNERFILL_RUNTIME_REGRESSIONS__);
       reports.push(Object.freeze({ browser: browserName, session, version: browser.version(), report }));
       writeFileSync(join(out, `${browserName}.json`), `${JSON.stringify(report, null, 2)}\n`);
-    } finally {
-      if (context) await context.close();
-      if (browser) {
-        await browser.close();
-        if (browser.isConnected()) throw new Error(`exact session ${session} remained connected`);
-      }
-    }
+    }, [
+      () => closePlaywrightSession(context, browser, `exact session ${session}`),
+    ], `${browserName} runtime regression and cleanup failed`);
   }
-} finally {
-  await server.close();
-}
+}, [
+  () => server.close(),
+], "runtime regression run and server cleanup failed");
 writeFileSync(join(out, "manifest.json"), `${JSON.stringify({
   schema: "cornerfill-runtime-browser-regression-run@2",
   status: "COMPLETE",

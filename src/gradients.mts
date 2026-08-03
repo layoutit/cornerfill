@@ -16,7 +16,7 @@ export type LinearGradientLine =
   }>;
 
 export type RadialGradientShape = "circle" | "ellipse";
-export type RadialGradientSizeKeyword =
+type RadialGradientSizeKeyword =
   | "closest-side"
   | "closest-corner"
   | "farthest-side"
@@ -36,19 +36,19 @@ interface ParsedGradientBase {
   readonly stops: readonly GradientStop[];
 }
 
-export interface ParsedLinearGradient extends ParsedGradientBase {
+interface ParsedLinearGradient extends ParsedGradientBase {
   readonly kind: "linear-gradient";
   readonly line: LinearGradientLine;
 }
 
-export interface ParsedRadialGradient extends ParsedGradientBase {
+interface ParsedRadialGradient extends ParsedGradientBase {
   readonly centerSource: string;
   readonly kind: "radial-gradient";
   readonly shape: RadialGradientShape;
   readonly size: RadialGradientSize;
 }
 
-export interface ParsedConicGradient extends ParsedGradientBase {
+interface ParsedConicGradient extends ParsedGradientBase {
   readonly angle: number;
   readonly centerSource: string;
   readonly kind: "conic-gradient";

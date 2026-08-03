@@ -954,7 +954,6 @@ function carrierSupportsHeader(header: string): string {
 function serializeCarrierRules(
   rules: CSSRuleList | readonly CSSRule[],
   selectors: Set<string>,
-  baseUrl: string,
   selectorRecords: Readonly<SelectorRecord>[],
   sourceIdentity: string,
   mediaQueries: Set<string>,
@@ -998,7 +997,6 @@ function serializeCarrierRules(
       ? serializeCarrierRules(
         rule.cssRules,
         selectors,
-        baseUrl,
         selectorRecords,
         sourceIdentity,
         mediaQueries,
@@ -1162,7 +1160,6 @@ function parseCarrierSheet(
     const css = serializeCarrierRules(
       sheet?.cssRules ?? [],
       selectors,
-      baseUrl,
       selectorRecords,
       sourceIdentity,
       mediaQueries,
@@ -1888,8 +1885,11 @@ class CornerfillAutoController {
   }
 
   _errors(): readonly Readonly<DiagnosticRecord>[] {
-    return Object.freeze([...this.diagnosticsByOwner.values()]
-      .flatMap((records) => [...records.values()]));
+    const errors: Readonly<DiagnosticRecord>[] = [];
+    for (const records of this.diagnosticsByOwner.values()) {
+      for (const record of records.values()) errors.push(record);
+    }
+    return Object.freeze(errors);
   }
 
   _elementDiagnostic(element: HTMLElement): Readonly<ElementDiagnostic> {
@@ -3057,6 +3057,18 @@ class CornerfillAutoController {
     }
   }
 
+  _removeObservationListeners(): void {
+    for (const listener of this.eventListeners) {
+      listener.target.removeEventListener(listener.type, listener.listener, listener.options);
+    }
+    this.eventListeners.length = 0;
+    for (const { list, listener, legacy } of this.mediaListeners) {
+      if (legacy) list.removeListener(listener);
+      else list.removeEventListener("change", listener);
+    }
+    this.mediaListeners.length = 0;
+  }
+
   _configureObservation(): void {
     if (!this.observer || !this.autoObserve) return;
     this.observationState = this._observationDependencies();
@@ -3073,15 +3085,7 @@ class CornerfillAutoController {
       options.attributeFilter = [...this.observationState.attributes];
     }
     this.observer.observe(target, options);
-    for (const listener of this.eventListeners) {
-      listener.target.removeEventListener(listener.type, listener.listener, listener.options);
-    }
-    this.eventListeners.length = 0;
-    for (const { list, listener, legacy } of this.mediaListeners) {
-      if (legacy) list.removeListener(listener);
-      else list.removeEventListener("change", listener);
-    }
-    this.mediaListeners.length = 0;
+    this._removeObservationListeners();
     const eventRoot = this.root === this.document ? this.document : this.root;
     for (const type of this.observationState.events) {
       const listener: EventListener = () => this._queueRefresh({ candidates: true, attachments: true });
@@ -3301,15 +3305,7 @@ class CornerfillAutoController {
     this.scopes.clear();
     this.observer?.disconnect();
     this.observer = null;
-    for (const listener of this.eventListeners) {
-      listener.target.removeEventListener(listener.type, listener.listener, listener.options);
-    }
-    this.eventListeners.length = 0;
-    for (const { list, listener, legacy } of this.mediaListeners) {
-      if (legacy) list.removeListener(listener);
-      else list.removeEventListener("change", listener);
-    }
-    this.mediaListeners.length = 0;
+    this._removeObservationListeners();
     for (const handle of this.handles.values()) handle.dispose();
     this.handles.clear();
     this.handleSignatures.clear();

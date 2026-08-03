@@ -110,26 +110,26 @@ function unresolvedRequirements(
       && (name !== "shapedBehavior" || requirements[name].observable !== false)));
 }
 
+function observedCapability(
+  capability: Readonly<CornerfillNativeRequirement>,
+): CornerfillNativeCapabilityStatus {
+  if (capability.observable === false) return "unobserved";
+  return capability.supported ? "supported" : "unsupported";
+}
+
 function qualification(
   requirements: CornerfillNativeRequirements,
   error: unknown = null,
 ): Readonly<CornerfillNativeQualification> {
   const unresolved = unresolvedRequirements(requirements);
   const qualified = unresolved.length === 0;
-  const observed = (
-    requirement: Readonly<CornerfillNativeRequirement>,
-  ): CornerfillNativeCapabilityStatus => (
-    requirement.observable === false
-      ? "unobserved"
-      : requirement.supported ? "supported" : "unsupported"
-  );
   return Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
     capabilities: Object.freeze({
-      syntax: observed(requirements.syntax),
-      computedValues: observed(requirements.computedValues),
-      shapedHitTesting: observed(requirements.shapedBehavior),
+      syntax: observedCapability(requirements.syntax),
+      computedValues: observedCapability(requirements.computedValues),
+      shapedHitTesting: observedCapability(requirements.shapedBehavior),
       outerPaint: "unobserved",
       innerBorderContour: "unobserved",
       backgroundClip: "unobserved",
