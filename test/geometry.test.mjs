@@ -89,6 +89,18 @@ test("Mario fixture resolves to a triangular contour", () => {
   assert.deepEqual(unique, [[32, 0], [64, 44], [0, 44]]);
 });
 
+test("built geometry does not retain mutable caller tuples", () => {
+  const radii = Array.from({ length: 4 }, () => ({ rx: 20, ry: 10 }));
+  const shapes = [0, 1, -1, 2];
+  const geometry = buildCornerGeometry({ width: 100, height: 80, borderRadius: radii, cornerShape: shapes });
+  radii[0].rx = 99;
+  shapes[0] = 99;
+  assert.equal(geometry.requestedRadii[0].rx, 20);
+  assert.equal(geometry.shapeParameters[0], 0);
+  assert.ok(Object.isFrozen(geometry.requestedRadii[0]));
+  assert.ok(Object.isFrozen(geometry.shapeParameters));
+});
+
 test("adaptive contour points stay finite, bounded, and refine for device pixels", () => {
   const fixture = {
     size: [230, 170],

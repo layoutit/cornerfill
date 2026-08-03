@@ -1,0 +1,8 @@
+@font-face {
+  font-family: "Cornerfill unsafe conditional";
+  src: local("Arial");
+}
+
+.cornerfill-import-child {
+  corner-shape: bevel;
+}

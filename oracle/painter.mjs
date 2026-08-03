@@ -28,7 +28,7 @@ export async function attachProductionCandidate(element, oracleCase) {
       cornerShape: oracleCase.shapeCss,
       paint: Object.freeze({ ...oracleCase.paint, opaque: true }),
       border: oracleCase.border ?? null,
-      visible: true,
+      paintActive: true,
     })
     : controller.attach(element, {
       paint: oracleCase.paint,

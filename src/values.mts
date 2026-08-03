@@ -496,9 +496,12 @@ export function logicalCornerToPhysical(logicalCorner: string, {
   } else if (mode === "vertical-rl" || mode === "sideways-rl") {
     [blockStart, blockEnd] = ["right", "left"];
     [inlineStart, inlineEnd] = rtl ? ["bottom", "top"] : ["top", "bottom"];
-  } else if (mode === "vertical-lr" || mode === "sideways-lr") {
+  } else if (mode === "vertical-lr") {
     [blockStart, blockEnd] = ["left", "right"];
     [inlineStart, inlineEnd] = rtl ? ["bottom", "top"] : ["top", "bottom"];
+  } else if (mode === "sideways-lr") {
+    [blockStart, blockEnd] = ["left", "right"];
+    [inlineStart, inlineEnd] = rtl ? ["top", "bottom"] : ["bottom", "top"];
   } else {
     throw new TypeError(`unsupported writing-mode: ${writingMode}`);
   }

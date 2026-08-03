@@ -171,6 +171,62 @@ export type NormalizedPaintDescriptor =
   | LayeredPaintDescriptor
   | SingleLayerPaintDescriptor;
 
+export interface BackgroundLayerInputCommon {
+  readonly attachment?: "scroll" | undefined;
+  readonly backgroundClip?: BackgroundBox | undefined;
+  readonly backgroundOrigin?: BackgroundBox | undefined;
+  readonly backgroundPosition?: string | PixelPair | undefined;
+  readonly backgroundPositionSpec?: BackgroundPositionSpec | undefined;
+  readonly backgroundSize?: string | PixelPair | undefined;
+  readonly backgroundSizeSpec?: BackgroundSizeSpec | undefined;
+  readonly blendMode?: BackgroundBlendMode | undefined;
+  readonly box?: BackgroundBoxMetricsInput | undefined;
+  readonly clip?: BackgroundBox | undefined;
+  readonly origin?: BackgroundBox | undefined;
+  readonly repeat?: string | Readonly<BackgroundRepeat> | undefined;
+}
+
+export type BackgroundLayerInput = BackgroundLayerInputCommon & Readonly<{
+  readonly angle?: number | undefined;
+  readonly centerSource?: string | undefined;
+  readonly centerSpec?: BackgroundPositionSpec | undefined;
+  readonly crossOrigin?: string | null | undefined;
+  readonly css?: string | undefined;
+  readonly from?: PixelPair | undefined;
+  readonly image?: CornerfillRasterSource | undefined;
+  readonly imageSmoothing?: boolean | undefined;
+  readonly kind: "none" | "image" | "linear-gradient" | "radial-gradient" | "conic-gradient";
+  readonly line?: LinearGradientLine | undefined;
+  readonly opaque?: boolean | undefined;
+  readonly shape?: RadialGradientShape | undefined;
+  readonly size?: RadialGradientSize | undefined;
+  readonly sourceSize?: PixelPair | undefined;
+  readonly stops?: readonly GradientStop[] | undefined;
+  readonly to?: PixelPair | undefined;
+  readonly url?: string | undefined;
+}>;
+
+export interface SolidPaintDescriptorInput {
+  readonly backgroundClip?: BackgroundBox | undefined;
+  readonly box?: BackgroundBoxMetricsInput | undefined;
+  readonly clip?: BackgroundBox | undefined;
+  readonly color: string;
+  readonly kind: "solid";
+}
+
+export interface LayeredPaintDescriptorInput {
+  readonly blendMode?: BackgroundBlendMode | readonly BackgroundBlendMode[] | undefined;
+  readonly box?: BackgroundBoxMetricsInput | undefined;
+  readonly color?: string | undefined;
+  readonly kind: "layers";
+  readonly layers: readonly BackgroundLayerInput[];
+}
+
+export type PaintDescriptorInput =
+  | SolidPaintDescriptorInput
+  | LayeredPaintDescriptorInput
+  | (BackgroundLayerInput & Readonly<{ readonly color?: string | undefined }>);
+
 export interface ResolvedLayerCommon {
   readonly backgroundPosition: PixelPair;
   readonly backgroundSize: PixelPair;
@@ -376,17 +432,21 @@ function parseBackgroundBox(input: unknown, label: string): BackgroundBox {
 function sizeComponent(input: unknown, axis: "width" | "height"): BackgroundSizeComponent {
   const value = String(input).toLowerCase();
   if (value === "auto") return Object.freeze({ kind: "auto", source: value });
+  const parsed = parseLengthPercentage(value, { label: `background-size ${axis}` });
+  if (!/^calc\(/iu.test(value) && (parsed.px < 0 || parsed.percent < 0)) {
+    throw new SyntaxError(`background-size ${axis} must be non-negative: ${value}`);
+  }
   return Object.freeze({
     kind: "length-percentage",
-    value: parseLengthPercentage(value, { label: `background-size ${axis}` }),
+    value: parsed,
     source: value,
   });
 }
 
 export function parseBackgroundSize(input: unknown): BackgroundSizeSpec {
   if (Array.isArray(input)) {
-    if (input.length !== 2 || !input.every((value) => Number.isFinite(value) && value > 0)) {
-      throw new TypeError("prepared background size must contain two positive finite pixels");
+    if (input.length !== 2 || !input.every((value) => Number.isFinite(value) && value >= 0)) {
+      throw new TypeError("prepared background size must contain two finite non-negative pixels");
     }
     return Object.freeze({ kind: "prepared", width: input[0]!, height: input[1]! });
   }
@@ -612,12 +672,16 @@ function opaqueBlendColor(input: unknown): boolean {
 
 export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescriptor {
   if (!isRecord(paint)) throw new TypeError("paint descriptor is required");
+  const box = paint.box === undefined
+    ? undefined
+    : normalizeBackgroundBoxMetrics(paint.box as BackgroundBoxMetricsInput);
   if (paint.kind === "solid") {
     if (!paint.color) throw new TypeError("solid paint requires a color");
     return Object.freeze({
       kind: "solid",
       color: String(paint.color),
       clip: parseBackgroundBox(paint.clip ?? paint.backgroundClip ?? "border-box", "background-clip"),
+      ...(box ? { box } : {}),
     });
   }
   if (paint.kind === "layers") {
@@ -638,6 +702,7 @@ export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescrip
       kind: "layers",
       color: String(paint.color ?? "transparent"),
       layers: Object.freeze(layers),
+      ...(box ? { box } : {}),
     });
   }
   const layer = normalizeLayer(paint);
@@ -856,10 +921,10 @@ function repeatedAxisPositions({
 function cornerDistances(width: number, height: number, center: PixelPair): readonly PixelPair[] {
   const [x, y] = center;
   return Object.freeze([
-    Object.freeze([x, y]),
-    Object.freeze([width - x, y]),
-    Object.freeze([width - x, height - y]),
-    Object.freeze([x, height - y]),
+    Object.freeze([Math.abs(x), Math.abs(y)]),
+    Object.freeze([Math.abs(width - x), Math.abs(y)]),
+    Object.freeze([Math.abs(width - x), Math.abs(height - y)]),
+    Object.freeze([Math.abs(x), Math.abs(height - y)]),
   ]) as readonly PixelPair[];
 }
 
@@ -871,9 +936,13 @@ function radialRadii(
 ): PixelPair {
   if (descriptor.size.kind === "explicit") {
     const values = descriptor.size.radii;
-    const rx = resolveLengthPercentage(values[0]!, width);
-    const ry = descriptor.shape === "circle" ? rx : resolveLengthPercentage(values[1]!, height);
-    if (!(rx > 0 && ry > 0)) throw new RangeError("radial-gradient radii must resolve positive");
+    const rx = Math.max(0, resolveLengthPercentage(values[0]!, width));
+    const ry = descriptor.shape === "circle"
+      ? rx
+      : Math.max(0, resolveLengthPercentage(values[1]!, height));
+    if (![rx, ry].every((radius) => Number.isFinite(radius) && radius >= 0)) {
+      throw new RangeError("radial-gradient radii must resolve finite and non-negative");
+    }
     return Object.freeze([rx, ry]);
   }
   const distances = cornerDistances(width, height, center);
@@ -885,13 +954,18 @@ function radialRadii(
       ? [...horizontal, ...vertical]
       : distances.map(([x, y]) => Math.hypot(x, y));
     const radius = nearest ? Math.min(...candidates) : Math.max(...candidates);
-    if (!(radius > 0)) throw new RangeError("radial-gradient radius must resolve positive");
+    if (!(Number.isFinite(radius) && radius >= 0)) {
+      throw new RangeError("radial-gradient radius must resolve finite and non-negative");
+    }
     return Object.freeze([radius, radius]);
   }
   let rx = nearest ? Math.min(...horizontal) : Math.max(...horizontal);
   let ry = nearest ? Math.min(...vertical) : Math.max(...vertical);
-  if (!(rx > 0 && ry > 0)) throw new RangeError("radial-gradient radii must resolve positive");
+  if (![rx, ry].every((radius) => Number.isFinite(radius) && radius >= 0)) {
+    throw new RangeError("radial-gradient radii must resolve finite and non-negative");
+  }
   if (descriptor.size.value.endsWith("corner")) {
+    if (rx === 0 || ry === 0) return Object.freeze([rx, ry]);
     const scales = distances.map(([x, y]) => Math.hypot(x / rx, y / ry));
     const scale = nearest ? Math.min(...scales) : Math.max(...scales);
     rx *= scale;

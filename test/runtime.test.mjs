@@ -11,8 +11,10 @@ class FakeStyle {
     this.priorities = new Map();
   }
 
+  get length() { return this.values.size; }
   getPropertyPriority(property) { return this.priorities.get(property) ?? ""; }
   getPropertyValue(property) { return this.values.get(property) ?? ""; }
+  item(index) { return [...this.values.keys()][index] ?? ""; }
   removeProperty(property) {
     const value = this.getPropertyValue(property);
     this.values.delete(property);

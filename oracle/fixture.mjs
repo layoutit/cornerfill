@@ -26,8 +26,8 @@ function nextPaint() {
 
 function applyBorder(element, border) {
   if (!border) return;
-  const widths = Array.isArray(border.widths)
-    ? border.widths
+  const widths = Array.isArray(border.width)
+    ? border.width
     : [border.width, border.width, border.width, border.width];
   element.style.borderStyle = "solid";
   element.style.borderWidth = widths.map((width) => `${width}px`).join(" ");
@@ -120,7 +120,12 @@ async function render() {
       backgroundPosition: computed.backgroundPosition,
       backgroundSize: computed.backgroundSize,
       borderRadius: computed.borderRadius,
-      borderTopWidth: computed.borderTopWidth,
+      borderWidths: Object.freeze([
+        computed.borderTopWidth,
+        computed.borderRightWidth,
+        computed.borderBottomWidth,
+        computed.borderLeftWidth,
+      ]),
       boxShadow: computed.boxShadow,
       outline: `${computed.outlineWidth} ${computed.outlineStyle} ${computed.outlineColor} / ${computed.outlineOffset}`,
       cornerShape: computed.getPropertyValue("corner-shape"),

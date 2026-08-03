@@ -1,6 +1,6 @@
 # Cornerfill
 
-Cornerfill makes CSS `corner-shape` work in Safari and Firefox. You write ordinary CSS; Cornerfill paints the host background and border into a transparent Canvas-backed background image while leaving the original element, layout, and transform in place. A semantically qualified native engine stays native and never starts the fallback renderer.
+Cornerfill makes CSS `corner-shape` work in Safari and Firefox. You write ordinary CSS; Cornerfill paints the host background and border into a transparent Canvas-backed background image while leaving the original element, layout, and transform in place. A syntax-, computed-value-, and observable-behavior-qualified native engine stays native and never starts the fallback renderer.
 
 Cornerfill shapes host paint. It does not add descendant overflow clipping or shaped hit testing. It is built for retained DOM renderers such as [PolyCSS](https://github.com/LayoutitStudio/polycss), but the runtime and geometry are standalone.
 
@@ -48,11 +48,11 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-a
 
 | Browser | Rendering path |
 |---|---|
-| Semantically qualified native engine | Native CSS after syntax and canonical computed-value probes pass |
+| Qualified native engine | Native CSS after shorthand, physical/logical longhand, alias, numeric, canonical computed-value, and observable shaped-behavior probes pass |
 | Safari / WebKit | `-webkit-canvas()` when the live Canvas API is available |
 | Firefox | `-moz-element()` when Canvas registration is available |
 
-Native selection requires syntax support and canonical computed corner-shape longhands; syntax support alone is not enough. Shaped hit testing is probed only as a reported capability because it is not a semantic the paint-only fallback can provide and may be unobservable under page isolation policy. The qualification report marks untested outer paint, inner borders, clipping, effects, and animation as `unobserved`. Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
+Native selection requires shorthand, all physical and logical longhands, aliases, positive and negative `superellipse()`, and canonical computed values; syntax support alone is not enough. An observable shaped-behavior failure also rejects native selection. If page isolation makes that probe unobservable, the report says so without pretending it failed. The qualification report marks untested outer paint, inner borders, clipping, effects, and animation as `unobserved`. Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
 
 ## Automatic Sources and Shadow Roots
 
@@ -86,7 +86,7 @@ await scope.refreshAdoptedStyleSheet(sheet, css);
 
 Call `refreshAdoptedStyleSheet()` again with the same standard source passed to a later `replace()` or `replaceSync()`. Cornerfill does not patch `attachShadow()`, `CSSStyleSheet`, or `CSS.supports()`.
 
-Linked stylesheets and `@import` recovery use `fetch()`. A restrictive CSP must therefore allow those URLs through `connect-src` as well as normal stylesheet loading. Pass a `nonce` when the policy requires one for Cornerfill's generated companion style.
+Linked stylesheets and `@import` recovery use a separate `fetch()` request. A restrictive CSP must therefore allow those URLs through `connect-src` as well as normal stylesheet loading. A service worker or time-varying endpoint can return bytes that differ from the browser's stylesheet response; use inline CSS or the exact-source constructed-sheet route above when response identity is required. Pass a `nonce` when the policy requires one for Cornerfill's generated companion style.
 
 ## Supported
 
@@ -96,7 +96,7 @@ Linked stylesheets and `@import` recovery use `fetch()`. A restrictive CSP must 
 - Admitted background stacks with sizing, positioning, repetition, origin, and clip. The explicit runtime also admits one opaque scroll-attached raster using `multiply` over one opaque `rgb()` or hex color.
 - One-color solid borders with unequal widths when the clipped inner edge remains one non-self-intersecting contour, one zero-offset zero-blur inset shadow with non-negative spread, and one fully contained solid outline on an empty paint-owned host.
 - Observed generic elements and a lower-overhead caller-clocked prepared path for retained renderers.
-- Automatic variables, direct corner-shape `@supports` declarations, media rules, named layers, stateful selectors, recursive imports, and explicitly registered open roots within the source boundary above.
+- Automatic `var()`/`env()` substitutions, direct corner-shape `@supports` blocks containing only transported shape declarations, media rules, named layers, stateful selectors, recursive imports, and explicitly registered open roots within the source boundary above.
 
 Implemented support is not an oracle `PASS`. Current fallback comparisons remain `UNQUALIFIED`; `controller.capabilities.paint` reports available code paths, not pixel parity. Gradient color and repeated or resized raster sampling still need native qualification.
 
@@ -192,7 +192,7 @@ if (!native.qualified && liveFallback) {
   cornerfill.updatePreparedBatch([{
     element: faceElement,
     backgroundPosition: nextAtlasCrop,
-    visible: nextVisibility,
+    paintActive: nextVisibility,
   }]);
 
   face.dispose();
@@ -201,21 +201,23 @@ if (!native.qualified && liveFallback) {
 cornerfill.destroy();
 ```
 
-`preparedFace` contains a fixed `size`, normalized `paint`, and either prepared `geometry` or explicit `borderRadius` plus `cornerShape`. Preparation owns those descriptors. Position and visibility batches are synchronous and caller-clocked. Prepared entries do not observe layout or DPR changes; call `handle.resize()` when either changes.
+`preparedFace` contains a fixed `size`, `paint`, and either prepared `geometry` or explicit `borderRadius` plus `cornerShape`. Preparation owns those descriptors. Position and paint-activity batches are synchronous and caller-clocked. `paintActive` is a renderer culling hint; it does not change DOM visibility. Prepared entries do not observe layout or DPR changes; call `handle.resize()` when either changes.
 
-Prepared surfaces are allocated during attachment so the first visibility change does not allocate inside an animation frame. Set `deferHiddenSurface: true` only when saving surfaces for entries that may remain hidden is more important than reveal-time latency.
+Prepared surfaces are allocated during attachment so reactivation does not allocate inside an animation frame. Set `deferInactiveSurface: true` only when saving surfaces for entries that may remain inactive is more important than reactivation latency.
 
 ## Limits
 
 - The fallback owns the host background, supported border, radius, shadow, and outline paint. Author `!important` declarations that prevent that ownership are rejected.
+- Runtime allocation is bounded per surface, by active fallback-entry count, and by aggregate backing pixels. The defaults refuse new work after 2,048 active fallback entries or 67,108,864 aggregate pixels; override `maxActiveEntries` and `maxTotalSurfacePixels` deliberately for a known renderer workload.
 - Descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, and shaped `backdrop-filter` clipping are not available. Pseudo-elements remain on the host but do not gain a shaped overflow clip.
+- Root/body background propagation, native-appearance controls, and collapsed-table border painting are not admitted by the fallback.
 - Outer shadows, outlines outside the border box, `border-shape`, `border-image`, per-side border colors, and non-solid border styles are not implemented.
 - Rare combinations of concave corners, radii, and unequal border widths can make the clipped inner border edge self-intersect and require multiple contours. Cornerfill refuses those elements before mutating their paint surface instead of approximating the border.
 - Animated CSS images, cross-origin images without CORS, general `image-set()` selection, repeating gradients, and gradient interpolation spaces or hints are outside the supported paint grammar.
 - General background blending is not supported. Automatic mode cannot prove raster opacity, so the bounded `multiply` path is explicit-runtime only.
 - Automatic discovery supports one physical or logical declaration family at a time. Mixed families are rejected. Automatic CSS animations and transitions of shape or paint dependencies are not reproduced with native timing or interpolation; use the explicit update/interpolation API when that behavior matters.
-- Direct declaration tests such as `@supports (corner-shape: bevel)` are preserved. Complex conditions that cannot be transported without changing their meaning, anonymous layers, nested selector rules, and unknown at-rule contexts are refused before ownership.
-- Pending-substitution `all: var(...)` resets are transported when they resolve to `initial`, `unset`, or the invalid-at-computed-value reset behavior. Cascade-dependent results such as `revert-layer` are reported and refused instead of leaving stale shape carriers active.
+- Direct declaration tests such as `@supports (corner-shape: bevel)` are preserved only when the affected rules contain transported shape declarations. A conditional block that also controls ordinary declarations or author custom properties is refused instead of splitting the block's semantics. Complex conditions, container-query paint dependencies, anonymous layers, nested selector rules, and unknown at-rule contexts are likewise refused before ownership.
+- Pending-substitution `all: var(...)` and `all: env(...)` resets are transported when they resolve to `initial`, `unset`, or the invalid-at-computed-value reset behavior. Cascade-dependent results such as `revert-layer` are reported and refused instead of leaving stale shape carriers active.
 - Cross-origin stylesheets and imports require CORS. Closed or unregistered shadow roots are not discovered. Constructed/adopted sheets require explicit open-root registration and the exact-source refresh shown above. Generated styles require a CSP nonce when the page policy does.
 - After installation, automatic mode mirrors `insertRule()` and `deleteRule()` on directly discovered, non-import stylesheet instances and restores the original instance methods on teardown. Rules inserted before startup and unsupported values assigned through `CSSStyleDeclaration` cannot be recovered after the browser discards them.
 - A failed linked stylesheet stays cached until its source changes or `cornerfill.refresh({ retryFailed: true })` is requested. Refusals and source failures appear in `cornerfill.explain().errors`.

@@ -86,6 +86,13 @@ test("logical corner longhands resolve through writing mode and direction", () =
   ]);
 });
 
+test("sideways-lr reverses its inline axis relative to vertical-lr", () => {
+  assert.equal(logicalCornerToPhysical("start-start", { writingMode: "sideways-lr" }), "bottom-left");
+  assert.equal(logicalCornerToPhysical("start-end", { writingMode: "sideways-lr" }), "top-left");
+  assert.equal(logicalCornerToPhysical("start-start", { writingMode: "sideways-lr", direction: "rtl" }), "top-left");
+  assert.equal(logicalCornerToPhysical("start-end", { writingMode: "sideways-lr", direction: "rtl" }), "bottom-left");
+});
+
 test("corner-shape accepts supported numeric calc values", () => {
   assert.deepEqual(parseCornerShape("superellipse(calc(1 + 1))"), [2, 2, 2, 2]);
   assert.deepEqual(parseCornerShape("superellipse(calc(1 - 1))"), [0, 0, 0, 0]);

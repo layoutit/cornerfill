@@ -1,6 +1,7 @@
 export const CORNERFILL_NATIVE_QUALIFICATION_SCHEMA = "cornerfill-native-qualification@1";
 
 export interface CornerfillNativeSyntaxProbes {
+  readonly aliases: boolean;
   readonly shorthand: boolean;
   readonly longhand: boolean;
   readonly convexSuperellipse: boolean;
@@ -57,12 +58,19 @@ type CssSupportWindow = Window & {
 type RequirementDetails = Omit<CornerfillNativeRequirement, "supported">;
 
 const CACHE = new WeakMap<Document, Readonly<CornerfillNativeQualification>>();
-const LONGHANDS = Object.freeze([
+const PHYSICAL_LONGHANDS = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
   "corner-bottom-right-shape",
   "corner-bottom-left-shape",
 ]);
+const LOGICAL_LONGHANDS = Object.freeze([
+  "corner-start-start-shape",
+  "corner-start-end-shape",
+  "corner-end-end-shape",
+  "corner-end-start-shape",
+]);
+const LONGHANDS = Object.freeze([...PHYSICAL_LONGHANDS, ...LOGICAL_LONGHANDS]);
 const EXPECTED_LONGHANDS = Object.freeze(["bevel", "scoop", "round", "notch"]);
 const EXPECTED_PARAMETERS = Object.freeze([0, -1, 1, Number.NEGATIVE_INFINITY]);
 const SHAPE_ALIASES = Object.freeze({
@@ -97,8 +105,9 @@ function requirement(
 function unresolvedRequirements(
   requirements: CornerfillNativeRequirements,
 ): readonly (keyof CornerfillNativeRequirements)[] {
-  return Object.freeze((["syntax", "computedValues"] as const)
-    .filter((name) => !requirements[name].supported));
+  return Object.freeze((["syntax", "computedValues", "shapedBehavior"] as const)
+    .filter((name) => !requirements[name].supported
+      && (name !== "shapedBehavior" || requirements[name].observable !== false)));
 }
 
 function qualification(
@@ -132,7 +141,7 @@ function qualification(
     requirements: Object.freeze(requirements),
     unresolved,
     reason: qualified
-      ? "Native corner-shape syntax and computed-value probes passed; behavior capabilities are reported separately."
+      ? "Native corner-shape syntax and computed-value probes passed, together with shaped behavior when observable."
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
@@ -142,7 +151,8 @@ function syntaxRequirement(view: Window): Readonly<CornerfillNativeRequirement> 
   const css = (view as CssSupportWindow).CSS;
   const probes = Object.freeze({
     shorthand: Boolean(css?.supports?.("corner-shape", "bevel scoop round notch")),
-    longhand: Boolean(css?.supports?.("corner-top-left-shape", "notch")),
+    longhand: LONGHANDS.every((property) => Boolean(css?.supports?.(property, "notch"))),
+    aliases: ["square", "squircle"].every((value) => Boolean(css?.supports?.("corner-shape", value))),
     convexSuperellipse: Boolean(css?.supports?.("corner-shape", "superellipse(2)")),
     concaveSuperellipse: Boolean(css?.supports?.("corner-shape", "superellipse(-1)")),
   });
@@ -188,7 +198,7 @@ function computedRequirement(
   return requirement(
     longhands.every((value, index) => Object.is(
       computedShapeParameter(value),
-      EXPECTED_PARAMETERS[index],
+      EXPECTED_PARAMETERS[index % EXPECTED_PARAMETERS.length],
     )),
     { shorthand, longhands },
   );

@@ -126,7 +126,7 @@ const handle = cornerfill.attachPrepared(leaf, {
   geometry: preparedBevelTriangle,
   size: preparedCanonicalSize,
   paint: preparedOpaqueAtlasPaint,
-  visible: preparedInitialVisibility,
+  paintActive: preparedInitialVisibility,
 });
 ```
 
@@ -136,7 +136,7 @@ Update only prepared state:
 cornerfill.updatePreparedBatch(changedFaces.map((face) => ({
   element: face.leaf,
   backgroundPosition: face.nextPreparedCrop,
-  visible: face.nextVisibility,
+  paintActive: face.nextVisibility,
 })));
 ```
 
@@ -164,7 +164,7 @@ The current runtime connects prepared visibility and changed-face decisions. A
 face that changes while hidden retains only its latest logical crop and repaints
 once when it becomes visible again.
 
-The completed [Firefox Mario ABBA trace](../output/playwright/firefox-mario/hardening-full-abba-v2-2026-08-02/README.md)
+The completed [Firefox Mario stress trace](evidence/firefox-mario-stress.md)
 runs eight fresh OFF/ON lanes across all 820 source ticks with one identical
 ordered workload stream. Each ON lane records 132,424 Cornerfill paints and zero
 style checks. This proves the prepared dirty-only integration and retained

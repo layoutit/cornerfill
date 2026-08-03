@@ -1,5 +1,5 @@
 @layer cornerfill-imported, cornerfill-unused, cornerfill-local;
-@import "./child.css" layer(cornerfill-imported) supports(corner-shape: bevel) screen and (min-width: 1px);
+@import "./child.css" layer(cornerfill-imported) screen and (min-width: 1px);
 @import url("./child.css") layer(cornerfill-unused) not all;
 
 @layer cornerfill-local {

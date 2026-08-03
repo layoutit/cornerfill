@@ -637,10 +637,18 @@ export function buildCornerGeometry({
 }: CornerGeometryOptions): Readonly<CornerGeometry> {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
-  const requestedRadii = typeof borderRadius === "string"
+  const radiusInput = typeof borderRadius === "string"
     ? resolveBorderRadius(borderRadius, width, height)
     : borderRadius;
-  const shapeParameters = typeof cornerShape === "string" ? parseCornerShape(cornerShape) : cornerShape;
+  if (!Array.isArray(radiusInput) || radiusInput.length !== CORNER_COUNT) {
+    throw new TypeError("borderRadius must contain four corners");
+  }
+  const requestedRadii = Object.freeze(radiusInput.map(({ rx, ry }) => Object.freeze({ rx, ry }))) as Four<Radius>;
+  const shapeInput = typeof cornerShape === "string" ? parseCornerShape(cornerShape) : cornerShape;
+  if (!Array.isArray(shapeInput) || shapeInput.length !== CORNER_COUNT) {
+    throw new TypeError("cornerShape must contain four values");
+  }
+  const shapeParameters = Object.freeze([...shapeInput]) as Four<number>;
   const resolved = resolveCornerRadii(width, height, requestedRadii, shapeParameters);
   const options = { width, height, radii: resolved.radii, shapeParameters, dpr, tolerance, radiiAreResolved: true };
   return Object.freeze({

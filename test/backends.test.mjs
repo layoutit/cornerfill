@@ -162,7 +162,7 @@ test("Firefox teardown completes and reports an unregister failure", () => {
   });
 });
 
-test("WebKit reuse pools are bounded and every released canvas is shrunk", () => {
+test("WebKit overflow IDs remain reusable and every released canvas is shrunk", () => {
   const document = webkitDocument();
   const surfaces = Array.from({ length: 3 }, () => createSurface(document, {
     backend: "webkit-canvas",
@@ -172,12 +172,24 @@ test("WebKit reuse pools are bounded and every released canvas is shrunk", () =>
     maxWebkitPoolEntries: 1,
     maxWebkitPoolPrefixes: 1,
   }));
+  const originalIds = new Set(surfaces.map(({ id }) => id));
   for (const surface of surfaces) surface.dispose();
   const stats = getSurfaceResourceStats(document).webkit;
-  assert.equal(stats.pooledCanvases, 1);
-  assert.equal(stats.retiredCanvases, 2);
+  assert.equal(stats.pooledCanvases, 3);
+  assert.equal(stats.retiredCanvases, 0);
   assert.equal(stats.retainedPixels, 3);
   assert.equal(stats.shrinkFailures, 0);
+  const reused = Array.from({ length: 3 }, () => createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 10,
+    cssHeight: 10,
+    idPrefix: "different-prefix",
+    maxWebkitPoolEntries: 1,
+    maxWebkitPoolPrefixes: 1,
+  }));
+  assert.deepEqual(new Set(reused.map(({ id }) => id)), originalIds);
+  assert.equal(getSurfaceResourceStats(document).webkit.activeCanvases, 3);
+  for (const surface of reused) surface.dispose();
 });
 
 test("separate module copies share a collision-resistant document ID registry", async () => {

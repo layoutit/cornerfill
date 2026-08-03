@@ -10,6 +10,7 @@ import {
   preparePreparedOpaqueImageContext,
 } from "../dist/paint.mjs";
 import { buildCornerGeometry } from "../dist/geometry.mjs";
+import { normalizePaintDescriptor, resolvePaintForBox } from "../dist/background.mjs";
 
 test("transparent CSS color serialization is recognized without parsing opaque colors", () => {
   for (const color of [
@@ -95,6 +96,57 @@ test("prepared retained-surface crop hot path is exactly one draw call", () => {
   context.calls.length = 0;
   drawPreparedOpaqueImage(context, program, -40, -60);
   assert.deepEqual(context.calls, [["drawImage", image, 20, 30, 5, 5, 0, 0, 10, 10]]);
+});
+
+test("zero-sized no-repeat raster paint draws no image", () => {
+  const calls = [];
+  const context = {
+    drawImage(...args) { calls.push(args); },
+    imageSmoothingEnabled: true,
+  };
+  const image = { width: 10, height: 10 };
+  const paint = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundSize: [0, 0],
+    backgroundPosition: [0, 0],
+    repeat: "no-repeat",
+  }), 100, 80, image);
+  const result = paintOwnedLayer(context, paint, 100, 80);
+  assert.equal(calls.length, 0);
+  assert.equal(result.sourceRect, null);
+  assert.equal(result.destinationRect, null);
+});
+
+test("degenerate radial gradients retain circle, zero-width, and zero-height semantics", () => {
+  const calls = [];
+  const gradient = (kind) => ({
+    addColorStop(offset, color) { calls.push([kind, "stop", offset, color]); },
+  });
+  const context = {
+    createLinearGradient(...args) { calls.push(["linear", ...args]); return gradient("linear"); },
+    createRadialGradient(...args) { calls.push(["radial", ...args]); return gradient("radial"); },
+    fillRect(...args) { calls.push(["fillRect", ...args]); },
+    restore() { calls.push(["restore"]); },
+    save() { calls.push(["save"]); },
+    scale(...args) { calls.push(["scale", ...args]); },
+    translate(...args) { calls.push(["translate", ...args]); },
+    set fillStyle(value) { calls.push(["fillStyle", value]); },
+  };
+  const base = {
+    kind: "radial-gradient",
+    gradientCenter: [5, 5],
+    stops: [[0, "red"], [1, "blue"]],
+  };
+  paintOwnedLayer(context, { ...base, shape: "circle", gradientRadii: [0, 0] }, 10, 10);
+  assert(calls.some(([name]) => name === "radial"), "zero circle did not retain a tiny radial shape");
+  calls.length = 0;
+  paintOwnedLayer(context, { ...base, shape: "ellipse", gradientRadii: [0, 20] }, 10, 10);
+  assert(calls.some(([name]) => name === "linear"), "zero-width ellipse was not mirrored horizontally");
+  calls.length = 0;
+  paintOwnedLayer(context, { ...base, shape: "ellipse", gradientRadii: [20, 0] }, 10, 10);
+  assert(!calls.some(([name]) => name === "linear" || name === "radial"));
+  assert(calls.some(([name, value]) => name === "fillStyle" && value === "blue"));
 });
 
 test("multiply uses Canvas compositing only on the admitted raster layer", () => {

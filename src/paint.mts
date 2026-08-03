@@ -2,7 +2,7 @@ import {
   insetCornerGeometry,
 } from "./geometry.mjs";
 import type { CornerGeometry, Point } from "./geometry.mjs";
-import type { GradientStop, LinearGradientLine } from "./gradients.mjs";
+import type { GradientStop, LinearGradientLine, RadialGradientShape } from "./gradients.mjs";
 import type {
   BackgroundArea,
   BackgroundBlendMode,
@@ -65,6 +65,7 @@ export interface RadialGradientPaintState extends GradientPaintStateBase {
   readonly gradientCenter: PixelPair;
   readonly gradientRadii: PixelPair;
   readonly kind: "radial-gradient";
+  readonly shape?: RadialGradientShape | undefined;
 }
 
 export interface ConicGradientPaintState extends GradientPaintStateBase {
@@ -314,9 +315,9 @@ function drawNoRepeatImage(
   }
   const [backgroundWidth, backgroundHeight] = paint.backgroundSize ?? [intrinsicWidth, intrinsicHeight];
   const [positionX, positionY] = paint.backgroundPosition ?? [0, 0];
-  if (![backgroundWidth, backgroundHeight].every((value) => Number.isFinite(value) && value > 0)
+  if (![backgroundWidth, backgroundHeight].every((value) => Number.isFinite(value) && value >= 0)
     || ![positionX, positionY].every(Number.isFinite)) {
-    throw new TypeError("raster background size and position must resolve to finite pixels");
+    throw new TypeError("raster background size and position must resolve to finite non-negative pixels");
   }
   const destinationLeft = Math.max(0, positionX);
   const destinationTop = Math.max(0, positionY);
@@ -503,17 +504,45 @@ function paintRadialGradientTile(
   const centerX = x + paint.gradientCenter[0];
   const centerY = y + paint.gradientCenter[1];
   const [radiusX, radiusY] = paint.gradientRadii;
+  if (paint.shape !== "circle" && radiusX === 0) {
+    // CSS Images defines a zero-width ellipse as an arbitrarily thin,
+    // horizontally mirrored gradient. Keep that distinction instead of
+    // collapsing it into the zero-height solid-color case.
+    const halfWidth = 1e-4;
+    const gradient = context.createLinearGradient(
+      centerX - halfWidth,
+      centerY,
+      centerX + halfWidth,
+      centerY,
+    );
+    for (const [offset, color] of [...paint.stops].reverse()) {
+      gradient.addColorStop((1 - offset) / 2, color);
+    }
+    for (const [offset, color] of paint.stops) {
+      gradient.addColorStop((1 + offset) / 2, color);
+    }
+    context.fillStyle = gradient;
+    context.fillRect(x, y, width, height);
+    return;
+  }
+  if (paint.shape !== "circle" && radiusY === 0) {
+    context.fillStyle = paint.stops.at(-1)![1];
+    context.fillRect(x, y, width, height);
+    return;
+  }
+  const effectiveRadiusX = radiusX === 0 ? 1e-4 : radiusX;
+  const effectiveRadiusY = radiusY === 0 ? 1e-4 : radiusY;
   context.save();
   context.translate(centerX, centerY);
-  context.scale(1, radiusY / radiusX);
-  const gradient = context.createRadialGradient(0, 0, 0, 0, 0, radiusX);
+  context.scale(1, effectiveRadiusY / effectiveRadiusX);
+  const gradient = context.createRadialGradient(0, 0, 0, 0, 0, effectiveRadiusX);
   addGradientStops(gradient, paint.stops);
   context.fillStyle = gradient;
   context.fillRect(
     x - centerX,
-    (y - centerY) * radiusX / radiusY,
+    (y - centerY) * effectiveRadiusX / effectiveRadiusY,
     width,
-    height * radiusX / radiusY,
+    height * effectiveRadiusX / effectiveRadiusY,
   );
   context.restore();
 }
@@ -592,7 +621,7 @@ export function paintOwnedLayer(
   throw new TypeError(`unsupported paint kind: ${String(unsupportedKind)}`);
 }
 
-function fullyCoversBox(
+export function isPreparedOpaqueImageEligible(
   paint: CornerfillPaintState,
   width: number,
   height: number,
@@ -645,7 +674,7 @@ export function createPreparedOpaqueImageProgram({
     throw new TypeError("prepared image paint requires finite resolved size and position values");
   }
   const [backgroundWidth, backgroundHeight] = backgroundSize;
-  if (!fullyCoversBox(paint, geometry.width, geometry.height)) {
+  if (!isPreparedOpaqueImageEligible(paint, geometry.width, geometry.height)) {
     throw new RangeError("prepared opaque image must cover the complete Cornerfill surface");
   }
   const sourceScaleX = intrinsicWidth / backgroundWidth;
@@ -769,7 +798,8 @@ export function repaintOpaqueCornerfill(context: CanvasRenderingContext2D, {
   shadow?: InsetShadowPaintState | null | undefined;
 }>): Readonly<OpaqueCornerfillPaintResult> | null {
   if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
-  if (border || shadow || outline || !fullyCoversBox(paint, geometry.width, geometry.height)) return null;
+  if (border || shadow || outline
+    || !isPreparedOpaqueImageEligible(paint, geometry.width, geometry.height)) return null;
   context.save();
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.globalCompositeOperation = "source-in";
@@ -841,12 +871,11 @@ function paintContourRing(
   return true;
 }
 
-function paintInsetShadow(
-  context: CanvasRenderingContext2D,
+function insetShadowContours(
   geometry: CornerGeometry,
   shadow: Readonly<InsetShadowPaintState> | null | undefined,
   border: Readonly<OwnedBorderPaintState> | null,
-) {
+): Readonly<{ inner: readonly Point[]; outer: readonly Point[] }> | null {
   if (!shadow) return null;
   if (shadow.kind !== "inset-solid-ring" || !Number.isFinite(shadow.spread)
     || shadow.spread <= 0 || !shadow.color) {
@@ -859,10 +888,24 @@ function paintInsetShadow(
     baseInsets[2] + shadow.spread,
     baseInsets[3] + shadow.spread,
   ];
+  return Object.freeze({
+    outer: contourAtInsets(geometry, baseInsets),
+    inner: contourAtInsets(geometry, innerInsets),
+  });
+}
+
+function paintInsetShadow(
+  context: CanvasRenderingContext2D,
+  geometry: CornerGeometry,
+  shadow: Readonly<InsetShadowPaintState> | null | undefined,
+  border: Readonly<OwnedBorderPaintState> | null,
+) {
+  const contours = insetShadowContours(geometry, shadow, border);
+  if (!shadow || !contours) return null;
   paintContourRing(
     context,
-    contourAtInsets(geometry, baseInsets),
-    contourAtInsets(geometry, innerInsets),
+    contours.outer,
+    contours.inner,
     shadow.color,
   );
   return Object.freeze({
@@ -872,11 +915,10 @@ function paintInsetShadow(
   });
 }
 
-function paintContainedOutline(
-  context: CanvasRenderingContext2D,
+function containedOutlineContours(
   geometry: CornerGeometry,
   outline: Readonly<ContainedOutlinePaintState> | null | undefined,
-) {
+): Readonly<{ inner: readonly Point[]; outer: readonly Point[] }> | null {
   if (!outline) return null;
   if (outline.kind !== "contained-solid-ring" || !Number.isFinite(outline.width)
     || !Number.isFinite(outline.offset) || outline.width <= 0
@@ -885,10 +927,23 @@ function paintContainedOutline(
   }
   const outerInset = Math.max(0, -(outline.offset + outline.width));
   const innerInset = Math.max(0, -outline.offset);
+  return Object.freeze({
+    outer: contourAtInsets(geometry, [outerInset, outerInset, outerInset, outerInset]),
+    inner: contourAtInsets(geometry, [innerInset, innerInset, innerInset, innerInset]),
+  });
+}
+
+function paintContainedOutline(
+  context: CanvasRenderingContext2D,
+  geometry: CornerGeometry,
+  outline: Readonly<ContainedOutlinePaintState> | null | undefined,
+) {
+  const contours = containedOutlineContours(geometry, outline);
+  if (!outline || !contours) return null;
   paintContourRing(
     context,
-    contourAtInsets(geometry, [outerInset, outerInset, outerInset, outerInset]),
-    contourAtInsets(geometry, [innerInset, innerInset, innerInset, innerInset]),
+    contours.outer,
+    contours.inner,
     outline.color,
   );
   return Object.freeze({
@@ -897,6 +952,33 @@ function paintContainedOutline(
     offset: outline.offset,
     color: outline.color,
   });
+}
+
+function validateBackgroundAreaTopology(
+  geometry: CornerGeometry,
+  area: Readonly<BackgroundArea> | null | undefined,
+): void {
+  if (area && area.name !== "border-box") contourAtInsets(geometry, area.insets);
+}
+
+export function validateCornerfillTopology({
+  geometry,
+  paint,
+  border = null,
+  shadow = null,
+  outline = null,
+}: Readonly<CornerfillPaintOptions>): void {
+  if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
+  const ownedBorder = supportedBorder(border);
+  if (ownedBorder) contourAtInsets(geometry, ownedBorder.widths);
+  if (paint.kind === "layers") {
+    validateBackgroundAreaTopology(geometry, paint.colorClipArea);
+    for (const layer of paint.layers) validateBackgroundAreaTopology(geometry, layer.clipArea);
+  } else {
+    validateBackgroundAreaTopology(geometry, paint.clipArea);
+  }
+  insetShadowContours(geometry, shadow, ownedBorder);
+  containedOutlineContours(geometry, outline);
 }
 
 function clipToBackgroundArea(
@@ -967,7 +1049,7 @@ export function paintCornerfill(context: CanvasRenderingContext2D, {
   outline = null,
   dpr = geometry?.dpr ?? 1,
 }: Readonly<CornerfillPaintOptions>) {
-  if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
+  validateCornerfillTopology({ geometry, paint, border, shadow, outline, dpr });
   const { width, height } = geometry;
   const ownedBorder = supportedBorder(border);
   const borderInnerContour = ownedBorder ? contourAtInsets(geometry, ownedBorder.widths) : null;

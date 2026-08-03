@@ -92,12 +92,12 @@ export class ImageCache {
   private _evict(): void {
     if (this.destroyed) return;
     const records = [...this.records.values()];
-    let zeroReferenceEntries = records.filter(({ refs, state }) => refs === 0 && state === "ready").length;
+    let zeroReferenceEntries = records.filter(({ refs }) => refs === 0).length;
     let estimatedPixels = records.reduce((total, record) => total + this._estimatedPixels(record), 0);
     for (const record of records) {
       if (zeroReferenceEntries <= this.maxZeroReferenceEntries
         && estimatedPixels <= this.maxEstimatedPixels) break;
-      if (record.refs !== 0 || record.state !== "ready" || this.records.get(record.key) !== record) continue;
+      if (record.refs !== 0 || this.records.get(record.key) !== record) continue;
       const pixels = this._estimatedPixels(record);
       this.records.delete(record.key);
       record.image.src = "";
@@ -124,6 +124,9 @@ export class ImageCache {
       const promise = (async () => {
         image.src = absoluteUrl;
         await waitForImage(image);
+        if (this.records.get(key) !== created) {
+          throw new Error(`image load was evicted before decode completed: ${absoluteUrl}`);
+        }
         if (!(image.naturalWidth > 0 && image.naturalHeight > 0)) {
           throw new Error(`decoded image has no intrinsic dimensions: ${absoluteUrl}`);
         }
@@ -134,7 +137,7 @@ export class ImageCache {
       })().catch((error) => {
         created.state = "error";
         created.error = error;
-        this.records.delete(key);
+        if (this.records.get(key) === created) this.records.delete(key);
         throw error;
       });
       created = {

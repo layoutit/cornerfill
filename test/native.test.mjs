@@ -78,9 +78,13 @@ test("unobservable shaped behavior does not demote or invalidate computed native
               "corner-top-right-shape",
               "corner-bottom-right-shape",
               "corner-bottom-left-shape",
+              "corner-start-start-shape",
+              "corner-start-end-shape",
+              "corner-end-end-shape",
+              "corner-end-start-shape",
             ].indexOf(property);
             return index >= 0
-              ? ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"][index]
+              ? ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"][index % 4]
               : "";
           },
         }),
@@ -144,9 +148,13 @@ test("native computed-value qualification falls back to the host document when i
             "corner-top-right-shape",
             "corner-bottom-right-shape",
             "corner-bottom-left-shape",
+            "corner-start-start-shape",
+            "corner-start-end-shape",
+            "corner-end-end-shape",
+            "corner-end-start-shape",
           ].indexOf(property);
           return index >= 0
-            ? ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"][index]
+            ? ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"][index % 4]
             : "";
         },
       }),
@@ -156,4 +164,51 @@ test("native computed-value qualification falls back to the host document when i
   assert.equal(result.qualified, true);
   assert.equal(result.capabilities.shapedHitTesting, "supported");
   assert.equal(frameRemoved, true);
+});
+
+test("observable shaped behavior failure prevents native qualification", () => {
+  const values = ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"];
+  const longhands = [
+    "corner-top-left-shape",
+    "corner-top-right-shape",
+    "corner-bottom-right-shape",
+    "corner-bottom-left-shape",
+    "corner-start-start-shape",
+    "corner-start-end-shape",
+    "corner-end-end-shape",
+    "corner-end-start-shape",
+  ];
+  const style = {
+    currentShape: "",
+    setProperty(property, value) {
+      if (property === "corner-shape") this.currentShape = value;
+    },
+  };
+  const element = { remove() {}, setAttribute() {}, style };
+  const isolated = {
+    body: { style: {} },
+    createElement: () => element,
+    documentElement: { append() {} },
+    elementFromPoint: () => null,
+    defaultView: {
+      innerHeight: 128,
+      innerWidth: 128,
+      getComputedStyle: () => ({
+        getPropertyValue(property) {
+          if (property === "corner-shape") return style.currentShape;
+          const index = longhands.indexOf(property);
+          return index >= 0 ? values[index % 4] : "";
+        },
+      }),
+    },
+  };
+  const document = {
+    createElement: () => ({ contentDocument: isolated, remove() {}, setAttribute() {}, style: { setProperty() {} } }),
+    documentElement: { append() {} },
+    defaultView: { CSS: { supports: () => true } },
+  };
+  const result = qualifyNativeCornerShape(document);
+  assert.equal(result.qualified, false);
+  assert.deepEqual(result.unresolved, ["shapedBehavior"]);
+  assert.equal(result.capabilities.shapedHitTesting, "unsupported");
 });

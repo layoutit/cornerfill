@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { installCornerfillAuto } from "../dist/auto-runtime.mjs";
 
-test("automatic teardown settles readiness when source application is waiting for a frame", async () => {
+test("automatic readiness performs one candidate pass without a deferred source-application frame", async () => {
   class CSSStyleSheet {
     replaceSync() { this.cssRules = []; }
   }
@@ -60,29 +60,9 @@ test("automatic teardown settles readiness when source application is waiting fo
     nativeQualification: { qualified: false, unresolved: ["syntax"] },
   });
 
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(frames.size, 1);
-  let readySettled = false;
-  automatic.ready.then(
-    () => { readySettled = true; },
-    () => { readySettled = true; },
-  );
-  await Promise.resolve();
-  assert.equal(readySettled, false);
-
-  automatic.destroy();
-  let readinessTimeout;
-  try {
-    await Promise.race([
-      automatic.ready,
-      new Promise((_, reject) => {
-        readinessTimeout = setTimeout(() => reject(new Error("automatic readiness stayed pending")), 100);
-      }),
-    ]);
-  } finally {
-    clearTimeout(readinessTimeout);
-  }
-  assert.equal(readySettled, true);
+  await automatic.ready;
   assert.equal(frames.size, 0);
-  assert.equal(automatic.explain().automatic.counters.candidatePasses, 0);
+  assert.equal(automatic.explain().automatic.counters.candidatePasses, 1);
+  automatic.destroy();
+  assert.equal(frames.size, 0);
 });

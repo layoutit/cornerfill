@@ -36,6 +36,8 @@ const SOURCE_FILES = Object.freeze([
   "bench/imports/child.css",
   "bench/imports/grandchild.css",
   "bench/imports/root.css",
+  "bench/imports/unsafe-semantics.css",
+  "bench/imports/unsafe-supports.css",
   "scripts/runtime-regressions.mjs",
   ...moduleFiles("src", ".mts"),
   ...moduleFiles("dist", ".mjs"),

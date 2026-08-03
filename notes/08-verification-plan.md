@@ -293,9 +293,9 @@ approved. Current focused evidence includes:
 - contained inset-shadow and outline fixtures, with external outsets explicitly
   unsupported.
 
-The [complete Firefox Mario ABBA run](../output/playwright/firefox-mario/hardening-full-abba-v2-2026-08-02/README.md)
+The [complete Firefox Mario stress run](evidence/firefox-mario-stress.md)
 executes 1,213 retained leaves over all 820 source ticks in eight fresh sessions,
 with identical workload streams, measured Cornerfill paints, and teardown
 records. It proves workload integration/lifecycle equivalence only. It does not
-approve native visual tolerance, and its roughly 25 source FPS / 50 ms display
+approve native visual tolerance, and its roughly 22 source FPS / 67 ms display
 p95 is not a 30/60 performance claim.

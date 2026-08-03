@@ -61,3 +61,19 @@ test("decoded image cache enforces its retained pixel budget", async () => {
   assert.equal(cache.stats().estimatedPixels, 0);
   assert.equal(cache.stats().evictions, 1);
 });
+
+test("image cache bounds released loads that have not decoded", () => {
+  class PendingImage extends FakeImage {
+    decode() { return new Promise(() => {}); }
+  }
+  const cache = new ImageCache({
+    baseURI: "https://cornerfill.test/",
+    defaultView: { Image: PendingImage },
+  }, { maxZeroReferenceEntries: 1 });
+  for (let index = 0; index < 5; index += 1) {
+    cache.acquire(`pending-${index}.webp`).release();
+  }
+  assert.equal(cache.stats().entries, 1);
+  assert.equal(cache.stats().loading, 1);
+  assert.equal(cache.stats().evictions, 4);
+});

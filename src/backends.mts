@@ -89,6 +89,7 @@ interface WebkitPoolState {
   retiredCanvases: number;
   retiredPixels: number;
   shrinkFailures: number;
+  readonly overflow: WebkitPoolEntry[];
   readonly pools: Map<string, WebkitPoolEntry[]>;
 }
 
@@ -128,6 +129,7 @@ function webkitPoolState(document: Document): WebkitPoolState {
   let state = webkitSurfacePools.get(document);
   if (!state) {
     state = {
+      overflow: [],
       pools: new Map(),
       activeCanvases: 0,
       pooledCanvases: 0,
@@ -145,11 +147,18 @@ function acquireWebkitSurfaceId(document: Document, prefix: string): string {
   const key = normalizedPrefix(prefix);
   const state = webkitPoolState(document);
   const available = state.pools.get(key);
-  const retained = available?.pop();
+  let retained = available?.pop() ?? state.overflow.pop();
+  if (!retained) {
+    for (const [otherKey, otherPool] of state.pools) {
+      retained = otherPool.pop();
+      if (otherPool.length === 0) state.pools.delete(otherKey);
+      if (retained) break;
+    }
+  }
   if (retained) {
     state.pooledCanvases -= 1;
     state.pooledPixels -= retained.pixels;
-    if (available!.length === 0) state.pools.delete(key);
+    if (available?.length === 0) state.pools.delete(key);
     state.activeCanvases += 1;
     return retained.id;
   }
@@ -180,8 +189,11 @@ function releaseWebkitSurfaceId(document: Document, prefix: string, id: string, 
     state.pooledPixels += retainedPixels;
     return;
   }
-  state.retiredCanvases += 1;
-  state.retiredPixels += retainedPixels;
+  // WebKit cannot unregister named CSS canvases. Every released ID therefore
+  // stays reusable, bounding retained browser resources at peak concurrency.
+  state.overflow.push({ id, pixels: retainedPixels });
+  state.pooledCanvases += 1;
+  state.pooledPixels += retainedPixels;
 }
 
 function backingDimensions(

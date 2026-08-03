@@ -28,6 +28,11 @@ const PROJECT_ROOT = resolve(SCRIPT_DIRECTORY, "..");
 const VALID_BROWSERS = new Set(["chrome", "webkit", "firefox"]);
 const MANIFEST_SCHEMA = "cornerfill-oracle-run@1";
 
+function paintUsesMarioAsset(paint) {
+  return paint?.url === "/__mario/texels.webp"
+    || paint?.layers?.some(paintUsesMarioAsset) === true;
+}
+
 function usage() {
   console.log(`Usage:
   node scripts/oracle.mjs list
@@ -57,7 +62,7 @@ function parseArguments(argv) {
   const values = {
     command,
     browsers: ["chrome"],
-    cases: oracleCases.filter(({ id }) => id !== "mario-texel-face").map(({ id }) => id),
+    cases: oracleCases.filter(({ paint }) => !paintUsesMarioAsset(paint)).map(({ id }) => id),
     out: null,
     marioTexels: process.env.CORNERFILL_MARIO_TEXELS
       ? resolve(process.env.CORNERFILL_MARIO_TEXELS)
@@ -82,6 +87,9 @@ function parseArguments(argv) {
   }
   for (const browser of values.browsers) {
     if (!VALID_BROWSERS.has(browser)) throw new Error(`unsupported browser: ${browser}`);
+  }
+  if (values.enforceCandidate && !values.browsers.includes("chrome")) {
+    throw new Error("--enforce-candidate requires Chrome to capture the native reference");
   }
   if (values.cases.length === 0 || new Set(values.cases).size !== values.cases.length) {
     throw new Error("case list must be non-empty and unique");
@@ -380,6 +388,18 @@ async function captureBrowser({
             + `supported=${metadata.nativeSupported} computed=${metadata.computed?.cornerShape ?? "missing"}`,
           );
         }
+        if (oracleCase.border) {
+          const widths = Array.isArray(oracleCase.border.width)
+            ? oracleCase.border.width
+            : Array(4).fill(oracleCase.border.width);
+          const expected = widths.map((width) => `${width}px`);
+          if (JSON.stringify(metadata.computed?.borderWidths) !== JSON.stringify(expected)) {
+            throw new Error(
+              `INVALID ORACLE: Chrome border widths do not match ${oracleCase.id}; `
+              + `expected=${expected.join(" ")} computed=${metadata.computed?.borderWidths?.join(" ") ?? "missing"}`,
+            );
+          }
+        }
         records.push(captureMetadata({
           browser,
           mode: "native-a-b",
@@ -476,12 +496,10 @@ async function runOracle(options) {
   const runDirectory = options.out ?? join(PROJECT_ROOT, "oracle", "results", runId);
   if (existsSync(runDirectory)) throw new Error(`output already exists: ${runDirectory}`);
   const selectedCases = options.cases.map(getOracleCase);
-  const usesMario = (paint) => paint?.url === "/__mario/texels.webp"
-    || paint?.layers?.some(usesMario) === true;
-  const needsMario = selectedCases.some(({ paint }) => usesMario(paint));
+  const needsMario = selectedCases.some(({ paint }) => paintUsesMarioAsset(paint));
   if (needsMario && (!options.marioTexels || !existsSync(options.marioTexels))) {
     throw new Error(
-      "Mario case requires texels.webp; set CORNERFILL_MARIO_TEXELS or pass --mario-texels=<path>",
+      "Selected case requires texels.webp; set CORNERFILL_MARIO_TEXELS or pass --mario-texels=<path>",
     );
   }
   const cli = locatePlaywrightCli();
@@ -593,9 +611,13 @@ async function runOracle(options) {
     }
   }
 
+  const candidateReports = reports.filter((report) => report.label.includes("candidate"));
+  if (options.enforceCandidate && candidateReports.length === 0) {
+    throw new Error("--enforce-candidate produced no native-to-candidate comparisons");
+  }
   manifest.status = reports.some((report) => report.label.includes("A/A") && report.status !== "PASS")
     ? "INVALID_CALIBRATION"
-    : options.enforceCandidate && reports.some((report) => report.label.includes("candidate") && report.status !== "PASS")
+    : options.enforceCandidate && candidateReports.some((report) => report.status !== "PASS")
       ? "CANDIDATE_FAILED"
       : "COMPLETE";
   manifest.completedAt = new Date().toISOString();

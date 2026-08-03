@@ -137,7 +137,7 @@ Recorded results:
 | Playwright `webkit` engine build | `backend=webkit-canvas`, `phase=0` | `phase=1` after `repaint(1)` | transparent rotated triangle updated in place |
 | Playwright `firefox` engine build | `backend=moz-element`, `phase=0` | `phase=1` after `repaint(1)` | transparent rotated triangle updated in place |
 
-Evidence images remain in the source workspace and are linked from [evidence/README.md](evidence/README.md). The exact claim is engine-build proof of the live-surface mechanism. The production adapter, dirty-only scheduler, lifecycle, and complete 1,213-leaf/820-tick workload now have separate evidence in the [oracle](../oracle/README.md) and the [Firefox Mario ABBA record](../output/playwright/firefox-mario/hardening-full-abba-v2-2026-08-02/README.md). Those artifacts still do not approve native-to-candidate pixel tolerances or qualify released Safari.
+Evidence images remain in the source workspace and are linked from [evidence/README.md](evidence/README.md). The exact claim is engine-build proof of the live-surface mechanism. The production adapter, dirty-only scheduler, lifecycle, and complete 1,213-leaf/820-tick workload now have separate evidence in the [oracle](../oracle/README.md) and the [Firefox Mario stress record](evidence/firefox-mario-stress.md). Those artifacts still do not approve native-to-candidate pixel tolerances or qualify released Safari.
 
 ## Adapting the archived CSS Paint polyfill
 

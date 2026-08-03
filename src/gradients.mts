@@ -257,6 +257,14 @@ function radialPreludeCandidate(value: string): boolean {
     });
 }
 
+function parseRadialRadius(token: string): Readonly<LengthPercentage> {
+  const radius = parseLengthPercentage(token, { label: "radial-gradient radius" });
+  if (!/^calc\(/iu.test(token.trim()) && (radius.px < 0 || radius.percent < 0)) {
+    throw new SyntaxError(`radial-gradient radius must be non-negative: ${token}`);
+  }
+  return radius;
+}
+
 function parseRadialPrelude(value: string): Readonly<RadialPrelude> {
   if (rejectsColorSpacePrelude(value)) {
     throw new SyntaxError("gradient color interpolation spaces are not supported");
@@ -280,7 +288,7 @@ function parseRadialPrelude(value: string): Readonly<RadialPrelude> {
       if (keyword) throw new SyntaxError(`duplicate radial-gradient size: ${value}`);
       keyword = lower as RadialGradientSizeKeyword;
     } else {
-      radii.push(parseLengthPercentage(token, { label: "radial-gradient radius" }));
+      radii.push(parseRadialRadius(token));
     }
   }
   if (keyword && radii.length > 0) throw new SyntaxError("radial-gradient cannot mix keyword and explicit sizes");

@@ -76,6 +76,73 @@ test("zero-sized raster backgrounds draw no tiles", () => {
     repeat: "repeat",
   }), 100, 80, image);
   assert.deepEqual(resolved.tilePlan, { x: [], y: [] });
+  assert.throws(() => resolvePaintForBox(normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundSize: "-10px 20px",
+    repeat: "no-repeat",
+  }), 100, 80, image), /must be non-negative/u);
+  const clamped = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundSize: "calc(10px - 20px) calc(-10px)",
+    repeat: "no-repeat",
+  }), 100, 80, image);
+  assert.deepEqual(clamped.backgroundSize, [0, 0]);
+});
+
+test("solid and layered descriptors preserve explicit box metrics", () => {
+  const box = { padding: 10 };
+  const solid = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "solid",
+    color: "red",
+    clip: "content-box",
+    box,
+  }), 100, 80);
+  assert.deepEqual(solid.clipArea, {
+    name: "content-box",
+    x: 10,
+    y: 10,
+    width: 80,
+    height: 60,
+    insets: [10, 10, 10, 10],
+  });
+  box.padding = 30;
+  assert.equal(solid.boxMetrics.padding[0], 10);
+
+  const layered = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "layers",
+    color: "blue",
+    box: { border: 4 },
+    layers: [{ kind: "none", clip: "padding-box" }],
+  }), 100, 80);
+  assert.equal(layered.colorClipArea.x, 4);
+});
+
+test("radial gradients accept outside centers and degenerate ending radii", () => {
+  const outside = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "radial-gradient",
+    css: "radial-gradient(circle closest-side at -10px 50%, red, blue)",
+  }), 100, 80);
+  assert.deepEqual(outside.gradientRadii, [10, 10]);
+  const degenerate = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "radial-gradient",
+    css: "radial-gradient(ellipse 0 20px at center, red, blue)",
+  }), 100, 80);
+  assert.deepEqual(degenerate.gradientRadii, [0, 20]);
+  const clampedCircle = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "radial-gradient",
+    css: "radial-gradient(circle calc(-10px) at center, red, blue)",
+  }), 100, 80);
+  assert.deepEqual(clampedCircle.gradientRadii, [0, 0]);
+  assert.throws(() => normalizePaintDescriptor({
+    kind: "radial-gradient",
+    css: "radial-gradient(circle -10px at center, red, blue)",
+  }), /must be non-negative/u);
+  assert.throws(() => normalizePaintDescriptor({
+    kind: "radial-gradient",
+    css: "radial-gradient(-10px, red, blue)",
+  }), /must be non-negative/u);
 });
 
 test("computed pixelated raster backgrounds disable Canvas smoothing", () => {
