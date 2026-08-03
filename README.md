@@ -16,12 +16,10 @@ npm install cornerfill
 
 ## Usage
 
-Import Cornerfill once:
+Import Cornerfill once at your application entry:
 
 ```js
-import cornerfill from "cornerfill";
-
-await cornerfill?.ready;
+import "cornerfill";
 ```
 
 Then write ordinary CSS:
@@ -36,7 +34,7 @@ Then write ordinary CSS:
 }
 ```
 
-That's it. Cornerfill discovers the CSS automatically; there is no build transform or second import. If the browser passes Cornerfill's native behavior checks, it renders the CSS itself and the fallback is never loaded. The export is `null` outside a document.
+That's it. Cornerfill discovers the CSS automatically; there is no build transform or second import. If the browser passes Cornerfill's native behavior checks, it renders the CSS itself and the fallback is never loaded.
 
 ## How It Works
 
