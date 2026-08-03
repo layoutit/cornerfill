@@ -52,8 +52,6 @@ export interface SurfaceResourceStats {
     prefixes: number;
     retainedCanvases: number;
     retainedPixels: number;
-    retiredCanvases: number;
-    retiredPixels: number;
     shrinkFailures: number;
   }>;
 }
@@ -86,8 +84,6 @@ interface WebkitPoolState {
   activeCanvases: number;
   pooledCanvases: number;
   pooledPixels: number;
-  retiredCanvases: number;
-  retiredPixels: number;
   shrinkFailures: number;
   readonly overflow: WebkitPoolEntry[];
   readonly pools: Map<string, WebkitPoolEntry[]>;
@@ -134,8 +130,6 @@ function webkitPoolState(document: Document): WebkitPoolState {
       activeCanvases: 0,
       pooledCanvases: 0,
       pooledPixels: 0,
-      retiredCanvases: 0,
-      retiredPixels: 0,
       shrinkFailures: 0,
     };
     webkitSurfacePools.set(document, state);
@@ -237,10 +231,8 @@ export function getSurfaceResourceStats(document: Document): Readonly<SurfaceRes
       activeCanvases: webkit?.activeCanvases ?? 0,
       pooledCanvases: webkit?.pooledCanvases ?? 0,
       pooledPixels: webkit?.pooledPixels ?? 0,
-      retiredCanvases: webkit?.retiredCanvases ?? 0,
-      retiredPixels: webkit?.retiredPixels ?? 0,
-      retainedCanvases: (webkit?.pooledCanvases ?? 0) + (webkit?.retiredCanvases ?? 0),
-      retainedPixels: (webkit?.pooledPixels ?? 0) + (webkit?.retiredPixels ?? 0),
+      retainedCanvases: webkit?.pooledCanvases ?? 0,
+      retainedPixels: webkit?.pooledPixels ?? 0,
       prefixes: webkit?.pools.size ?? 0,
       shrinkFailures: webkit?.shrinkFailures ?? 0,
     }),

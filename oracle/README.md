@@ -30,7 +30,6 @@ oracle/results/<UTC run>/
     report.csv
     summary.md
     diffs/frame_0000.png
-  driver/.playwright-cli/                # raw driver diagnostics
 ```
 
 Raw numbered PNGs are the source of truth. The manifest binds the fixture/painter source hashes, `texels.webp` hash when used, host identity, browser user agent, backend, DPR, computed styles, frame-to-case mapping, and capture order.
@@ -39,9 +38,9 @@ The comparator preserves alpha. It reports alpha independently, compares premult
 
 ## Safety rule
 
-Browsers are launched strictly one at a time and closed in `finally` before another engine starts. The harness never calls `playwright-cli kill-all`, never launches a full scene, and never starts concurrent capture workers.
+Browsers are launched strictly one at a time and the exact context and process are closed before another engine starts. The harness never calls `kill-all`, never launches a full scene, and never starts concurrent capture workers.
 
-The driver uses direct Playwright page code because it needs clipped raster evidence and no interactive element references. Every CLI command has a 30-second wall timeout so a wedged driver cannot run indefinitely.
+The driver uses the pinned stable Playwright package directly. Navigation and fixture readiness have bounded timeouts so a wedged page cannot run indefinitely.
 
 The current Playwright Firefox/BiDi backend cannot request a transparent page background. Firefox frames are therefore captured twice against opaque black and white, then reconstructed as RGBA from the two composites. Both opaque inputs are retained, the manifest records the method and reconstruction diagnostics, and the reconstructor rejects transparent inputs or mismatched dimensions. This preserves painted `-moz-element()` evidence instead of substituting the source canvas.
 

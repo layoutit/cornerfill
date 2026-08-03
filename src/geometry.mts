@@ -505,7 +505,7 @@ export function oppositeCornerScaleFactor(
   const diagonalPairs = [[0, 2], [1, 3]] as const;
   let result = 1;
   for (const [first, second] of diagonalPairs) {
-    if (!(shapeParameters[first] < 0 && shapeParameters[second] < 0)) continue;
+    if (!(shapeParameters[first] < 0 || shapeParameters[second] < 0)) continue;
     const firstHull = mappedInnerHull(first, width, height, radii[first], shapeParameters[first]);
     const secondHull = mappedInnerHull(second, width, height, radii[second], shapeParameters[second]);
     result = Math.min(result, highestNonOverlappingScale(firstHull, secondHull, result));
@@ -623,6 +623,9 @@ export function contourPoints({
   append(points, curves[3]!);
   points.push(frozenPoint(0, topLeft.ry));
   append(points, [...curves[0]!].reverse());
+  if (points.length > 1
+    && points[0]![0] === points.at(-1)![0]
+    && points[0]![1] === points.at(-1)![1]) points.pop();
 
   return Object.freeze(points);
 }

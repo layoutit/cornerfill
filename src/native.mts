@@ -1,4 +1,4 @@
-export const CORNERFILL_NATIVE_QUALIFICATION_SCHEMA = "cornerfill-native-qualification@1";
+export const CORNERFILL_NATIVE_QUALIFICATION_SCHEMA = "cornerfill-native-qualification@2";
 
 export interface CornerfillNativeSyntaxProbes {
   readonly aliases: boolean;
@@ -44,6 +44,14 @@ export interface CornerfillNativeQualification {
   readonly schema: typeof CORNERFILL_NATIVE_QUALIFICATION_SCHEMA;
   readonly qualified: boolean;
   readonly requirements: Readonly<CornerfillNativeRequirements>;
+  readonly tiers: Readonly<{
+    readonly animationQualified: boolean;
+    readonly basicPaintQualified: boolean;
+    readonly computedValuesQualified: boolean;
+    readonly fullNativeQualified: boolean;
+    readonly semanticClippingQualified: boolean;
+    readonly syntaxQualified: boolean;
+  }>;
   readonly unresolved: readonly (keyof CornerfillNativeRequirements)[];
   readonly reason: string;
   readonly error?: string;
@@ -106,8 +114,7 @@ function unresolvedRequirements(
   requirements: CornerfillNativeRequirements,
 ): readonly (keyof CornerfillNativeRequirements)[] {
   return Object.freeze((["syntax", "computedValues", "shapedBehavior"] as const)
-    .filter((name) => !requirements[name].supported
-      && (name !== "shapedBehavior" || requirements[name].observable !== false)));
+    .filter((name) => !requirements[name].supported));
 }
 
 function observedCapability(
@@ -122,7 +129,17 @@ function qualification(
   error: unknown = null,
 ): Readonly<CornerfillNativeQualification> {
   const unresolved = unresolvedRequirements(requirements);
-  const qualified = unresolved.length === 0;
+  const tiers = Object.freeze({
+    syntaxQualified: requirements.syntax.supported,
+    computedValuesQualified: requirements.syntax.supported && requirements.computedValues.supported,
+    basicPaintQualified: requirements.syntax.supported
+      && requirements.computedValues.supported
+      && requirements.shapedBehavior.supported,
+    semanticClippingQualified: false,
+    animationQualified: false,
+    fullNativeQualified: false,
+  });
+  const qualified = tiers.basicPaintQualified;
   return Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
@@ -139,9 +156,10 @@ function qualification(
       animation: "unobserved",
     }),
     requirements: Object.freeze(requirements),
+    tiers,
     unresolved,
     reason: qualified
-      ? "Native corner-shape syntax and computed-value probes passed, together with shaped behavior when observable."
+      ? "Native corner-shape syntax, computed values, and observable basic shaped behavior passed."
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
@@ -312,7 +330,8 @@ export function qualifyNativeCornerShape(
     element?.remove();
     frame?.remove();
   }
-  const observable = result.requirements.computedValues.observable !== false;
+  const observable = result.requirements.computedValues.observable !== false
+    && result.requirements.shapedBehavior.observable !== false;
   if (observable) CACHE.set(document, result);
   return result;
 }

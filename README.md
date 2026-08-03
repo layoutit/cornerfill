@@ -1,6 +1,6 @@
 # Cornerfill
 
-CSS `corner-shape` for Safari and Firefox. Import Cornerfill once, write normal CSS, and keep native browsers native.
+Experimental paint-only CSS `corner-shape` support for Safari and Firefox. Import Cornerfill once, write normal CSS, and keep qualified native browsers native.
 
 | Chrome (native) | WebKit (Cornerfill) | Firefox (Cornerfill) |
 | --- | --- | --- |
@@ -49,8 +49,8 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-a
 - `round`, `squircle`, `square`, `bevel`, `scoop`, `notch`, finite `superellipse()` corners, physical and logical properties, and browser-computed `border-radius` values.
 - Solid colors, raster backgrounds, and non-repeating gradients with supported sizing, positioning, repetition, origin, and clip.
 - One-color solid borders with unequal widths, one inset shadow, and one contained solid outline.
-- Inline, embedded, and readable linked CSS, including imports, variables, media queries, layers, stateful selectors, and registered open shadow roots.
-- Resize and relevant style changes update automatically.
+- Inline, embedded, and readable linked CSS, including imports, variables, media queries, layers, observable focus/hover/open/fullscreen selectors, and registered open shadow roots.
+- Resize plus discovered source, class, attribute, inline-style, and observable selector-state changes update automatically.
 
 Unsupported syntax is reported or left native rather than approximated.
 
@@ -59,7 +59,9 @@ Unsupported syntax is reported or left native rather than approximated.
 - Cornerfill shapes host paint. It does not provide descendant overflow clipping, shaped hit testing, replaced-content clipping, multi-fragment boxes, `backdrop-filter` clipping, or automatic pseudo-element targets.
 - Outer shadows and outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented. Conflicting `!important` paint declarations are rejected.
 - CSS animations and transitions of shape or paint inputs do not reproduce native timing.
-- Closed shadow roots, unreadable cross-origin CSS, and direct mutation of existing CSSOM rules cannot be discovered automatically.
+- Closed shadow roots and unreadable cross-origin CSS fail automatic ownership closed by default. Unobservable selector states such as programmatic `:checked`, `:target`, and `:visited` are refused instead of becoming stale.
+- Direct mutation of existing CSSOM declarations, selectors, grouping rules, or media lists requires exact authored source through `replaceStylesheetSource()`; generic `refresh()` cannot reconstruct source the browser no longer exposes.
+- The explicit `cornerfill/runtime` observer covers host class, inline style, content, and size. Call `handle.refresh()` or `controller.refresh()` after other cascade inputs change.
 
 ## Development
 

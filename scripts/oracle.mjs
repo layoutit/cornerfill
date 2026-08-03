@@ -13,10 +13,12 @@ import { createServer } from "node:http";
 import { platform, release } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { chromium, firefox, webkit } from "playwright";
 import { getOracleCase, oracleCases } from "../oracle/cases.mjs";
 import { compareFrameDirectories, readTolerances } from "./compare.mjs";
+import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 import {
   readPng,
   reconstructTransparencyFromBlackAndWhite,
@@ -25,8 +27,10 @@ import {
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(SCRIPT_DIRECTORY, "..");
+const require = createRequire(import.meta.url);
 const VALID_BROWSERS = new Set(["chrome", "webkit", "firefox"]);
-const MANIFEST_SCHEMA = "cornerfill-oracle-run@1";
+const BROWSER_TYPES = Object.freeze({ chrome: chromium, webkit, firefox });
+const MANIFEST_SCHEMA = "cornerfill-oracle-run@2";
 
 function paintUsesMarioAsset(paint) {
   return paint?.url === "/__mario/texels.webp"
@@ -46,12 +50,11 @@ Options:
   --enforce-candidate     Exit nonzero unless approved candidate tolerances pass
 
 Environment:
-  CORNERFILL_PLAYWRIGHT_CLI  playwright-cli binary/wrapper path
   CORNERFILL_MARIO_TEXELS    existing texels.webp source path
 
 Safety:
   Browsers are always opened and closed serially. This command never calls
-  playwright-cli kill-all and never launches multiple engines concurrently.
+  kill-all and never launches multiple engines concurrently.
 `);
 }
 
@@ -118,20 +121,6 @@ function sourceIdentity(path) {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-function locatePlaywrightCli() {
-  const explicit = process.env.CORNERFILL_PLAYWRIGHT_CLI;
-  if (explicit) {
-    const path = resolve(explicit);
-    if (!existsSync(path)) throw new Error(`CORNERFILL_PLAYWRIGHT_CLI does not exist: ${path}`);
-    return path;
-  }
-  const local = join(PROJECT_ROOT, "node_modules", ".bin", "playwright-cli");
-  if (existsSync(local)) return local;
-  throw new Error(
-    "playwright-cli is unavailable; run npm install or set CORNERFILL_PLAYWRIGHT_CLI",
-  );
 }
 
 function topLevelFiles(directory, predicate) {
@@ -202,97 +191,53 @@ async function startFixtureServer(marioTexels) {
   });
 }
 
-function runCli(cli, session, driverDirectory, args, { raw = false, allowFailure = false } = {}) {
-  const commandArgs = raw ? ["--raw", ...args] : args;
-  console.log(`  playwright ${args[0]}`);
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(cli, commandArgs, {
-      cwd: driverDirectory,
-      env: { ...process.env, PLAYWRIGHT_CLI_SESSION: session },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, 30000);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (status, signal) => {
-      clearTimeout(timeout);
-      if (timedOut) {
-        reject(new Error(`playwright-cli ${args[0]} timed out after 30s\n${stdout}${stderr}`));
-        return;
-      }
-      if (status !== 0 && !allowFailure) {
-        reject(new Error(
-          `playwright-cli ${args[0]} failed (${status ?? signal ?? "unknown"})\n${stdout}${stderr}`,
-        ));
-        return;
-      }
-      resolvePromise(Object.freeze({ status, stdout, stderr }));
-    });
-  });
+async function nextPaint(page) {
+  await page.evaluate(() => new Promise((resolvePromise) => (
+    requestAnimationFrame(() => requestAnimationFrame(resolvePromise))
+  )));
 }
 
-function parseReturnedJson(output, label) {
-  const first = output.indexOf("{");
-  const last = output.lastIndexOf("}");
-  if (first < 0 || last < first) throw new Error(`${label} returned no JSON object: ${output}`);
-  return JSON.parse(output.slice(first, last + 1));
-}
-
-const NEXT_PAINT_CODE = "await page.evaluate(() => new Promise(resolve => "
-  + "requestAnimationFrame(() => requestAnimationFrame(resolve))));";
-
-function screenshotCode(paths, { opaquePairs = null } = {}) {
-  const captureOptions = "animations:\"disabled\",scale:\"css\"";
-  let calls;
-  let captureMethod;
+async function captureFixture(page, paths, { opaquePairs = null } = {}) {
+  await page.waitForFunction(() => (
+    globalThis.__cornerfillOracle?.ready === true || Boolean(globalThis.__cornerfillOracle?.error)
+  ), null, { timeout: 15_000 });
+  const metadata = await page.evaluate(() => globalThis.__cornerfillOracle);
+  if (!metadata.ready) throw new Error(metadata.error || "fixture failed");
+  let captureMethod = "transparent-browser-screenshot";
   if (opaquePairs) {
     captureMethod = "dual-opaque-alpha-reconstruction";
-    calls = opaquePairs.map(({ black, white }) => [
-      "await page.evaluate(color => {",
-      "document.documentElement.style.setProperty(\"background\",color,\"important\");",
-      "document.body.style.setProperty(\"background\",color,\"important\");",
-      "}, \"#000\");",
-      NEXT_PAINT_CODE,
-      `await page.locator("#capture").screenshot({path:${JSON.stringify(black)},${captureOptions},omitBackground:false});`,
-      "await page.evaluate(color => {",
-      "document.documentElement.style.setProperty(\"background\",color,\"important\");",
-      "document.body.style.setProperty(\"background\",color,\"important\");",
-      "}, \"#fff\");",
-      NEXT_PAINT_CODE,
-      `await page.locator("#capture").screenshot({path:${JSON.stringify(white)},${captureOptions},omitBackground:false});`,
-    ].join("")).join(NEXT_PAINT_CODE);
+    for (const { black, white } of opaquePairs) {
+      for (const [color, path] of [["#000", black], ["#fff", white]]) {
+        await page.evaluate((nextColor) => {
+          document.documentElement.style.setProperty("background", nextColor, "important");
+          document.body.style.setProperty("background", nextColor, "important");
+        }, color);
+        await nextPaint(page);
+        await page.locator("#capture").screenshot({
+          path,
+          animations: "disabled",
+          scale: "css",
+          omitBackground: false,
+        });
+      }
+    }
   } else {
-    captureMethod = "transparent-browser-screenshot";
-    calls = paths.map((path) => (
-      `await page.locator("#capture").screenshot({path:${JSON.stringify(path)},${captureOptions},omitBackground:true});`
-    )).join(NEXT_PAINT_CODE);
+    for (const path of paths) {
+      await nextPaint(page);
+      await page.locator("#capture").screenshot({
+        path,
+        animations: "disabled",
+        scale: "css",
+        omitBackground: true,
+      });
+    }
   }
-  const code = [
-    "async (page) => {",
-    "await page.waitForFunction(() => globalThis.__cornerfillOracle?.ready === true ",
-    "|| Boolean(globalThis.__cornerfillOracle?.error), null, {timeout:15000});",
-    "const metadata = await page.evaluate(() => globalThis.__cornerfillOracle);",
-    "if (!metadata.ready) throw new Error(metadata.error || \"fixture failed\");",
-    calls,
-    "const lifecycle = await page.evaluate(() => typeof globalThis.__cornerfillOracleRunLifecycle === \"function\"",
-    "? globalThis.__cornerfillOracleRunLifecycle() : null);",
-    `return {...metadata,driverCaptureMethod:${JSON.stringify(captureMethod)},lifecycle};`,
-    "}",
-  ].join("");
-  if (process.env.CORNERFILL_DEBUG) console.log(`  run-code source: ${code}`);
-  return code;
+  const lifecycle = await page.evaluate(() => (
+    typeof globalThis.__cornerfillOracleRunLifecycle === "function"
+      ? globalThis.__cornerfillOracleRunLifecycle()
+      : null
+  ));
+  return Object.freeze({ ...metadata, driverCaptureMethod: captureMethod, lifecycle });
 }
 
 function opaquePairPaths(outputPath, compositeDirectory) {
@@ -343,8 +288,6 @@ function captureMetadata({
 
 async function captureBrowser({
   browser,
-  cli,
-  driverDirectory,
   compositesRoot,
   framesRoot,
   origin,
@@ -364,24 +307,30 @@ async function captureBrowser({
   const records = [];
   const firstMode = browser === "chrome" ? "native" : "candidate";
   const firstUrl = fixtureUrl(origin, selectedCases[0].id, firstMode);
-  try {
-    await runCli(cli, session, driverDirectory, ["open", firstUrl, "--browser", browser]);
-    await runCli(cli, session, driverDirectory, ["resize", "420", "360"]);
+  const errors = [];
+  let instance = null;
+  let context = null;
+  await runWithCleanup(async () => {
+    console.log(`  launch exact ${session}`);
+    instance = await BROWSER_TYPES[browser].launch({ headless: true });
+    context = await instance.newContext({ viewport: { width: 420, height: 360 } });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => errors.push(error));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(new Error(message.text()));
+    });
+    await page.goto(firstUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     for (let index = 0; index < selectedCases.length; index += 1) {
       const oracleCase = selectedCases[index];
       const frame = `frame_${String(index).padStart(4, "0")}.png`;
       if (browser === "chrome") {
-        await runCli(cli, session, driverDirectory, ["goto", fixtureUrl(origin, oracleCase.id, "native")]);
+        await page.goto(fixtureUrl(origin, oracleCase.id, "native"), {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
         const nativeAPath = join(nativeADirectory, frame);
         const nativeBPath = join(nativeBDirectory, frame);
-        const result = await runCli(
-          cli,
-          session,
-          driverDirectory,
-          ["run-code", screenshotCode([nativeAPath, nativeBPath])],
-          { raw: true },
-        );
-        const metadata = parseReturnedJson(result.stdout, `${oracleCase.id} native capture`);
+        const metadata = await captureFixture(page, [nativeAPath, nativeBPath]);
         if (!metadata.nativeSupported || !metadata.computed?.cornerShape) {
           throw new Error(
             `INVALID ORACLE: Chrome did not compute corner-shape for ${oracleCase.id}; `
@@ -410,19 +359,15 @@ async function captureBrowser({
         }));
       }
 
-      await runCli(cli, session, driverDirectory, ["goto", fixtureUrl(origin, oracleCase.id, "candidate")]);
+      await page.goto(fixtureUrl(origin, oracleCase.id, "candidate"), {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
       const candidatePath = join(candidateDirectory, frame);
       const opaquePairs = browser === "firefox"
         ? [opaquePairPaths(candidatePath, compositeDirectory)]
         : null;
-      const result = await runCli(
-        cli,
-        session,
-        driverDirectory,
-        ["run-code", screenshotCode([candidatePath], { opaquePairs })],
-        { raw: true },
-      );
-      const metadata = parseReturnedJson(result.stdout, `${oracleCase.id} candidate capture`);
+      const metadata = await captureFixture(page, [candidatePath], { opaquePairs });
       const expectedBackend = browser === "chrome"
         ? "static-data-url"
         : browser === "webkit"
@@ -453,16 +398,10 @@ async function captureBrowser({
         reconstruction: reconstruction?.map(({ diagnostics }) => diagnostics) ?? null,
       }));
     }
-  } finally {
-    try {
-      const close = await runCli(cli, session, driverDirectory, ["close"], { allowFailure: true });
-      if (close.status !== 0) {
-        console.error(`warning: failed to close Playwright session ${session}\n${close.stdout}${close.stderr}`);
-      }
-    } catch (error) {
-      console.error(`warning: failed to close Playwright session ${session}: ${error.message}`);
-    }
-  }
+    if (errors.length > 0) throw new AggregateError(errors, `${browser} emitted oracle errors`);
+  }, [
+    () => closePlaywrightSession(context, instance, `exact oracle session ${session}`),
+  ], `${browser} oracle capture and cleanup failed`);
   return Object.freeze(records);
 }
 
@@ -502,12 +441,9 @@ async function runOracle(options) {
       "Selected case requires texels.webp; set CORNERFILL_MARIO_TEXELS or pass --mario-texels=<path>",
     );
   }
-  const cli = locatePlaywrightCli();
-  const driverDirectory = join(runDirectory, "driver");
   const framesRoot = join(runDirectory, "frames");
   const compositesRoot = join(runDirectory, "composites");
   const reportsRoot = join(runDirectory, "reports");
-  mkdirSync(driverDirectory, { recursive: true });
   mkdirSync(framesRoot, { recursive: true });
   mkdirSync(reportsRoot, { recursive: true });
 
@@ -544,7 +480,7 @@ async function runOracle(options) {
     runDirectory,
     host: Object.freeze({ platform: platform(), release: release(), node: process.version }),
     configuration,
-    playwrightCli: sourceIdentity(cli),
+    playwright: sourceIdentity(require.resolve("playwright/package.json")),
     sources,
     assets: Object.freeze({ marioTexels: marioSource }),
     cases: Object.freeze(selectedCases.map((entry, index) => Object.freeze({
@@ -565,8 +501,6 @@ async function runOracle(options) {
       console.log(`capture ${browser}: ${selectedCases.length} case(s), one session`);
       const records = await captureBrowser({
         browser,
-        cli,
-        driverDirectory,
         compositesRoot,
         framesRoot,
         origin: server.origin,
@@ -639,12 +573,18 @@ function listCases() {
   }
 }
 
+function errorText(error) {
+  const own = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if (!(error instanceof AggregateError)) return own;
+  return [own, ...error.errors.map((cause) => `  ${errorText(cause).replaceAll("\n", "\n  ")}`)].join("\n");
+}
+
 try {
   const options = parseArguments(process.argv.slice(2));
   if (options.command === "help") usage();
   else if (options.command === "list") listCases();
   else await runOracle(options);
 } catch (error) {
-  console.error(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+  console.error(errorText(error));
   process.exitCode = 1;
 }

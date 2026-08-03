@@ -48,10 +48,10 @@ test("syntax support alone cannot qualify native corner-shape", () => {
   assert.equal(result.capabilities.syntax, "supported");
   assert.equal(result.capabilities.computedValues, "unsupported");
   assert.equal(result.capabilities.outerPaint, "unobserved");
-  assert.deepEqual(result.unresolved, ["computedValues"]);
+  assert.deepEqual(result.unresolved, ["computedValues", "shapedBehavior"]);
 });
 
-test("unobservable shaped behavior does not demote or invalidate computed native support", () => {
+test("unobservable shaped behavior cannot qualify native delegation", () => {
   let attempts = 0;
   const isolatedDocument = (size) => {
     let probe = null;
@@ -105,12 +105,16 @@ test("unobservable shaped behavior does not demote or invalidate computed native
     documentElement: { append() {} },
     defaultView: { CSS: { supports: () => true } },
   };
+  const unobservable = qualifyNativeCornerShape(document);
+  assert.equal(unobservable.qualified, false);
+  assert.equal(unobservable.tiers.computedValuesQualified, true);
+  assert.equal(unobservable.tiers.basicPaintQualified, false);
+  assert.equal(unobservable.capabilities.shapedHitTesting, "unobserved");
   const qualified = qualifyNativeCornerShape(document);
   assert.equal(qualified.qualified, true);
-  assert.equal(qualified.capabilities.shapedHitTesting, "unobserved");
-  assert.equal(qualifyNativeCornerShape(document), qualified);
+  assert.equal(qualified.tiers.basicPaintQualified, true);
   assert.equal(qualified.capabilities.innerBorderContour, "unobserved");
-  assert.equal(attempts, 1);
+  assert.equal(attempts, 2);
 });
 
 test("native computed-value qualification falls back to the host document when iframe isolation is blocked", () => {

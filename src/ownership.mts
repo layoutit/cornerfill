@@ -12,7 +12,9 @@ export type OwnershipRoot = Document | ShadowRoot;
 
 export interface OwnershipSnapshot {
   readonly borderOwner: string | null;
+  readonly outlineOwner: string | null;
   readonly owner: string | null;
+  readonly shadowOwner: string | null;
   readonly surfaceOwner: string | null;
 }
 
@@ -20,10 +22,12 @@ export interface OwnershipEntry {
   readonly border: unknown;
   readonly disposed: boolean;
   readonly element: CornerfillElement;
+  readonly outline: unknown;
   readonly ownershipRoot: OwnershipRoot;
   ownershipToken: string | null;
   ownershipVerified: boolean;
   readonly surface: CornerfillSurface | null;
+  readonly shadow: unknown;
 }
 
 interface OwnershipSurface {
@@ -38,6 +42,8 @@ interface OwnershipSurfaceRule {
 
 export const OWNERSHIP_ATTRIBUTE = "data-cornerfill-owned";
 export const OWNED_BORDER_ATTRIBUTE = "data-cornerfill-owned-border";
+export const OWNED_OUTLINE_ATTRIBUTE = "data-cornerfill-owned-outline";
+export const OWNED_SHADOW_ATTRIBUTE = "data-cornerfill-owned-shadow";
 export const OWNED_SURFACE_ATTRIBUTE = "data-cornerfill-owned-surface";
 export const AUTHOR_IMPORTANT_OWNERSHIP_REASON =
   "Author !important background, border, or radius declarations that outrank Cornerfill ownership are rejected.";
@@ -96,8 +102,6 @@ function stylesheetText(id: string): string {
     + `  background-clip: border-box !important;\n`
     + `  background-blend-mode: normal !important;\n`
     + `  background-attachment: scroll !important;\n`
-    + `  box-shadow: none !important;\n`
-    + `  outline: none !important;\n`
     + `  border-top-color: transparent !important;\n`
     + `  border-right-color: transparent !important;\n`
     + `  border-bottom-color: transparent !important;\n`
@@ -106,6 +110,12 @@ function stylesheetText(id: string): string {
     + `  border-top-right-radius: 0 !important;\n`
     + `  border-bottom-right-radius: 0 !important;\n`
     + `  border-bottom-left-radius: 0 !important;\n`
+    + `}\n`
+    + `${selector}[${OWNED_SHADOW_ATTRIBUTE}="${id}"] {\n`
+    + `  box-shadow: none !important;\n`
+    + `}\n`
+    + `${selector}[${OWNED_OUTLINE_ATTRIBUTE}="${id}"] {\n`
+    + `  outline: none !important;\n`
     + `}\n`;
 }
 
@@ -113,6 +123,8 @@ export function captureOwnershipState(element: CornerfillElement): Readonly<Owne
   return Object.freeze({
     owner: element.getAttribute(OWNERSHIP_ATTRIBUTE),
     borderOwner: element.getAttribute(OWNED_BORDER_ATTRIBUTE),
+    outlineOwner: element.getAttribute(OWNED_OUTLINE_ATTRIBUTE),
+    shadowOwner: element.getAttribute(OWNED_SHADOW_ATTRIBUTE),
     surfaceOwner: element.getAttribute(OWNED_SURFACE_ATTRIBUTE),
   });
 }
@@ -125,6 +137,10 @@ export function restoreOwnershipState(
   else element.setAttribute(OWNERSHIP_ATTRIBUTE, snapshot.owner);
   if (snapshot.borderOwner === null) element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
   else element.setAttribute(OWNED_BORDER_ATTRIBUTE, snapshot.borderOwner);
+  if (snapshot.outlineOwner === null) element.removeAttribute(OWNED_OUTLINE_ATTRIBUTE);
+  else element.setAttribute(OWNED_OUTLINE_ATTRIBUTE, snapshot.outlineOwner);
+  if (snapshot.shadowOwner === null) element.removeAttribute(OWNED_SHADOW_ATTRIBUTE);
+  else element.setAttribute(OWNED_SHADOW_ATTRIBUTE, snapshot.shadowOwner);
   if (snapshot.surfaceOwner === null) element.removeAttribute(OWNED_SURFACE_ATTRIBUTE);
   else element.setAttribute(OWNED_SURFACE_ATTRIBUTE, snapshot.surfaceOwner);
 }
@@ -265,6 +281,10 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     entry.element.setAttribute(OWNERSHIP_ATTRIBUTE, this.id);
     if (entry.border) entry.element.setAttribute(OWNED_BORDER_ATTRIBUTE, this.id);
     else entry.element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
+    if (entry.shadow) entry.element.setAttribute(OWNED_SHADOW_ATTRIBUTE, this.id);
+    else entry.element.removeAttribute(OWNED_SHADOW_ATTRIBUTE);
+    if (entry.outline) entry.element.setAttribute(OWNED_OUTLINE_ATTRIBUTE, this.id);
+    else entry.element.removeAttribute(OWNED_OUTLINE_ATTRIBUTE);
     if (verify) this.assertStylesApplied(entry);
   }
 
@@ -290,14 +310,20 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
   ): T {
     const ownership = entry.element.getAttribute(OWNERSHIP_ATTRIBUTE);
     const ownedBorder = entry.element.getAttribute(OWNED_BORDER_ATTRIBUTE);
+    const ownedOutline = entry.element.getAttribute(OWNED_OUTLINE_ATTRIBUTE);
+    const ownedShadow = entry.element.getAttribute(OWNED_SHADOW_ATTRIBUTE);
     if (ownership !== this.id) return callback(this.view.getComputedStyle(entry.element));
     entry.element.removeAttribute(OWNERSHIP_ATTRIBUTE);
     entry.element.removeAttribute(OWNED_BORDER_ATTRIBUTE);
+    entry.element.removeAttribute(OWNED_OUTLINE_ATTRIBUTE);
+    entry.element.removeAttribute(OWNED_SHADOW_ATTRIBUTE);
     try {
       return callback(this.view.getComputedStyle(entry.element));
     } finally {
       entry.element.setAttribute(OWNERSHIP_ATTRIBUTE, ownership);
       if (ownedBorder !== null) entry.element.setAttribute(OWNED_BORDER_ATTRIBUTE, ownedBorder);
+      if (ownedOutline !== null) entry.element.setAttribute(OWNED_OUTLINE_ATTRIBUTE, ownedOutline);
+      if (ownedShadow !== null) entry.element.setAttribute(OWNED_SHADOW_ATTRIBUTE, ownedShadow);
     }
   }
 
@@ -328,7 +354,13 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
       && computed.backgroundAttachment === "scroll"
       && computed.backgroundSize === "100% 100%"
       && new Set(["0% 0%", "0px 0px"]).has(computed.backgroundPosition);
-    const effectsOwned = computed.boxShadow === "none" && computed.outlineStyle === "none";
+    const effectsOwned = (!entry.shadow || (
+      entry.element.getAttribute(OWNED_SHADOW_ATTRIBUTE) === this.id
+      && computed.boxShadow === "none"
+    )) && (!entry.outline || (
+      entry.element.getAttribute(OWNED_OUTLINE_ATTRIBUTE) === this.id
+      && computed.outlineStyle === "none"
+    ));
     if (!expectedImage || !transparent || !radiiOwned || !borderOwned || !layoutOwned || !effectsOwned) {
       throw new TypeError(
         `${AUTHOR_IMPORTANT_OWNERSHIP_REASON} `
@@ -342,20 +374,44 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     this.verificationEntries.set(entry, isCurrent);
     if (!this.verification) {
       this.verification = new Promise<Map<Entry, unknown>>((resolve) => {
-        this.view.setTimeout(() => {
-          const failures = new Map<Entry, unknown>();
-          const entries = [...this.verificationEntries];
+        const failures = new Map<Entry, unknown>();
+        let pending = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
+        const drain = () => {
+          for (const [candidate, current] of this.verificationEntries) {
+            pending.set(candidate, Object.freeze({ attempts: 0, current }));
+          }
           this.verificationEntries.clear();
-          for (const [candidate, current] of entries) {
-            if (!current() || !candidate.surface) continue;
+        };
+        const verify = () => {
+          drain();
+          const retry = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
+          for (const [candidate, state] of pending) {
+            if (!state.current() || !candidate.surface) continue;
             try {
               this.assertStylesApplied(candidate);
             } catch (error) {
-              failures.set(candidate, error);
+              if (candidate.surface.backend === "webkit-canvas" && state.attempts < 1) {
+                retry.set(candidate, Object.freeze({
+                  attempts: state.attempts + 1,
+                  current: state.current,
+                }));
+              } else {
+                failures.set(candidate, error);
+              }
             }
           }
-          resolve(failures);
-        }, 0);
+          pending = retry;
+          if (pending.size === 0) {
+            resolve(failures);
+            return;
+          }
+          if (typeof this.view.requestAnimationFrame === "function") {
+            this.view.requestAnimationFrame(verify);
+          } else {
+            this.view.setTimeout(verify, 0);
+          }
+        };
+        this.view.setTimeout(verify, 0);
       }).finally(() => {
         this.verification = null;
       });

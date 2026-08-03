@@ -1,7 +1,7 @@
 {
   "name": "cornerfill",
   "version": "0.0.1",
-  "description": "CSS corner-shape polyfill for Safari and Firefox",
+  "description": "Experimental paint-only CSS corner-shape polyfill for Safari and Firefox",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
@@ -80,8 +80,7 @@
     "oracle:mario": "npm run build && node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=mario-texel-face"
   },
   "devDependencies": {
-    "@playwright/cli": "0.1.17",
-    "playwright": "1.62.0-alpha-1783623505000",
+    "playwright": "1.62.1",
     "typescript": "7.0.2"
   }
 }

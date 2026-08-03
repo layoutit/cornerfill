@@ -104,6 +104,17 @@ function nativeController(
       }
       return controller.refresh();
     },
+    replaceStylesheetSource(
+      _stylesheet: CSSStyleSheet | HTMLLinkElement | HTMLStyleElement,
+      source: string,
+    ) {
+      if (typeof source !== "string") {
+        return Promise.reject(new TypeError(
+          "replaceStylesheetSource() requires the exact standard CSS source",
+        ));
+      }
+      return controller.refresh();
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;

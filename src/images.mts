@@ -61,20 +61,26 @@ function waitForImage(
     timer = view.setTimeout(() => cancel(
       new Error(`image load timed out after ${timeoutMs}ms: ${absoluteUrl}`),
     ), timeoutMs);
+    image.addEventListener("error", failed, { once: true });
+    const decodeFailed = () => {
+      if (settled) return;
+      if (image.naturalWidth > 0) {
+        finish();
+        return;
+      }
+      image.addEventListener("load", loaded, { once: true });
+      if (image.naturalWidth > 0) finish();
+    };
     if (typeof image.decode === "function") {
       try {
-        image.decode().then(() => finish()).catch((error) => {
-          if (image.complete && image.naturalWidth > 0) finish();
-          else finish(error);
-        });
-      } catch (error) {
-        finish(error);
+        image.decode().then(() => finish()).catch(decodeFailed);
+      } catch {
+        decodeFailed();
       }
-    } else if (image.complete && image.naturalWidth > 0) {
-      finish();
     } else {
       image.addEventListener("load", loaded, { once: true });
-      image.addEventListener("error", failed, { once: true });
+      if (image.complete && image.naturalWidth > 0) finish();
+      else if (image.complete) failed();
     }
   });
   return Object.freeze({ promise, cancel: (reason?: unknown) => cancel(reason) });

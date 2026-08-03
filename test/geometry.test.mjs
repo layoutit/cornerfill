@@ -155,6 +155,22 @@ test("diagonally opposing concave corners receive a deterministic hull scale", (
   assert.equal(convexPolygonsOverlap(geometry.carveOuts[0], geometry.carveOuts[2]), false);
 });
 
+test("mixed concave and convex opposite corners are scaled to a simple contour", () => {
+  const geometry = buildCornerGeometry({
+    width: 100,
+    height: 100,
+    borderRadius: [
+      { rx: 90, ry: 90 },
+      { rx: 0, ry: 0 },
+      { rx: 90, ry: 90 },
+      { rx: 0, ry: 0 },
+    ],
+    cornerShape: [Number.NEGATIVE_INFINITY, 1, 1, 1],
+  });
+  assert.ok(geometry.oppositeScale > 0 && geometry.oppositeScale < 1);
+  assertSimpleContour(geometry.contour);
+});
+
 test("notch and finite concave limits remain nonzero, finite, and non-overlapping", () => {
   for (const shape of [Number.NEGATIVE_INFINITY, -54, -20, -4]) {
     const geometry = buildCornerGeometry({

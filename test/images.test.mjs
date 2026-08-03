@@ -94,3 +94,32 @@ test("image cache times out and aborts an active pending load", async () => {
   assert.equal(cache.stats().entries, 0);
   assert.equal(cache.stats().loading, 0);
 });
+
+test("image cache waits for load when decode rejects before loading completes", async () => {
+  class DecodeFallbackImage extends FakeImage {
+    static current;
+
+    constructor() {
+      super();
+      this.complete = false;
+      this.listeners = new Map();
+      DecodeFallbackImage.current = this;
+    }
+
+    decode() { return Promise.reject(new DOMException("Loading was canceled.", "EncodingError")); }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    removeEventListener(type) { this.listeners.delete(type); }
+    emit(type) { this.listeners.get(type)?.(); }
+  }
+  const cache = new ImageCache({
+    baseURI: "https://cornerfill.test/",
+    defaultView: { Image: DecodeFallbackImage, clearTimeout, setTimeout },
+  });
+  const lease = cache.acquire("eventually-loaded.webp");
+  await Promise.resolve();
+  await Promise.resolve();
+  DecodeFallbackImage.current.complete = true;
+  DecodeFallbackImage.current.emit("load");
+  assert.equal(await lease.promise, DecodeFallbackImage.current);
+  lease.release();
+});

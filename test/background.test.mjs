@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   captureComputedPaint,
   normalizePaintDescriptor,
+  paintDescriptorKey,
   parseBackgroundPosition,
   parseBackgroundRepeat,
   resolvePaintForBox,
@@ -55,7 +56,19 @@ test("repeat, round, and space produce bounded tile plans", () => {
   }), 100, 40, image);
   assert.ok(Math.abs(round.backgroundSize[0] - 100 / 3) < 1e-12);
   assert.ok(Math.abs(round.backgroundSize[1] - 50 / 3) < 1e-12);
-  assert.deepEqual(round.tilePlan.x, [0, 100 / 3, 200 / 3]);
+  [0, 100 / 3, 200 / 3].forEach((expected, index) => {
+    assert.ok(Math.abs(round.tilePlan.x[index] - expected) < 1e-12);
+  });
+  const positionedRound = resolvePaintForBox(normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundSize: "30px 15px",
+    backgroundPosition: "10px 0",
+    repeat: "round no-repeat",
+  }), 100, 40, image);
+  [-70 / 3, 10, 130 / 3, 230 / 3].forEach((expected, index) => {
+    assert.ok(Math.abs(positionedRound.tilePlan.x[index] - expected) < 1e-12);
+  });
 
   const spaced = resolvePaintForBox(normalizePaintDescriptor({
     kind: "image",
@@ -66,6 +79,13 @@ test("repeat, round, and space produce bounded tile plans", () => {
   }), 100, 40, image);
   assert.deepEqual(spaced.tilePlan.x, [0, 35, 70]);
   assert.deepEqual(spaced.tilePlan.y, [25]);
+});
+
+test("decoded image identity participates in the paint key", () => {
+  const first = normalizePaintDescriptor({ kind: "image", image: { width: 1, height: 1 } });
+  const second = normalizePaintDescriptor({ kind: "image", image: { width: 1, height: 1 } });
+  assert.notEqual(paintDescriptorKey(first), paintDescriptorKey(second));
+  assert.equal(paintDescriptorKey(first), paintDescriptorKey(first));
 });
 
 test("zero-sized raster backgrounds draw no tiles", () => {

@@ -17,7 +17,9 @@ import { createHash } from "node:crypto";
 import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PLAYWRIGHT_CLI_PACKAGE = "@playwright/cli@0.1.17";
+const PLAYWRIGHT_PACKAGE = `playwright@${JSON.parse(
+  readFileSync(join(PROJECT_ROOT, "package.json"), "utf8"),
+).devDependencies.playwright}`;
 const require = createRequire(import.meta.url);
 
 function moduleFiles(directory, extension) {
@@ -108,9 +110,9 @@ async function startServer() {
   };
 }
 
-async function drivePointerStates(page) {
+async function driveBrowserStates(page) {
   let stage = "";
-  while (stage !== "done") {
+  while (true) {
     await page.waitForFunction((previous) => {
       if (document.documentElement.dataset.runtimeRegressions !== undefined) return true;
       const current = globalThis.__CORNERFILL_POINTER_DRIVER__?.stage;
@@ -122,15 +124,6 @@ async function drivePointerStates(page) {
       await page.locator(".cornerfill-auto-hover").hover();
       stage = "hover-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "hover-driven"; });
-    } else if (stage === "active-ready") {
-      await page.locator(".cornerfill-auto-active").hover();
-      await page.mouse.down();
-      stage = "active-driven";
-      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "active-driven"; });
-    } else if (stage === "active-release") {
-      await page.mouse.up();
-      stage = "active-released";
-      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "active-released"; });
     } else if (stage === "media-dark-ready") {
       await page.emulateMedia({ colorScheme: "dark" });
       stage = "media-dark-driven";
@@ -139,6 +132,11 @@ async function drivePointerStates(page) {
       await page.emulateMedia({ colorScheme: "light" });
       stage = "media-light-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "media-light-driven"; });
+    } else if (/^keyboard-tab-\d+-ready$/u.test(stage)) {
+      await page.keyboard.press("Tab");
+      const driven = stage.replace(/-ready$/u, "-driven");
+      stage = driven;
+      await page.evaluate((value) => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = value; }, driven);
     }
   }
 }
@@ -171,7 +169,7 @@ await runWithCleanup(async () => {
         waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
-      await drivePointerStates(page);
+      await driveBrowserStates(page);
       await page.waitForFunction(() => (
         document.documentElement.dataset.runtimeRegressions !== undefined
       ), null, { timeout: 120_000 });
@@ -193,7 +191,7 @@ await runWithCleanup(async () => {
 writeFileSync(join(out, "manifest.json"), `${JSON.stringify({
   schema: "cornerfill-runtime-browser-regression-run@2",
   status: "COMPLETE",
-  playwrightCliPackage: PLAYWRIGHT_CLI_PACKAGE,
+  playwrightPackage: PLAYWRIGHT_PACKAGE,
   sources: Object.fromEntries(SOURCE_FILES.map((path) => [
     path,
     sourceIdentity(join(PROJECT_ROOT, path)),

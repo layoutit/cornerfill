@@ -898,8 +898,7 @@ function repeatedAxisPositions({
   }
   let start = position;
   let step = tileSize;
-  if (mode === "round") start = areaStart;
-  else if (mode === "space") {
+  if (mode === "space") {
     const count = Math.floor(areaSize / tileSize);
     step = tileSize + (areaSize - count * tileSize) / (count - 1);
     start = areaStart;
@@ -1134,6 +1133,20 @@ export function resolvePaintForBox(
   });
 }
 
+const decodedImageIdentities = new WeakMap<object, number>();
+let nextDecodedImageIdentity = 1;
+
+function decodedImageIdentity(image: CornerfillRasterSource | undefined): number | null {
+  if (!image) return null;
+  let identity = decodedImageIdentities.get(image);
+  if (identity === undefined) {
+    identity = nextDecodedImageIdentity;
+    nextDecodedImageIdentity += 1;
+    decodedImageIdentities.set(image, identity);
+  }
+  return identity;
+}
+
 function backgroundLayerKey(
   descriptor: NormalizedBackgroundLayer,
 ): Readonly<Record<string, unknown>> {
@@ -1141,6 +1154,7 @@ function backgroundLayerKey(
     return {
       kind: descriptor.kind,
       url: descriptor.url ?? "decoded-image",
+      image: decodedImageIdentity(descriptor.image),
       sourceSize: descriptor.sourceSize ?? null,
       size: descriptor.backgroundSizeSpec,
       position: descriptor.backgroundPositionSpec,

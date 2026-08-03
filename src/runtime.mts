@@ -40,6 +40,8 @@ import {
   AUTHOR_IMPORTANT_OWNERSHIP_REASON,
   LIVE_IMAGE_PROPERTY,
   OWNED_BORDER_ATTRIBUTE,
+  OWNED_OUTLINE_ATTRIBUTE,
+  OWNED_SHADOW_ATTRIBUTE,
   OWNED_SURFACE_ATTRIBUTE,
   OWNERSHIP_ATTRIBUTE,
   OwnershipManager,
@@ -115,6 +117,7 @@ import {
   splitTopLevelCommas,
   splitTopLevelWhitespace,
 } from "./values.mjs";
+import { cssDeclarationSignature } from "./css-syntax.mjs";
 import type {
   BorderRadiusDeclarations,
   CornerShapeSource,
@@ -794,6 +797,10 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
   authorImportantOwnership: Object.freeze({
     supported: false,
     reason: AUTHOR_IMPORTANT_OWNERSHIP_REASON,
+  }),
+  explicitCascadeObservation: Object.freeze({
+    supported: false,
+    reason: "The explicit runtime observes host class, inline style, content, and size; other cascade inputs require handle.refresh() or controller.refresh().",
   }),
   preparedLayoutObservation: Object.freeze({
     supported: false,
@@ -1560,17 +1567,10 @@ function inlineCarrierSignature(element: CornerfillElement): string {
 }
 
 function visibilityAffectingInlineSignature(value: unknown): string {
-  return String(value ?? "")
-    .split(";")
-    .map((declaration) => declaration.trim())
-    .filter((declaration) => {
-      const separator = declaration.indexOf(":");
-      if (separator < 0) return false;
-      const property = declaration.slice(0, separator).trim().toLowerCase();
-      return property === "visibility" || property === "all"
-        || (property.startsWith("--") && property !== LIVE_IMAGE_PROPERTY);
-    })
-    .join(";");
+  return cssDeclarationSignature(value, (property) => (
+    property === "visibility" || property === "all"
+      || (property.startsWith("--") && property !== LIVE_IMAGE_PROPERTY)
+  ));
 }
 
 function styleMutationMayAffectVisibility(record: MutationRecord): boolean {
@@ -1580,29 +1580,22 @@ function styleMutationMayAffectVisibility(record: MutationRecord): boolean {
 }
 
 function paintAffectingInlineSignature(value: unknown, ignorePositionAxes = false): string {
-  return String(value ?? "")
-    .split(";")
-    .map((declaration) => declaration.trim())
-    .filter((declaration) => {
-      const separator = declaration.indexOf(":");
-      if (separator < 0) return false;
-      const property = declaration.slice(0, separator).trim().toLowerCase();
-      if (property === LIVE_IMAGE_PROPERTY
-        || property === "visibility"
-        || (ignorePositionAxes && property === "background-position-x")
-        || (ignorePositionAxes && property === "background-position-y")
-        || property === "opacity"
-        || property === "filter"
-        || property === "will-change"
-        || property === "translate"
-        || property === "rotate"
-        || property === "scale"
-        || property === "perspective"
-        || property === "perspective-origin") return false;
-      return property !== "transform" && !property.startsWith("transform-")
-        && property !== "-webkit-transform" && !property.startsWith("-webkit-transform-");
-    })
-    .join(";");
+  return cssDeclarationSignature(value, (property) => {
+    if (property === LIVE_IMAGE_PROPERTY
+      || property === "visibility"
+      || (ignorePositionAxes && property === "background-position-x")
+      || (ignorePositionAxes && property === "background-position-y")
+      || property === "opacity"
+      || property === "filter"
+      || property === "will-change"
+      || property === "translate"
+      || property === "rotate"
+      || property === "scale"
+      || property === "perspective"
+      || property === "perspective-origin") return false;
+    return property !== "transform" && !property.startsWith("transform-")
+      && property !== "-webkit-transform" && !property.startsWith("-webkit-transform-");
+  });
 }
 
 function styleMutationMayAffectPaint(record: MutationRecord, ignorePositionAxes = false): boolean {
@@ -1637,16 +1630,9 @@ function mutationStylesheetRoot(record: MutationRecord): Node | null {
 }
 
 function positionAffectingInlineSignature(value: unknown): string {
-  return String(value ?? "")
-    .split(";")
-    .map((declaration) => declaration.trim())
-    .filter((declaration) => {
-      const separator = declaration.indexOf(":");
-      if (separator < 0) return false;
-      const property = declaration.slice(0, separator).trim().toLowerCase();
-      return property === "background-position-x" || property === "background-position-y";
-    })
-    .join(";");
+  return cssDeclarationSignature(value, (property) => (
+    property === "background-position-x" || property === "background-position-y"
+  ));
 }
 
 function styleMutationMayAffectPosition(record: MutationRecord): boolean {
@@ -1955,7 +1941,12 @@ class CornerfillController {
 
   _retainOwnershipRoot(root: OwnershipRoot, observe: boolean): void {
     this.ownershipRootCounts.set(root, (this.ownershipRootCounts.get(root) ?? 0) + 1);
-    if (observe) this._installObservers(root);
+    try {
+      if (observe) this._installObservers(root);
+    } catch (error) {
+      this._releaseOwnershipRoot(root);
+      throw error;
+    }
   }
 
   _releaseOwnershipRoot(root: OwnershipRoot): void {
@@ -2037,6 +2028,8 @@ class CornerfillController {
           "data-cornerfill-shape",
           OWNERSHIP_ATTRIBUTE,
           OWNED_BORDER_ATTRIBUTE,
+          OWNED_OUTLINE_ATTRIBUTE,
+          OWNED_SHADOW_ATTRIBUTE,
           OWNED_SURFACE_ATTRIBUTE,
         ],
         attributeOldValue: true,
@@ -2103,6 +2096,8 @@ class CornerfillController {
         if (record.attributeName !== "style") {
           if ((record.attributeName === OWNERSHIP_ATTRIBUTE
             || record.attributeName === OWNED_BORDER_ATTRIBUTE
+            || record.attributeName === OWNED_OUTLINE_ATTRIBUTE
+            || record.attributeName === OWNED_SHADOW_ATTRIBUTE
             || record.attributeName === OWNED_SURFACE_ATTRIBUTE)
             && this.ownership.isApplied(entry)) {
             this.counters.ignoredStyleMutations += 1;
@@ -2408,8 +2403,7 @@ class CornerfillController {
           if (!entry.initialized && entry.ready) await entry.ready;
           if (!this._entryIsCurrent(entry)) continue;
           if (revision > entry.committedRevision) {
-            const committed = await this._refreshEntry(entry, revision);
-            if (committed === false) continue;
+            await this._refreshEntry(entry, revision);
             this._assertEntryCurrent(entry, revision);
             entry.committedRevision = revision;
           }
@@ -2447,6 +2441,8 @@ class CornerfillController {
     let geometry = this.geometryCache.get(key);
     if (geometry) {
       this.counters.geometryCacheHits += 1;
+      this.geometryCache.delete(key);
+      this.geometryCache.set(key, geometry);
       return { key, geometry };
     }
     geometry = buildCornerGeometry({
@@ -3284,7 +3280,7 @@ class CornerfillController {
     if (entry.visible) {
       const backend = entry.backend;
       if (!backend) throw new Error("prepared surface backend is unavailable");
-      this._assertSurfaceBudget(snapshot.width, snapshot.height, snapshot.dpr);
+      this._assertSurfaceBudget(snapshot.width, snapshot.height, snapshot.dpr, entry);
       replacement = this._createSurface(snapshot.width, snapshot.height, snapshot.dpr, backend);
       try {
         replacementPaint = paintCornerfill(replacement.context, {
@@ -3367,35 +3363,62 @@ class CornerfillController {
     this._clearError(entry);
   }
 
+  async _runPreparedLayout(
+    entry: RuntimeEntry,
+    config: Readonly<CornerfillPreparedResizeConfig>,
+  ): Promise<CornerfillEntryExplanation> {
+    this._assertEntryCurrent(entry);
+    const revision = ++entry.revision;
+    let snapshot: Readonly<PreparedLayoutSnapshot> | null = null;
+    try {
+      snapshot = await this._resolvePreparedLayout(entry, config, revision, false);
+      this._assertEntryCurrent(entry, revision);
+      this._commitPreparedLayout(entry, snapshot, "prepared-layout-update");
+      entry.committedRevision = revision;
+      return entryExplanation(entry);
+    } catch (error) {
+      snapshot?.paintLeases.rollback();
+      if (error instanceof StaleEntryWorkError && !this._entryIsCurrent(entry)) {
+        return entryExplanation(entry);
+      }
+      this._recordError(entry, error);
+      throw error;
+    }
+  }
+
+  _queuePreparedLayout(
+    entry: RuntimeEntry,
+    operation: () => Promise<CornerfillEntryExplanation>,
+  ): Promise<CornerfillEntryExplanation> {
+    const predecessor = entry.preparedLayoutChain ?? entry.ready;
+    if (!predecessor) throw new Error("prepared entry initialization has not started");
+    const queued = predecessor.then(operation);
+    entry.preparedLayoutChain = queued.catch(() => {});
+    return queued;
+  }
+
   _resizePrepared(
     element: CornerfillElement,
     config: Readonly<CornerfillPreparedResizeConfig> = {},
   ): Promise<CornerfillEntryExplanation> {
     const entry = this.entryByElement.get(element);
     if (!entry || entry.disposed || !entry.prepared) throw new Error("prepared element is not attached");
-    const predecessor = entry.preparedLayoutChain ?? entry.ready;
-    if (!predecessor) throw new Error("prepared entry initialization has not started");
-    const operation = predecessor.then(async () => {
+    return this._queuePreparedLayout(entry, () => this._runPreparedLayout(entry, config));
+  }
+
+  _setPreparedCornerShape(
+    entry: RuntimeEntry,
+    cornerShape: CornerShapeSource,
+  ): Promise<CornerfillEntryExplanation> {
+    return this._queuePreparedLayout(entry, async () => {
       this._assertEntryCurrent(entry);
-      const revision = ++entry.revision;
-      let snapshot: Readonly<PreparedLayoutSnapshot> | null = null;
-      try {
-        snapshot = await this._resolvePreparedLayout(entry, config, revision, false);
-        this._assertEntryCurrent(entry, revision);
-        this._commitPreparedLayout(entry, snapshot, "prepared-layout-update");
-        entry.committedRevision = revision;
+      const resolved = resolveCornerShape(cornerShape);
+      if (entry.geometry?.shapeParameters.every((value, index) => Object.is(value, resolved[index]))) {
+        entry.preparedCornerShape = cornerShape;
         return entryExplanation(entry);
-      } catch (error) {
-        snapshot?.paintLeases.rollback();
-        if (error instanceof StaleEntryWorkError && !this._entryIsCurrent(entry)) {
-          return entryExplanation(entry);
-        }
-        this._recordError(entry, error);
-        throw error;
       }
+      return this._runPreparedLayout(entry, { cornerShape });
     });
-    entry.preparedLayoutChain = operation.catch(() => {});
-    return operation;
   }
 
   async _initializePreparedEntry(
@@ -3529,7 +3552,13 @@ class CornerfillController {
       element,
       native: true,
       prepared: false,
-      ownershipSnapshot: Object.freeze({ borderOwner: null, owner: null, surfaceOwner: null }),
+      ownershipSnapshot: Object.freeze({
+        borderOwner: null,
+        outlineOwner: null,
+        owner: null,
+        shadowOwner: null,
+        surfaceOwner: null,
+      }),
       ownershipRoot: this.document,
       initialized: true,
       committedRevision: 0,
@@ -3672,11 +3701,7 @@ class CornerfillController {
           return Promise.resolve(entryExplanation(entry));
         }
         if (entry.prepared) {
-          if (entry.geometry?.shapeParameters?.every((value, index) => Object.is(value, cornerShape[index]))) {
-            entry.preparedCornerShape = cornerShape;
-            return Promise.resolve(entryExplanation(entry));
-          }
-          return controller._resizePrepared(entry.element, { cornerShape });
+          return controller._setPreparedCornerShape(entry, cornerShape);
         }
         const state = entry.state;
         if (!state) throw new TypeError("corner-shape interpolation requires a dynamic Cornerfill entry");

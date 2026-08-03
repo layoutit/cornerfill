@@ -154,18 +154,9 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   const attributed = host();
   const hover = host();
   hover.className = "cornerfill-auto-hover";
-  const active = host();
-  active.className = "cornerfill-auto-active";
-  const form = host();
-  form.className = "cornerfill-auto-form";
-  const formControl = document.createElement("input");
-  formControl.type = "checkbox";
-  form.append(formControl);
   const toggle = document.createElement("details");
   toggle.className = "cornerfill-auto-toggle";
   Object.assign(toggle.style, { width: "12px", height: "10px", background: "red" });
-  const target = host(document.body, "cornerfill-auto-target");
-  target.className = "cornerfill-auto-target";
   const escaped = host();
   escaped.className = "cornerfill:escaped";
   document.body.append(toggle);
@@ -281,17 +272,13 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
       "#cornerfill-auto-by-id{corner-shape:bevel;border-radius:5px}",
       "[data-cornerfill-trigger]{corner-shape:bevel;border-radius:5px}",
       ".cornerfill-auto-hover:hover{corner-shape:bevel;border-radius:5px}",
-      ".cornerfill-auto-active:active{corner-shape:bevel;border-radius:5px}",
-      ".cornerfill-auto-form:has(input:checked){corner-shape:bevel;border-radius:5px}",
       ".cornerfill-auto-toggle:open{corner-shape:bevel;border-radius:5px}",
-      ".cornerfill-auto-target:target{corner-shape:bevel;border-radius:5px}",
       ".cornerfill-auto-fullscreen:fullscreen{corner-shape:bevel;border-radius:5px}",
     ]) cssomStyle.sheet.insertRule(rule, cssomStyle.sheet.cssRules.length);
     await waitFor(() => auto.explain(byId)?.status === "active", "id selector attachment");
     const stateObservation = auto.explain().automatic.observation;
     equal(stateObservation.events, [
-      "change", "focusin", "focusout", "fullscreenchange", "hashchange", "input", "pointercancel",
-      "pointerdown", "pointerout", "pointerover", "pointerup", "popstate", "resize", "toggle",
+      "focusin", "focusout", "fullscreenchange", "pointerout", "pointerover", "resize", "toggle",
     ], "selector-derived state listener inventory was wrong");
     assert(stateObservation.attributes.includes("id"), "id selector dependency was not observed");
     assert(stateObservation.attributes.includes("data-cornerfill-trigger"), "attribute selector dependency was not observed");
@@ -301,12 +288,6 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
       globalThis.__CORNERFILL_POINTER_DRIVER__ = driver;
       await waitFor(() => driver.stage === "hover-driven", "hover driver");
       await waitFor(() => auto.explain(hover)?.status === "active", "hover-state selector attachment");
-      driver.stage = "active-ready";
-      await waitFor(() => driver.stage === "active-driven", "active driver");
-      await waitFor(() => auto.explain(active)?.status === "active", "active-state selector attachment");
-      driver.stage = "active-release";
-      await waitFor(() => driver.stage === "active-released", "active release driver");
-      await waitFor(() => auto.explain(active) === null, "active-state selector detachment");
       driver.stage = "media-dark-ready";
       await waitFor(() => driver.stage === "media-dark-driven", "dark media driver");
       await waitFor(() => auto.explain(media)?.status === "active", "non-resize media attachment");
@@ -321,33 +302,24 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     attributed.removeAttribute("data-cornerfill-trigger");
     await waitFor(() => auto.explain(attributed) === null, "attribute selector detachment");
 
-    const passesBeforeBurst = auto.explain().automatic.counters.candidatePasses;
-    formControl.checked = true;
-    formControl.dispatchEvent(new Event("input", { bubbles: true }));
-    formControl.dispatchEvent(new Event("input", { bubbles: true }));
-    formControl.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor(() => auto.explain(form)?.status === "active", "form-state selector attachment");
-    assert(auto.explain().automatic.counters.candidatePasses === passesBeforeBurst + 1, "one state-event burst ran more than one selector pass");
-
     toggle.open = true;
     await waitFor(() => auto.explain(toggle)?.status === "active", "toggle-state selector attachment");
-    location.hash = "cornerfill-auto-target";
-    await waitFor(() => auto.explain(target)?.status === "active", "target-state selector attachment");
-    location.hash = "cornerfill-no-target";
-    await waitFor(() => auto.explain(target) === null, "target-state selector detachment");
-    history.replaceState(null, "", `${location.pathname}${location.search}`);
 
     const escapedRule = cssomStyle.sheet.insertRule(
       String.raw`.cornerfill\:escaped{corner-shape:bevel;border-radius:5px}`,
       cssomStyle.sheet.cssRules.length,
     );
-    await waitFor(() => auto.explain(escaped)?.status === "active", "conservative selector attachment");
-    assert(auto.explain().automatic.observation.conservative, "unclassifiable selector was not observed conservatively");
-    const passesBeforeConservativeAttribute = auto.explain().automatic.counters.candidatePasses;
+    await waitFor(() => auto.explain(escaped)?.status === "active", "escaped selector attachment");
+    assert(!auto.explain().automatic.observation.conservative, "escaped class selector forced conservative observation");
+    const passesBeforeEscapedNoise = auto.explain().automatic.counters.candidatePasses;
     escaped.setAttribute("data-unclassified", "1");
-    await waitFor(() => auto.explain().automatic.counters.candidatePasses > passesBeforeConservativeAttribute, "conservative attribute observation");
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    assert(
+      auto.explain().automatic.counters.candidatePasses === passesBeforeEscapedNoise,
+      "escaped selector observed an unrelated attribute",
+    );
     cssomStyle.sheet.deleteRule(escapedRule);
-    await waitFor(() => auto.explain(escaped) === null, "conservative selector teardown");
+    await waitFor(() => auto.explain(escaped) === null, "escaped selector teardown");
     assert(!auto.explain().automatic.observation.conservative, "removed selector retained conservative observation");
 
     while (cssomStyle.sheet.cssRules.length > 0) {
@@ -398,10 +370,7 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   byId.remove();
   attributed.remove();
   hover.remove();
-  active.remove();
-  form.remove();
   toggle.remove();
-  target.remove();
   escaped.remove();
   cssomStyle.remove();
   link.remove();
@@ -409,6 +378,212 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
 
 ({ installCornerfill } = await import("../dist/runtime.mjs"));
 ({ installCornerfillAuto } = await import("../dist/auto-runtime.mjs"));
+
+await test("automatic ownership preserves browser keyboard focus indicators", async () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    .cornerfill-focus-indicator {
+      appearance:none;border:0;display:inline-block;width:32px;height:20px;border-radius:8px;
+      corner-shape:bevel;background:#456
+    }
+  `;
+  document.head.append(style);
+  const link = document.createElement("a");
+  link.href = "#cornerfill-focus-proof";
+  const button = document.createElement("button");
+  const tabStop = document.createElement("div");
+  tabStop.tabIndex = 0;
+  for (const element of [link, button, tabStop]) {
+    element.className = "cornerfill-focus-indicator";
+    element.textContent = "focus";
+    document.body.append(element);
+  }
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  try {
+    await auto.ready;
+    for (const element of [link, button, tabStop]) {
+      assert(
+        auto.explain(element)?.status === "active",
+        `focus fixture was not owned: ${JSON.stringify({ entry: auto.explain(element), report: auto.explain() })}`,
+      );
+      assert(!element.hasAttribute("data-cornerfill-owned-outline"), "unpainted outline was claimed");
+      assert(!element.hasAttribute("data-cornerfill-owned-shadow"), "unpainted shadow was claimed");
+    }
+    for (const element of [link, button]) {
+      element.focus({ focusVisible: true });
+      assert(document.activeElement === element, "focus did not reach a native focusable fixture");
+      const computed = getComputedStyle(element);
+      assert(
+        computed.outlineStyle !== "none" || computed.boxShadow !== "none",
+        "Cornerfill hid a native focusable element's focus indicator",
+      );
+    }
+    if (new URL(location.href).searchParams.has("drivePointer")) {
+      link.tabIndex = -1;
+      button.tabIndex = -1;
+      document.body.tabIndex = -1;
+      document.body.focus();
+      const driver = { stage: "" };
+      globalThis.__CORNERFILL_POINTER_DRIVER__ = driver;
+      driver.stage = "keyboard-tab-0-ready";
+      await waitFor(() => driver.stage === "keyboard-tab-0-driven", "keyboard focus driver");
+      assert(document.activeElement === tabStop, "keyboard focus did not reach the tabindex fixture");
+      const computed = getComputedStyle(tabStop);
+      assert(
+        computed.outlineStyle !== "none" || computed.boxShadow !== "none",
+        "Cornerfill hid the browser keyboard focus indicator",
+      );
+      driver.stage = "done";
+      document.body.removeAttribute("tabindex");
+    }
+  } finally {
+    auto.destroy();
+    style.remove();
+    link.remove();
+    button.remove();
+    tabStop.remove();
+  }
+});
+
+await test("automatic CSS fails closed for unobservable selector state", async () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    .cornerfill-state-safe { corner-shape:bevel;border-radius:5px;background:red }
+    .cornerfill-state-unsafe:has(input:checked) { corner-shape:scoop }
+  `;
+  document.head.append(style);
+  const safe = host();
+  safe.className = "cornerfill-state-safe";
+  const auto = installCornerfillAuto(options({ autoObserve: true, onError() {} }));
+  try {
+    await auto.ready;
+    assert(auto.explain(safe) === null, "unobservable state source did not block root ownership");
+    assert(
+      auto.explain().errors.some(({ message }) => /cannot observe selector state: checked/u.test(message)),
+      "unobservable state source was not diagnosed",
+    );
+  } finally {
+    auto.destroy();
+    style.remove();
+    safe.remove();
+  }
+});
+
+await test("automatic stylesheet disabled state detaches and reattaches without polling", async () => {
+  const style = document.createElement("style");
+  style.textContent = ".cornerfill-disabled-style{corner-shape:bevel;border-radius:5px;background:red}";
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = `data:text/css,${encodeURIComponent(
+    ".cornerfill-disabled-link{corner-shape:bevel;border-radius:5px;background:blue}",
+  )}`;
+  const loaded = new Promise((resolve, reject) => {
+    link.addEventListener("load", resolve, { once: true });
+    link.addEventListener("error", () => reject(new Error("disabled-state stylesheet did not load")), { once: true });
+  });
+  document.head.append(style, link);
+  await loaded;
+  const styleElement = host();
+  styleElement.className = "cornerfill-disabled-style";
+  const linkElement = host();
+  linkElement.className = "cornerfill-disabled-link";
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  try {
+    await auto.ready;
+    assert(auto.explain(styleElement)?.status === "active", "style-disabled fixture did not attach");
+    assert(auto.explain(linkElement)?.status === "active", "link-disabled fixture did not attach");
+    style.disabled = true;
+    await waitFor(() => auto.explain(styleElement) === null, "style.disabled teardown");
+    style.disabled = false;
+    await waitFor(() => auto.explain(styleElement)?.status === "active", "style.disabled reattachment");
+    style.sheet.disabled = true;
+    await waitFor(() => auto.explain(styleElement) === null, "style sheet.disabled teardown");
+    style.sheet.disabled = false;
+    await waitFor(() => auto.explain(styleElement)?.status === "active", "style sheet.disabled reattachment");
+    link.sheet.disabled = true;
+    await waitFor(() => auto.explain(linkElement) === null, "link sheet.disabled teardown");
+    link.sheet.disabled = false;
+    await waitFor(() => auto.explain(linkElement)?.status === "active", "link sheet.disabled reattachment");
+  } finally {
+    auto.destroy();
+    style.remove();
+    link.remove();
+    styleElement.remove();
+    linkElement.remove();
+  }
+});
+
+await test("exact source handoff recovers CSSOM-only selector changes", async () => {
+  const style = document.createElement("style");
+  style.textContent = ".cornerfill-source-before{corner-shape:bevel;border-radius:5px;background:red}";
+  document.head.append(style);
+  const before = host();
+  before.className = "cornerfill-source-before";
+  const after = host();
+  after.className = "cornerfill-source-after";
+  const auto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await auto.ready;
+    assert(auto.explain(before)?.status === "active", "source handoff fixture did not attach");
+    style.sheet.cssRules[0].selectorText = ".cornerfill-source-after";
+    await auto.refresh();
+    assert(auto.explain(before)?.status === "active", "generic refresh pretended to recover CSSOM-only source");
+    await auto.replaceStylesheetSource(
+      style,
+      ".cornerfill-source-after{corner-shape:bevel;border-radius:5px;background:red}",
+    );
+    assert(auto.explain(before) === null, "exact source handoff retained the old selector");
+    assert(auto.explain(after)?.status === "active", "exact source handoff did not attach the new selector");
+  } finally {
+    auto.destroy();
+    style.remove();
+    before.remove();
+    after.remove();
+  }
+});
+
+await test("multiple automatic controllers share and fully release one CSSOM broker", async () => {
+  const style = document.createElement("style");
+  style.textContent = ".cornerfill-broker-unused{color:red}";
+  document.head.append(style);
+  const originalInsertRule = style.sheet.insertRule;
+  const first = installCornerfillAuto(options({ autoObserve: false }));
+  const second = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await Promise.all([first.ready, second.ready]);
+    const sharedInsertRule = style.sheet.insertRule;
+    assert(sharedInsertRule !== originalInsertRule, "CSSOM broker was not installed");
+    first.destroy();
+    assert(style.sheet.insertRule === sharedInsertRule, "first controller removed the shared CSSOM broker");
+    second.destroy();
+    assert(style.sheet.insertRule === originalInsertRule, "last controller retained a dead CSSOM wrapper");
+  } finally {
+    first.destroy();
+    second.destroy();
+    style.remove();
+  }
+});
+
+await test("failed CSSOM retries release the original broker subscription", async () => {
+  const style = document.createElement("style");
+  style.textContent = ".cornerfill-hook-safe{corner-shape:bevel;border-radius:5px;background:red}";
+  document.head.append(style);
+  const element = host();
+  element.className = "cornerfill-hook-safe";
+  const originalInsertRule = style.sheet.insertRule;
+  const auto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await auto.ready;
+    style.sheet.insertRule(".cornerfill-hook-safe:checked{corner-shape:scoop}");
+    await waitFor(() => auto.explain().stylesheets === 1 && auto.explain().errors.length > 0, "failed CSSOM mutation");
+    await auto.refresh({ retryFailed: true });
+  } finally {
+    auto.destroy();
+    assert(style.sheet.insertRule === originalInsertRule, "failed CSSOM retry retained a broker subscription");
+    style.remove();
+    element.remove();
+  }
+});
 
 await test("explicit paint rejects invalid CSS colors before taking ownership", async () => {
   const element = host();
@@ -588,19 +763,8 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
     document.head.append(localStyle);
     const pending = auto.refresh();
     await waitFor(() => requests.length === 5, "in-flight teardown stylesheet request");
-    try {
-      await waitFor(() => auto.explain(localElement)?.status === "active", "local stylesheet did not recover after slow link timeout");
-    } catch (error) {
-      throw new Error(`${error.message}: ${JSON.stringify({
-        auto: auto.explain(),
-        local: auto.explain(localElement),
-        records: [...auto.stylesheets.values()].map(({ failed: recordFailed, owner, selectors }) => ({
-          failed: recordFailed,
-          owner: owner.localName,
-          selectors,
-        })),
-      })}`, { cause: error });
-    }
+    await pending;
+    assert(auto.explain(localElement) === null, "timed-out source did not block partial root ownership");
     auto.destroy();
     requests[4].resolve(response(".cornerfill-auto-remote{corner-shape:bevel}"));
     await pending;
@@ -662,7 +826,10 @@ await test("automatic root and import fetches settle at the configured timeout",
         )),
       ]);
       assert(requests.at(-1)?.aborted, "timed-out stylesheet request was not aborted");
-      assert(errors.some((message) => /timed out after 25ms/u.test(message)), "stylesheet timeout was not diagnosed");
+      assert(
+        errors.some((message) => /exceeded the 25ms source deadline/u.test(message)),
+        "stylesheet deadline was not diagnosed",
+      );
     } finally {
       auto.destroy();
       link.remove();
@@ -674,6 +841,44 @@ await test("automatic root and import fetches settle at the configured timeout",
   } finally {
     window.fetch = originalFetch;
   }
+});
+
+await test("automatic source budgets fail ownership closed", async () => {
+  const run = async (source, limits, expected) => {
+    const style = document.createElement("style");
+    style.textContent = source;
+    document.head.append(style);
+    const element = host();
+    element.className = "cornerfill-source-budget";
+    const auto = installCornerfillAuto(options({ autoObserve: false, onError() {}, ...limits }));
+    try {
+      await auto.ready;
+      assert(auto.explain(element) === null, `${expected} did not block ownership`);
+      assert(
+        auto.explain().errors.some(({ message }) => message.includes(expected)),
+        `${expected} was not diagnosed`,
+      );
+    } finally {
+      auto.destroy();
+      style.remove();
+      element.remove();
+    }
+  };
+  await run(
+    ".cornerfill-source-budget{corner-shape:bevel;border-radius:5px;background:red}",
+    { maxStylesheetBytes: 32 },
+    "32-byte stylesheet source budget",
+  );
+  await run(
+    ".cornerfill-source-budget{corner-shape:bevel;border-radius:5px}.cornerfill-source-budget.other{corner-shape:scoop}",
+    { maxCompiledSelectors: 1 },
+    "maximum compiled selector count of 1",
+  );
+  await run(
+    '@import "data:text/css,.one%7Bcolor:red%7D";@import "data:text/css,.two%7Bcolor:blue%7D";.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}',
+    { maxImportCount: 1 },
+    "maximum @import count of 1",
+  );
 });
 
 await test("inactive conditional imports do not establish their named layer", async () => {
@@ -727,7 +932,7 @@ await test("inactive conditional imports do not establish their named layer", as
   }
 });
 
-await test("a failed import preserves later local corner rules", async () => {
+await test("best-effort source policy preserves local rules after a failed import", async () => {
   const importUrl = "data:text/css,/*cornerfill-missing-import*/";
   const originalFetch = window.fetch;
   let requests = 0;
@@ -749,7 +954,11 @@ await test("a failed import preserves later local corner rules", async () => {
   document.head.append(style);
   const element = host();
   element.className = "cornerfill-local-after-failed-import";
-  const auto = installCornerfillAuto(options({ autoObserve: false, onError() {} }));
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    onError() {},
+    unreadableStylesheetPolicy: "best-effort",
+  }));
   try {
     await auto.ready;
     assert(auto.explain(element)?.status === "active", "failed import discarded a later local rule");
@@ -788,6 +997,13 @@ await test("automatic source recovery handles comments and CSS identifier escape
     element.className = className;
     return element;
   });
+  const inline = document.createElement("div");
+  inline.setAttribute(
+    "style",
+    String.raw`width:12px;height:10px;border-radius:5px;background:red;corner-\73 hape:bevel`,
+  );
+  document.body.append(inline);
+  elements.push(inline);
   const auto = installCornerfillAuto(options({ autoObserve: false }));
   try {
     await auto.ready;
@@ -795,7 +1011,7 @@ await test("automatic source recovery handles comments and CSS identifier escape
       equal(
         auto.explain(element)?.geometry.shapeParameters,
         [0, 0, 0, 0],
-        `automatic source scanner lost ${element.className}`,
+        `automatic source scanner lost ${element.className || "escaped inline declaration"}`,
       );
     }
   } finally {
@@ -1397,6 +1613,11 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   const auto = installCornerfillAuto(options({ autoObserve: true }));
   try {
     await auto.ready;
+    assert(
+      [...document.querySelectorAll('style[data-cornerfill-auto-styles=""]')]
+        .some((style) => /@layer\s+base,\s*theme\s*;/u.test(style.textContent ?? "")),
+      "carrier stylesheet dropped the named layer-order statement",
+    );
     equal(auto.explain(layerNormal).geometry.shapeParameters, [-1, -1, -1, -1], "named layer order changed");
     assert(/(?:blue|0,\s*0,\s*255)/u.test(auto.explain(layerNormal).paint.layer.color), "named layer paint order changed");
     equal(auto.explain(layerImportant).geometry.shapeParameters, [0, 0, 0, 0], "important layer order changed");
@@ -1812,9 +2033,13 @@ await test("contained inset shadow and outline are owned shaped rings", async ()
   const explanation = handle.explain();
   assert(explanation.paint.shadow.kind === "inset-solid-ring", "inset shadow was not painted as a ring");
   assert(explanation.paint.outline.kind === "contained-solid-ring", "outline was not painted as a ring");
+  assert(element.hasAttribute("data-cornerfill-owned-shadow"), "painted shadow was not claimed");
+  assert(element.hasAttribute("data-cornerfill-owned-outline"), "painted outline was not claimed");
   assert(getComputedStyle(element).boxShadow === "none", "native box shadow remained visible");
   assert(getComputedStyle(element).outlineStyle === "none", "native outline remained visible");
   handle.dispose();
+  assert(!element.hasAttribute("data-cornerfill-owned-shadow"), "shadow ownership survived teardown");
+  assert(!element.hasAttribute("data-cornerfill-owned-outline"), "outline ownership survived teardown");
 
   const unsupported = host();
   unsupported.style.boxShadow = "0 0 2px red";
@@ -2582,13 +2807,8 @@ await test("fallback entry and aggregate surface budgets refuse new work", async
   await firstPixels.ready;
   assert(pixelController.stats().surfacePixels === 64, "surface ledger missed the initial allocation");
   assert(pixelController.stats().surfaces === 1, "surface ledger missed the initial surface");
-  let replacementBudgetError = null;
-  try { await firstPixels.resize({ cornerShape: "round" }); } catch (error) { replacementBudgetError = error; }
-  assert(
-    /aggregate surface allocation/u.test(replacementBudgetError?.message ?? ""),
-    "transactional replacement exceeded the aggregate peak budget",
-  );
-  assert(pixelController.stats().surfacePixels === 64, "failed replacement corrupted surface accounting");
+  await firstPixels.resize({ cornerShape: "round" });
+  assert(pixelController.stats().surfacePixels === 64, "replacement corrupted steady-state surface accounting");
   const secondPixels = pixelController.attachPrepared(secondElement, pixelConfig);
   let pixelError = null;
   try { await secondPixels.ready; } catch (error) { pixelError = error; }

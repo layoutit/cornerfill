@@ -3,6 +3,7 @@ import {
   parseCornerShapeValue,
   serializeShapeParameter,
 } from "./values.mjs";
+import { decodeCssEscapes } from "./css-syntax.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
 type RuntimeDocument = Document & Readonly<{ defaultView: RuntimeWindow }>;
@@ -19,6 +20,7 @@ export interface SelectorObservation {
   readonly characterData: boolean;
   readonly conservative: boolean;
   readonly events: readonly string[];
+  readonly unobservableStates: readonly string[];
 }
 
 export interface SelectorRecord {
@@ -349,8 +351,10 @@ function scanCssSyntax(source: string, start: number, visit: CssTokenVisitor): v
 function declarationEnd(source: string, start: number): number {
   let end = source.length;
   scanCssSyntax(source, start, (index, character, parentheses, brackets) => {
-    if (parentheses !== 0 || brackets !== 0 || (character !== ";" && character !== "}")) return;
-    end = index;
+    if (parentheses !== 0 || brackets !== 0
+      || (character !== ";" && character !== "}" && character !== "{")) return;
+    if (character === "{") end = -1;
+    else end = index;
     return false;
   });
   return end;
@@ -475,20 +479,23 @@ function allCarrierDeclaration(rawDeclaration: string, rawValue: string): string
 export function canonicalizeCornerShapeDeclarations(
   source: string,
   authoredDeclarations: string[] | null = null,
+  context: "declarations" | "stylesheet" = "stylesheet",
 ): string {
   const replacements: TextReplacement[] = [];
   let statementStart = 0;
   let skipThrough = -1;
+  let blocks = 0;
   scanCssSyntax(source, 0, (index, character, parentheses, brackets) => {
     if (index <= skipThrough) return;
     if (parentheses !== 0 || brackets !== 0) return;
-    if (character === ":") {
+    if (character === ":" && (context === "declarations" || blocks > 0)) {
       const statement = source.slice(statementStart, index);
       const identifier = wholeCssIdentifier(statement);
       if (!identifier) return;
       const property = identifier.value.toLowerCase();
       if (!isShapeProperty(property) && property !== "all") return;
       const end = declarationEnd(source, index + 1);
+      if (end < 0) return;
       const start = statementStart + identifier.start;
       if (property === "all") {
         const replacement = allCarrierDeclaration(
@@ -509,6 +516,8 @@ export function canonicalizeCornerShapeDeclarations(
       skipThrough = end - 1;
       return;
     }
+    if (character === "{") blocks += 1;
+    else if (character === "}") blocks = Math.max(0, blocks - 1);
     if (character === ";" || character === "{" || character === "}") statementStart = index + 1;
   });
 
@@ -669,6 +678,11 @@ function serializeCarrierRules(
   let output = "";
   for (const rawRule of rules) {
     const rule = rawRule as CarrierRule;
+    const statement = rule.cssText.trim();
+    if (/^@layer\b[^{}]*;$/iu.test(statement)) {
+      output += statement;
+      continue;
+    }
     const header = ruleHeader(rule);
     if (/^@(?:-webkit-)?keyframes\b/iu.test(header)) {
       if (strictShapeSupports) {
@@ -756,49 +770,45 @@ function serializeCarrierRules(
 }
 
 const SELECTOR_STATE_EVENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  active: Object.freeze(["pointercancel", "pointerdown", "pointerup"]),
   hover: Object.freeze(["pointerover", "pointerout"]),
   focus: Object.freeze(["focusin", "focusout"]),
   "focus-visible": Object.freeze(["focusin", "focusout"]),
   "focus-within": Object.freeze(["focusin", "focusout"]),
-  checked: Object.freeze(["input", "change"]),
-  default: Object.freeze(["input", "change"]),
   disabled: Object.freeze(["input", "change"]),
   enabled: Object.freeze(["input", "change"]),
-  indeterminate: Object.freeze(["input", "change"]),
-  invalid: Object.freeze(["input", "change"]),
-  "in-range": Object.freeze(["input", "change"]),
   optional: Object.freeze(["input", "change"]),
-  "out-of-range": Object.freeze(["input", "change"]),
-  "placeholder-shown": Object.freeze(["input", "change"]),
-  "read-only": Object.freeze(["input", "change"]),
-  "read-write": Object.freeze(["input", "change"]),
   required: Object.freeze(["input", "change"]),
-  "user-invalid": Object.freeze(["input", "change"]),
-  "user-valid": Object.freeze(["input", "change"]),
-  valid: Object.freeze(["input", "change"]),
   modal: Object.freeze(["toggle"]),
   open: Object.freeze(["toggle"]),
   "popover-open": Object.freeze(["toggle"]),
-  target: Object.freeze(["hashchange", "popstate"]),
-  "target-within": Object.freeze(["hashchange", "popstate"]),
   fullscreen: Object.freeze(["fullscreenchange"]),
 });
 
 const STATIC_SELECTOR_PSEUDOS = new Set<string>([
   "any-link", "empty", "first-child", "first-of-type", "has", "is", "lang",
-  "last-child", "last-of-type", "link", "local-link", "not", "nth-child",
+  "last-child", "last-of-type", "link", "not", "nth-child",
   "nth-last-child", "nth-last-of-type", "nth-of-type", "only-child",
   "only-of-type", "root", "scope", "where",
 ]);
 
+function selectorForObservation(selector: string): string {
+  return selector.replaceAll(
+    /\\(?:[0-9a-f]{1,6}(?:\r\n|[\t\n\f\r ])?|(?:\r\n|[\n\f\r])|[\s\S])/giu,
+    (escape) => {
+      const decoded = decodeCssEscapes(escape);
+      return /^[-_a-z0-9]$/iu.test(decoded) ? decoded : "_";
+    },
+  );
+}
+
 export function selectorObservation(selectors: Iterable<string>): Readonly<SelectorObservation> {
   const attributes = new Set<string>();
   const events = new Set<string>();
+  const unobservableStates = new Set<string>();
   let characterData = false;
   let conservative = false;
-  for (const selector of selectors) {
-    if (selector.includes("\\")) conservative = true;
+  for (const rawSelector of selectors) {
+    const selector = selectorForObservation(rawSelector);
     if (/(?:^|[^\w-])\.[_a-z-]/iu.test(selector)) attributes.add("class");
     if (/(?:^|[^\w-])#[_a-z-]/iu.test(selector)) attributes.add("id");
     const attributeMatches = [...selector.matchAll(/\[\s*([_a-z][\w-]*)/giu)];
@@ -825,7 +835,8 @@ export function selectorObservation(selectors: Iterable<string>): Readonly<Selec
         continue;
       }
       if (pseudo === "empty") characterData = true;
-      else if (!STATIC_SELECTOR_PSEUDOS.has(pseudo)) conservative = true;
+      else if (["any-link", "link"].includes(pseudo)) attributes.add("href");
+      else if (!STATIC_SELECTOR_PSEUDOS.has(pseudo)) unobservableStates.add(pseudo);
     }
   }
   return Object.freeze({
@@ -833,6 +844,7 @@ export function selectorObservation(selectors: Iterable<string>): Readonly<Selec
     events: Object.freeze([...events].sort()),
     characterData,
     conservative,
+    unobservableStates: Object.freeze([...unobservableStates].sort()),
   });
 }
 
@@ -873,11 +885,17 @@ export function parseCarrierSheet(
       strictShapeSupports,
     );
     const selectorList = Object.freeze([...selectors]);
+    const observation = selectorObservation(observationSelectors);
+    if (observation.unobservableStates.length > 0) {
+      throw ownershipBlockingSyntaxError(
+        `Automatic CSS cannot observe selector state: ${observation.unobservableStates.join(", ")}`,
+      );
+    }
     return Object.freeze({
       css,
       selectors: selectorList,
       selectorRecords: Object.freeze(selectorRecords),
-      observation: selectorObservation(observationSelectors),
+      observation,
       mediaQueries: Object.freeze([...mediaQueries].filter(Boolean).sort()),
     });
   } finally {
@@ -982,25 +1000,6 @@ function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
   });
 }
 
-function decodeCssEscapes(value: string): string {
-  return String(value).replaceAll(
-    /\\(?:([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|((?:\r\n|[\n\f\r]))|([\s\S]))/giu,
-    (
-      _source: string,
-      hexadecimal: string | undefined,
-      newline: string | undefined,
-      character: string | undefined,
-    ) => {
-      if (newline) return "";
-      if (!hexadecimal) return character ?? "";
-      const codePoint = Number.parseInt(hexadecimal, 16);
-      return codePoint === 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)
-        ? "\ufffd"
-        : String.fromCodePoint(codePoint);
-    },
-  );
-}
-
 function consumeImportFunction(value: string, name: string): Readonly<ImportFunctionParse> | null {
   if (!new RegExp(`^${name}\\s*\\(`, "iu").test(value)) return null;
   const start = value.indexOf("(");
@@ -1058,11 +1057,13 @@ export function mergeSelectorObservation(
 ): Readonly<SelectorObservation> {
   const attributes = new Set<string>();
   const events = new Set<string>();
+  const unobservableStates = new Set<string>();
   let characterData = false;
   let conservative = false;
   for (const record of records) {
     for (const attribute of record.attributes) attributes.add(attribute);
     for (const event of record.events) events.add(event);
+    for (const state of record.unobservableStates) unobservableStates.add(state);
     characterData ||= record.characterData;
     conservative ||= record.conservative;
   }
@@ -1071,11 +1072,18 @@ export function mergeSelectorObservation(
     events: Object.freeze([...events].sort()),
     characterData,
     conservative,
+    unobservableStates: Object.freeze([...unobservableStates].sort()),
   });
 }
 
 function ownershipBlockingSyntaxError(message: string): DiagnosticError {
   const error = new SyntaxError(message) as DiagnosticError;
+  Object.defineProperty(error, "cornerfillOwnershipBlocking", { value: true });
+  return error;
+}
+
+export function ownershipBlockingRangeError(message: string): DiagnosticError {
+  const error = new RangeError(message) as DiagnosticError;
   Object.defineProperty(error, "cornerfillOwnershipBlocking", { value: true });
   return error;
 }

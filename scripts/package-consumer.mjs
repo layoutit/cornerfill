@@ -43,13 +43,23 @@ async function browserImport() {
     if (url.pathname === "/") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html>
-        <script type="importmap">{"imports":{"cornerfill":"/package/dist/auto.mjs"}}</script>
+        <style>
+          #fixture { width: 20px; height: 16px; border-radius: 8px; corner-shape: bevel; background: red }
+        </style>
+        <div id="fixture"></div>
+        <script type="importmap">{"imports":{"cornerfill":"/package/dist/auto.mjs","cornerfill/auto":"/package/dist/auto-runtime.mjs"}}</script>
         <script type="module">
           try {
-            const { default: cornerfill } = await import("cornerfill");
+            const forceFallback = new URL(location.href).searchParams.has("forceFallback");
+            const cornerfill = forceFallback
+              ? (await import("cornerfill/auto")).installCornerfillAuto({ forceFallback: true })
+              : (await import("cornerfill")).default;
             const report = await cornerfill?.ready;
+            const entry = cornerfill?.explain(document.querySelector("#fixture"));
             globalThis.__cornerfillPackage = {
               controller: Boolean(cornerfill),
+              entryBackend: entry?.backend ?? null,
+              entryStatus: entry?.status ?? null,
               fallbackLoaded: report?.fallbackLoaded,
               mode: report?.mode,
             };
@@ -75,8 +85,6 @@ async function browserImport() {
       response.writeHead(404).end();
     }
   });
-  let browser = null;
-  let context = null;
   await runWithCleanup(async () => {
     await new Promise((resolvePromise, reject) => {
       server.once("error", reject);
@@ -84,31 +92,49 @@ async function browserImport() {
     });
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
-    browser = await playwright.chromium.launch({ headless: true });
-    context = await browser.newContext();
-    const page = await context.newPage();
-    const requested = [];
-    page.on("request", (request) => requested.push(request.url()));
-    await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForFunction(
-      () => document.documentElement.dataset.packageTest !== undefined,
-      null,
-      { timeout: 30_000 },
-    );
-    const status = await page.evaluate(() => ({
-      error: globalThis.__cornerfillPackageError ?? null,
-      result: globalThis.__cornerfillPackage ?? null,
-      status: document.documentElement.dataset.packageTest,
-    }));
-    if (status.status !== "pass") throw new Error(`packed browser import failed: ${status.error}`);
-    if (status.result?.mode !== "native" || status.result?.fallbackLoaded !== false) {
-      throw new Error(`packed browser root did not select the qualified native path: ${JSON.stringify(status.result)}`);
-    }
-    if (requested.some((url) => /\/(?:auto-runtime|runtime)\.mjs(?:$|\?)/u.test(url))) {
-      throw new Error("packed native browser import loaded fallback runtime modules");
+    for (const [name, browserType, expectedMode, expectedBackend] of [
+      ["Chromium", playwright.chromium, "native", null],
+      ["WebKit", playwright.webkit, "fallback", "webkit-canvas"],
+      ["Firefox", playwright.firefox, "fallback", "moz-element"],
+    ]) {
+      let browser = null;
+      let context = null;
+      await runWithCleanup(async () => {
+        browser = await browserType.launch({ headless: true });
+        context = await browser.newContext();
+        const page = await context.newPage();
+        const requested = [];
+        page.on("request", (request) => requested.push(request.url()));
+        await page.goto(`${origin}${expectedMode === "fallback" ? "?forceFallback" : ""}`, {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+        await page.waitForFunction(
+          () => document.documentElement.dataset.packageTest !== undefined,
+          null,
+          { timeout: 30_000 },
+        );
+        const status = await page.evaluate(() => ({
+          error: globalThis.__cornerfillPackageError ?? null,
+          result: globalThis.__cornerfillPackage ?? null,
+          status: document.documentElement.dataset.packageTest,
+        }));
+        if (status.status !== "pass") throw new Error(`${name} packed browser import failed: ${status.error}`);
+        if (status.result?.mode !== expectedMode || (expectedMode === "native") !== (status.result?.fallbackLoaded === false)) {
+          throw new Error(`${name} packed browser root selected the wrong path: ${JSON.stringify(status.result)}`);
+        }
+        if (expectedBackend && (status.result?.entryStatus !== "active" || status.result?.entryBackend !== expectedBackend)) {
+          throw new Error(`${name} packed fallback did not paint the fixture: ${JSON.stringify(status.result)}`);
+        }
+        const fallbackRequested = requested.some((url) => /\/(?:auto-runtime|runtime)\.mjs(?:$|\?)/u.test(url));
+        if ((expectedMode === "fallback") !== fallbackRequested) {
+          throw new Error(`${name} packed browser loaded the wrong module closure`);
+        }
+      }, [
+        () => closePlaywrightSession(context, browser, `packed-consumer ${name} session`),
+      ], `${name} packed browser import and cleanup failed`);
     }
   }, [
-    () => closePlaywrightSession(context, browser, "packed-consumer Chromium session"),
     () => server.listening && new Promise((resolvePromise, reject) => server.close((error) => (
       error ? reject(error) : resolvePromise()
     ))),

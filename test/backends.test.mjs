@@ -41,8 +41,6 @@ test("disposed WebKit named canvas identifiers are reused per document and prefi
     activeCanvases: 0,
     pooledCanvases: 1,
     pooledPixels: 1,
-    retiredCanvases: 0,
-    retiredPixels: 0,
     retainedCanvases: 1,
     retainedPixels: 1,
     prefixes: 1,
@@ -176,7 +174,6 @@ test("WebKit overflow IDs remain reusable and every released canvas is shrunk", 
   for (const surface of surfaces) surface.dispose();
   const stats = getSurfaceResourceStats(document).webkit;
   assert.equal(stats.pooledCanvases, 3);
-  assert.equal(stats.retiredCanvases, 0);
   assert.equal(stats.retainedPixels, 3);
   assert.equal(stats.shrinkFailures, 0);
   const reused = Array.from({ length: 3 }, () => createSurface(document, {
