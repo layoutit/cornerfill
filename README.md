@@ -48,11 +48,11 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-a
 
 | Browser | Rendering path |
 |---|---|
-| Semantically qualified native engine | Native CSS after syntax, computed-value, and shaped-behavior probes pass |
+| Semantically qualified native engine | Native CSS after syntax and canonical computed-value probes pass |
 | Safari / WebKit | `-webkit-canvas()` when the live Canvas API is available |
 | Firefox | `-moz-element()` when Canvas registration is available |
 
-Native selection requires syntax support, canonical computed corner-shape longhands, and a shaped hit-test probe; syntax support alone is not enough. The qualification report exposes those results separately and marks outer paint, inner borders, clipping, effects, and animation as `unobserved` rather than pretending one probe certified them. Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
+Native selection requires syntax support and canonical computed corner-shape longhands; syntax support alone is not enough. Shaped hit testing is probed only as a reported capability because it is not a semantic the paint-only fallback can provide and may be unobservable under page isolation policy. The qualification report marks untested outer paint, inner borders, clipping, effects, and animation as `unobserved`. Fallback backends are capability-probed. Test the exact stable browser versions in your support matrix.
 
 ## Automatic Sources and Shadow Roots
 
@@ -102,7 +102,7 @@ Implemented support is not an oracle `PASS`. Current fallback comparisons remain
 
 ## Spec Surface
 
-Cornerfill is pinned to the 26 March 2026 Working Draft of [CSS Borders and Box Decorations Level 4](https://drafts.csswg.org/css-borders-4/). `cornerfill/spec` exports the exact CSSWG and WPT commits used by this release together with a machine-readable property matrix.
+The latest published [CSS Borders and Box Decorations Level 4 Working Draft](https://www.w3.org/TR/2025/WD-css-borders-4-20251216/) is dated 16 December 2025. Cornerfill's implementation evidence is additionally pinned to a 31 July 2026 editor's-draft repository snapshot. `cornerfill/spec` exports both identities, the exact CSSWG source blob, the WPT snapshot, and a machine-readable property matrix.
 
 | Surface | 0.0.1 status |
 | --- | --- |
@@ -203,6 +203,8 @@ cornerfill.destroy();
 
 `preparedFace` contains a fixed `size`, normalized `paint`, and either prepared `geometry` or explicit `borderRadius` plus `cornerShape`. Preparation owns those descriptors. Position and visibility batches are synchronous and caller-clocked. Prepared entries do not observe layout or DPR changes; call `handle.resize()` when either changes.
 
+Prepared surfaces are allocated during attachment so the first visibility change does not allocate inside an animation frame. Set `deferHiddenSurface: true` only when saving surfaces for entries that may remain hidden is more important than reveal-time latency.
+
 ## Limits
 
 - The fallback owns the host background, supported border, radius, shadow, and outline paint. Author `!important` declarations that prevent that ownership are rejected.
@@ -213,6 +215,7 @@ cornerfill.destroy();
 - General background blending is not supported. Automatic mode cannot prove raster opacity, so the bounded `multiply` path is explicit-runtime only.
 - Automatic discovery supports one physical or logical declaration family at a time. Mixed families are rejected. Automatic CSS animations and transitions of shape or paint dependencies are not reproduced with native timing or interpolation; use the explicit update/interpolation API when that behavior matters.
 - Direct declaration tests such as `@supports (corner-shape: bevel)` are preserved. Complex conditions that cannot be transported without changing their meaning, anonymous layers, nested selector rules, and unknown at-rule contexts are refused before ownership.
+- Pending-substitution `all: var(...)` resets are transported when they resolve to `initial`, `unset`, or the invalid-at-computed-value reset behavior. Cascade-dependent results such as `revert-layer` are reported and refused instead of leaving stale shape carriers active.
 - Cross-origin stylesheets and imports require CORS. Closed or unregistered shadow roots are not discovered. Constructed/adopted sheets require explicit open-root registration and the exact-source refresh shown above. Generated styles require a CSP nonce when the page policy does.
 - After installation, automatic mode mirrors `insertRule()` and `deleteRule()` on directly discovered, non-import stylesheet instances and restores the original instance methods on teardown. Rules inserted before startup and unsupported values assigned through `CSSStyleDeclaration` cannot be recovered after the browser discards them.
 - A failed linked stylesheet stays cached until its source changes or `cornerfill.refresh({ retryFailed: true })` is requested. Refusals and source failures appear in `cornerfill.explain().errors`.
@@ -227,9 +230,10 @@ npm test
 npm run test:browser:runtime
 npm run oracle:smoke
 npm run oracle:cross
+CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp npm run oracle:mario
 ```
 
-`test:browser:runtime` opens and closes Chrome, WebKit, and Firefox strictly one at a time. The oracle commands do the same and never use `kill-all`. The smoke and cross-engine fixtures include the real Mario texel crop and therefore require `CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp` when it is not at the development-machine default. See [the executable oracle contract](oracle/README.md).
+`test:browser:runtime` opens and closes Chrome, WebKit, and Firefox strictly one at a time. The oracle commands do the same and never use `kill-all`. Smoke and cross-engine checks are self-contained; the explicit Mario stress command uses the real texel atlas and requires `CORNERFILL_MARIO_TEXELS`. See [the executable oracle contract](oracle/README.md).
 
 TypeScript `.mts` modules are the source of truth. The build writes browser-ready `.mjs` files and matching declarations to `dist/`. It also generates the exported qualification object from the tracked [oracle qualification record](oracle/qualification.json); candidate comparisons remain `UNQUALIFIED` until reviewed evidence supports explicit tolerances. The package root is asynchronous ESM; controlled integrations that cannot consume top-level await can call the installers from `cornerfill/auto` or `cornerfill/runtime` directly.
 

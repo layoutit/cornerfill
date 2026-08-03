@@ -1,10 +1,24 @@
 export const CORNERFILL_SPEC_REVISION = Object.freeze({
   module: "CSS Borders and Box Decorations Level 4",
-  workingDraftDate: "2026-03-26",
-  editorsDraft: "https://drafts.csswg.org/css-borders-4/",
-  sourceCommit: "13b14ec48af0219c893713d670cf80d8c014a648",
-  sourceUrl: "https://github.com/w3c/csswg-drafts/blob/13b14ec48af0219c893713d670cf80d8c014a648/css-borders-4/Overview.bs",
-  wptCommit: "4a5810a124fa0523dd2494996bf1542d4b67f394",
+  publishedWorkingDraft: Object.freeze({
+    date: "2025-12-16",
+    url: "https://www.w3.org/TR/2025/WD-css-borders-4-20251216/",
+  }),
+  editorsDraft: Object.freeze({
+    url: "https://drafts.csswg.org/css-borders-4/",
+    snapshotDate: "2026-07-31",
+    repositoryCommit: "13b14ec48af0219c893713d670cf80d8c014a648",
+    sourcePath: "css-borders-4/Overview.bs",
+    sourceBlobSha: "502d9ddb0803bdb7015f4b84f345d9d983dc9093",
+    sourceUrl: "https://github.com/w3c/csswg-drafts/blob/13b14ec48af0219c893713d670cf80d8c014a648/css-borders-4/Overview.bs",
+  }),
+  wptSnapshot: Object.freeze({
+    repositoryCommit: "4a5810a124fa0523dd2494996bf1542d4b67f394",
+    cornerShapeDirectory: "css/css-borders/corner-shape",
+    cornerShapeDirectoryTreeSha: "dfdebd08723bef1b1761a90c420a41770275cd25",
+    hitTestPath: "css/css-borders/corner-shape/corner-shape-hittest.html",
+    hitTestBlobSha: "d6655acc330ac4153ad80575a87391c86d01804a",
+  }),
 });
 
 export type CornerfillPropertySupport = "automatic" | "native-computed" | "not-implemented";

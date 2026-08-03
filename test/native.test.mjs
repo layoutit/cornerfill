@@ -48,10 +48,10 @@ test("syntax support alone cannot qualify native corner-shape", () => {
   assert.equal(result.capabilities.syntax, "supported");
   assert.equal(result.capabilities.computedValues, "unsupported");
   assert.equal(result.capabilities.outerPaint, "unobserved");
-  assert.deepEqual(result.unresolved, ["computedValues", "shapedBehavior"]);
+  assert.deepEqual(result.unresolved, ["computedValues"]);
 });
 
-test("an unobservable native probe is not cached", () => {
+test("unobservable shaped behavior does not demote or invalidate computed native support", () => {
   let attempts = 0;
   const isolatedDocument = (size) => {
     let probe = null;
@@ -101,10 +101,59 @@ test("an unobservable native probe is not cached", () => {
     documentElement: { append() {} },
     defaultView: { CSS: { supports: () => true } },
   };
-  assert.equal(qualifyNativeCornerShape(document).qualified, false);
   const qualified = qualifyNativeCornerShape(document);
   assert.equal(qualified.qualified, true);
-  assert.equal(qualified.capabilities.shapedHitTesting, "supported");
+  assert.equal(qualified.capabilities.shapedHitTesting, "unobserved");
+  assert.equal(qualifyNativeCornerShape(document), qualified);
   assert.equal(qualified.capabilities.innerBorderContour, "unobserved");
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 1);
+});
+
+test("native computed-value qualification falls back to the host document when iframe isolation is blocked", () => {
+  let probe = null;
+  let frameRemoved = false;
+  const style = {
+    currentShape: "",
+    setProperty(property, value) {
+      if (property === "corner-shape") this.currentShape = value;
+    },
+  };
+  const element = { remove() { probe = null; }, setAttribute() {}, style };
+  const document = {
+    createElement(name) {
+      if (name === "iframe") return {
+        contentDocument: null,
+        remove() { frameRemoved = true; },
+        setAttribute() {},
+        style: { setProperty() {} },
+      };
+      assert.equal(name, "div");
+      return element;
+    },
+    documentElement: { append(value) { probe = value; } },
+    elementFromPoint: () => style.currentShape === "round" ? probe : null,
+    defaultView: {
+      CSS: { supports: () => true },
+      innerHeight: 128,
+      innerWidth: 128,
+      getComputedStyle: () => ({
+        getPropertyValue(property) {
+          if (property === "corner-shape") return style.currentShape;
+          const index = [
+            "corner-top-left-shape",
+            "corner-top-right-shape",
+            "corner-bottom-right-shape",
+            "corner-bottom-left-shape",
+          ].indexOf(property);
+          return index >= 0
+            ? ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"][index]
+            : "";
+        },
+      }),
+    },
+  };
+  const result = qualifyNativeCornerShape(document);
+  assert.equal(result.qualified, true);
+  assert.equal(result.capabilities.shapedHitTesting, "supported");
+  assert.equal(frameRemoved, true);
 });

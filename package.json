@@ -63,7 +63,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=22"
   },
   "scripts": {
     "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { force: true, recursive: true }); rmSync('src/qualification.mts', { force: true });\"",
@@ -74,8 +74,9 @@
     "test:browser:runtime": "npm run build && node scripts/runtime-regressions.mjs",
     "test:browser:runtime:built": "node scripts/runtime-regressions.mjs",
     "oracle:list": "node scripts/oracle.mjs list",
-    "oracle:smoke": "npm run build && node scripts/oracle.mjs run --cases=bevel,round,mario-texel-face",
-    "oracle:cross": "npm run build && node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=bevel,bevel-rotated,mario-texel-face"
+    "oracle:smoke": "npm run build && node scripts/oracle.mjs run --cases=bevel,round",
+    "oracle:cross": "npm run build && node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=bevel,bevel-rotated",
+    "oracle:mario": "npm run build && node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=mario-texel-face"
   },
   "devDependencies": {
     "@playwright/cli": "0.1.17",

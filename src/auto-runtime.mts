@@ -1,5 +1,6 @@
 import { installCornerfill } from "./runtime.mjs";
 import type {
+  CornerfillAuthoredStyleInspection,
   CornerfillControllerHandle,
   CornerfillControllerStats,
   CornerfillEntryExplanation,
@@ -362,6 +363,11 @@ const AUTO_STYLESHEET_ATTRIBUTE = "data-cornerfill-auto-styles";
 const AUTO_UNSET = "__cornerfill_unset__";
 const AUTO_PHYSICAL_SHAPE = "--cornerfill-auto-physical-shape";
 const AUTO_LOGICAL_SHAPE = "--cornerfill-auto-logical-shape";
+const AUTO_ALL_PENDING = "--cornerfill-auto-all-pending";
+const AUTO_ALL_VALUE = "--cornerfill-auto-all-value";
+const AUTO_SHAPE_SOURCE = "--cornerfill-auto-shape-source";
+const AUTO_ALL_SENTINEL = "__cornerfill_all__";
+const SUPPORTED_ALL_VALUE = new RegExp(`^(?:${AUTO_ALL_SENTINEL}\\s+(?:initial|unset))?$`, "iu");
 const CARRIER_REGISTRATIONS = new WeakMap<Document, CarrierRegistration>();
 
 const PHYSICAL_SHAPE_PROPERTIES: readonly Exclude<ShapeProperty, "corner-shape">[] = Object.freeze([
@@ -385,7 +391,7 @@ const SHAPE_STATUS_PROPERTIES = Object.freeze(Object.fromEntries(
 )) as Readonly<Record<Exclude<ShapeProperty, "corner-shape">, string>>;
 const SHAPE_STATUS_CARRIERS = Object.freeze(Object.values(SHAPE_STATUS_PROPERTIES));
 
-const AUTO_CARRIERS = Object.freeze([
+const CASCADE_CARRIERS = Object.freeze([
   ...new Set([
     ...SHAPE_CARRIERS,
     ...SHAPE_STATUS_CARRIERS,
@@ -393,11 +399,24 @@ const AUTO_CARRIERS = Object.freeze([
     AUTO_LOGICAL_SHAPE,
   ]),
 ]);
+const ALL_RESET_CARRIERS = Object.freeze([
+  ...CASCADE_CARRIERS,
+  AUTO_ALL_PENDING,
+  AUTO_ALL_VALUE,
+]);
+const AUTO_CARRIERS = Object.freeze([
+  ...ALL_RESET_CARRIERS,
+  AUTO_SHAPE_SOURCE,
+]);
+const AUTO_CARRIER_SET = new Set<string>(AUTO_CARRIERS);
 
 const SHAPE_MARKERS = Object.freeze([
   ...SHAPE_STATUS_CARRIERS,
   AUTO_PHYSICAL_SHAPE,
   AUTO_LOGICAL_SHAPE,
+  AUTO_ALL_PENDING,
+  AUTO_ALL_VALUE,
+  AUTO_SHAPE_SOURCE,
 ]);
 
 const AUTOMATIC_DISCOVERY = Object.freeze({
@@ -412,6 +431,7 @@ const AUTOMATIC_DISCOVERY = Object.freeze({
     "adopted stylesheets unless explicitly enabled for a registered open shadow root",
     "adopted stylesheet corner-shape source unless supplied to refreshAdoptedStyleSheet()",
     "mixed physical/logical declaration families",
+    "all: var(...) results that require inherit, revert, or revert-layer cascade reconstruction",
     "corner-shape or paint changes driven by CSS animations or transitions",
     "alternate stylesheet sets",
     "corner-shape rules inserted through CSSOM before Cornerfill starts",
@@ -539,6 +559,12 @@ function shapeStatusDeclarations(
   )).join("");
 }
 
+function shapeDeclarationState(priority: string): string {
+  return `${AUTO_SHAPE_SOURCE}:1${priority};`
+    + `${AUTO_ALL_PENDING}:${AUTO_UNSET}${priority};`
+    + `${AUTO_ALL_VALUE}:${AUTO_UNSET}${priority};`;
+}
+
 function shapeCssWideDeclaration(
   property: ShapeProperty,
   value: string,
@@ -555,8 +581,14 @@ function shapeCssWideDeclaration(
     + `${marker}:${carrierValue}${priority};`;
 }
 
+const CSS_MATH_FUNCTION = "(?:calc|min|max|clamp|round|mod|rem|sin|cos|tan|asin|acos|atan|atan2|pow|sqrt|hypot|log|exp|abs|sign)";
+const POTENTIALLY_VALID_UNSUPPORTED_SHAPE = new RegExp(
+  `^superellipse\\(\\s*(${CSS_MATH_FUNCTION}\\([\\s\\S]*\\))\\s*\\)$`,
+  "iu",
+);
+
 function potentiallyValidUnsupportedShape(value: string): boolean {
-  const functionValue = /^superellipse\(\s*((?:calc|min|max|clamp)\([\s\S]*\))\s*\)$/iu.exec(value);
+  const functionValue = POTENTIALLY_VALID_UNSUPPORTED_SHAPE.exec(value);
   if (!functionValue) return false;
   const expression = functionValue[1]!;
   for (let index = 0; index < expression.length; index += 1) {
@@ -564,6 +596,7 @@ function potentiallyValidUnsupportedShape(value: string): boolean {
     if (character !== "+" && character !== "-") continue;
     const before = expression[index - 1] ?? "";
     const after = expression[index + 1] ?? "";
+    if (character === "-" && /[a-z_]/iu.test(before) && /[a-z_]/iu.test(after)) continue;
     const prefix = expression.slice(0, index).trimEnd();
     const unary = prefix === ""
       || /[,(+\-*/]$/u.test(prefix)
@@ -581,37 +614,45 @@ function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): str
   const marker = property === "corner-shape" || PHYSICAL_SHAPE_PROPERTIES.includes(property)
     ? AUTO_PHYSICAL_SHAPE
     : AUTO_LOGICAL_SHAPE;
+  const state = shapeDeclarationState(priority);
   if (/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value)) {
-    return shapeCssWideDeclaration(property, value, priority, longhands, marker);
+    return `${shapeCssWideDeclaration(property, value, priority, longhands, marker)}${state}`;
   }
   try {
     if (/\bvar\s*\(/iu.test(value)) {
       const carrier = SHAPE_PROPERTIES[property];
-      return `${carrier}:${value}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};`;
+      return `${carrier}:${value}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};${state}`;
     }
     if (property === "corner-shape") {
       const values = parseCornerShape(value);
       return `${PHYSICAL_SHAPE_PROPERTIES.map((longhand, index) => (
         `${SHAPE_PROPERTIES[longhand]}:${serializeShapeParameter(values[index]!)}${priority};`
-      )).join("")}${shapeStatusDeclarations(longhands, "ok", priority)}${AUTO_PHYSICAL_SHAPE}:1${priority};`;
+      )).join("")}${shapeStatusDeclarations(longhands, "ok", priority)}${AUTO_PHYSICAL_SHAPE}:1${priority};${state}`;
     }
     const carrier = SHAPE_PROPERTIES[property];
     const parsed = serializeShapeParameter(parseCornerShapeValue(value));
-    return `${carrier}:${parsed}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};`;
+    return `${carrier}:${parsed}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};${state}`;
   } catch {
     return potentiallyValidUnsupportedShape(value)
-      ? `${shapeStatusDeclarations(longhands, "unsupported", priority)}${marker}:1${priority};`
+      ? `${shapeStatusDeclarations(longhands, "unsupported", priority)}${marker}:1${priority};${state}`
       : "";
   }
 }
 
 function allCarrierDeclaration(rawDeclaration: string, rawValue: string): string | null {
   const { value, priority } = declarationValue(rawValue);
-  if (!/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value)) return null;
-  const carrierValue = /^(?:initial|unset)$/iu.test(value) ? AUTO_UNSET : value;
-  return `${rawDeclaration};${AUTO_CARRIERS.map((carrier) => (
-    `${carrier}:${carrierValue}${priority};`
-  )).join("")}`;
+  const cssWide = /^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value);
+  if (!cssWide && !/\bvar\s*\(/iu.test(value)) return null;
+  if (cssWide) {
+    const carrierValue = /^(?:initial|unset)$/iu.test(value) ? AUTO_UNSET : value;
+    return `${rawDeclaration};${ALL_RESET_CARRIERS.map((carrier) => (
+      `${carrier}:${carrierValue}${priority};`
+    )).join("")}`;
+  }
+  return `${rawDeclaration};${CASCADE_CARRIERS.map((carrier) => (
+    `${carrier}:${value}${priority};`
+  )).join("")}${AUTO_ALL_PENDING}:1${priority};`
+    + `${AUTO_ALL_VALUE}:${AUTO_ALL_SENTINEL} ${value}${priority};`;
 }
 
 function canonicalizeCornerShapeDeclarations(
@@ -698,9 +739,10 @@ function diagnosticShapeDeclarations(style: CSSStyleDeclaration): readonly strin
     const priority = style.getPropertyPriority(carrier);
     declarations.push(`${property}: ${value}${priority ? " !important" : ""}`);
   }
-  if (declarations.length === 0 && SHAPE_STATUS_CARRIERS.some((property) => (
-    style.getPropertyValue(property).trim() === "unsupported"
-  ))) {
+  if (declarations.length === 0 && (
+    SHAPE_STATUS_CARRIERS.some((property) => style.getPropertyValue(property).trim() === "unsupported")
+    || style.getPropertyValue(AUTO_ALL_PENDING).trim() === "1"
+  )) {
     declarations.push("corner-shape: <unsupported value>");
   }
   return Object.freeze(declarations);
@@ -1186,8 +1228,8 @@ function mutateStylesheetModel(
   }
 }
 
-function computedCarrier(computed: CSSStyleDeclaration, property: string): string {
-  const value = computed.getPropertyValue(property).trim();
+function normalizedCarrier(source: string): string {
+  const value = source.trim();
   return value === AUTO_UNSET || /^(?:initial|unset)$/iu.test(value) ? "" : value;
 }
 
@@ -1236,14 +1278,29 @@ const AUTOMATIC_COMPUTED_PROPERTIES = Object.freeze([
   "width",
 ]);
 
-function automaticComputedSignature(computed: CSSStyleDeclaration): string {
-  return [
-    computed.visibility,
-    computed.direction,
-    computed.writingMode,
-    ...AUTOMATIC_COMPUTED_PROPERTIES.map((property) => computed.getPropertyValue(property)),
-    ...AUTO_CARRIERS.map((property) => computedCarrier(computed, property)),
-  ].join("\n");
+const AUTOMATIC_SIGNATURE_PROPERTIES = Object.freeze([
+  "visibility",
+  "direction",
+  "writing-mode",
+  ...AUTOMATIC_COMPUTED_PROPERTIES,
+  ...AUTO_CARRIERS,
+]);
+
+function inspectionCarrier(
+  inspection: Readonly<CornerfillAuthoredStyleInspection>,
+  property: string,
+): string {
+  return normalizedCarrier(inspection.values[property] ?? "");
+}
+
+function automaticComputedSignature(
+  inspection: Readonly<CornerfillAuthoredStyleInspection>,
+): string {
+  return AUTOMATIC_SIGNATURE_PROPERTIES.map((property) => (
+    AUTO_CARRIER_SET.has(property)
+      ? inspectionCarrier(inspection, property)
+      : inspection.values[property] ?? ""
+  )).join("\n");
 }
 
 function automaticStyleMutationSignature(value: unknown): string {
@@ -1269,25 +1326,32 @@ function automaticStyleMutationSignature(value: unknown): string {
     .join(";");
 }
 
-function carrierProblem(computed: CSSStyleDeclaration): string | null {
-  if (SHAPE_STATUS_CARRIERS.some((property) => computedCarrier(computed, property) === "unsupported")) {
+function carrierProblem(inspection: Readonly<CornerfillAuthoredStyleInspection>): string | null {
+  if (inspectionCarrier(inspection, AUTO_ALL_PENDING)
+    && inspectionCarrier(inspection, AUTO_SHAPE_SOURCE)) {
+    const resolved = inspectionCarrier(inspection, AUTO_ALL_VALUE);
+    if (!SUPPORTED_ALL_VALUE.test(resolved)) {
+      return "Automatic CSS cannot safely transport this all: var(...) result; use cornerfill/runtime for explicit state.";
+    }
+  }
+  if (SHAPE_STATUS_CARRIERS.some((property) => inspectionCarrier(inspection, property) === "unsupported")) {
     return "Automatic CSS cannot resolve this corner-shape value; use cornerfill/runtime for explicit state.";
   }
-  const variableShorthand = computedCarrier(computed, SHAPE_PROPERTIES["corner-shape"]);
+  const variableShorthand = inspectionCarrier(inspection, SHAPE_PROPERTIES["corner-shape"]);
   const competingLonghand = [...PHYSICAL_SHAPE_PROPERTIES, ...LOGICAL_SHAPE_PROPERTIES]
-    .some((property) => computedCarrier(computed, SHAPE_PROPERTIES[property]));
+    .some((property) => inspectionCarrier(inspection, SHAPE_PROPERTIES[property]));
   if (variableShorthand && competingLonghand) {
     return "Automatic CSS refuses a variable corner-shape shorthand combined with longhands because their cascade order cannot be preserved.";
   }
-  if (computedCarrier(computed, AUTO_PHYSICAL_SHAPE)
-    && computedCarrier(computed, AUTO_LOGICAL_SHAPE)) {
+  if (inspectionCarrier(inspection, AUTO_PHYSICAL_SHAPE)
+    && inspectionCarrier(inspection, AUTO_LOGICAL_SHAPE)) {
     return "Automatic CSS refuses mixed physical and logical corner-shape declarations because their cross-family cascade cannot be preserved.";
   }
   return null;
 }
 
-function hasShapeCarrier(computed: CSSStyleDeclaration): boolean {
-  return SHAPE_CARRIERS.some((property) => computedCarrier(computed, property));
+function hasShapeCarrier(inspection: Readonly<CornerfillAuthoredStyleInspection>): boolean {
+  return SHAPE_CARRIERS.some((property) => inspectionCarrier(inspection, property));
 }
 
 function stylesheetElements(root: AutoRoot): StylesheetOwner[] {
@@ -1685,6 +1749,25 @@ class CornerfillAutoController {
     this.registrationStyle = null;
   }
 
+  async _boundedStylesheetTask<T>(
+    controller: AbortController,
+    label: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    let timer = 0;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = this.document.defaultView.setTimeout(() => {
+        controller.abort();
+        reject(new Error(`${label} timed out after ${this.stylesheetTimeoutMs}ms`));
+      }, this.stylesheetTimeoutMs);
+    });
+    try {
+      return await Promise.race([task(), timeout]);
+    } finally {
+      this.document.defaultView.clearTimeout(timer);
+    }
+  }
+
   async _source(
     owner: StylesheetOwner,
     request: SourceRequest,
@@ -1712,16 +1795,18 @@ class CornerfillAutoController {
     if (owner.integrity) init.integrity = owner.integrity;
     if (owner.referrerPolicy) init.referrerPolicy = owner.referrerPolicy as ReferrerPolicy;
     try {
-      const response = await this.document.defaultView.fetch(url.href, init);
-      if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}: ${url.href}`);
-      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-      if (contentType !== "text/css") {
-        throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}: ${url.href}`);
-      }
-      return Object.freeze({
-        text: await response.text(),
-        baseUrl: response.url || url.href,
-        sourceUrl: response.url || url.href,
+      return await this._boundedStylesheetTask(controller, `stylesheet request ${url.href}`, async () => {
+        const response = await this.document.defaultView.fetch(url.href, init);
+        if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}: ${url.href}`);
+        const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+        if (contentType !== "text/css") {
+          throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}: ${url.href}`);
+        }
+        return Object.freeze({
+          text: await response.text(),
+          baseUrl: response.url || url.href,
+          sourceUrl: response.url || url.href,
+        });
       });
     } finally {
       this.pendingFetches.delete(controller);
@@ -1766,17 +1851,19 @@ class CornerfillAutoController {
       if (referrerPolicy) init.referrerPolicy = referrerPolicy as ReferrerPolicy;
       const task = (async () => {
         try {
-          const response = await this.document.defaultView.fetch(url, init);
-          if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}`);
-          const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-          if (contentType !== "text/css") {
-            throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}`);
-          }
-          const sourceUrl = response.url || url;
-          return Object.freeze({
-            text: await response.text(),
-            baseUrl: sourceUrl,
-            sourceUrl,
+          return await this._boundedStylesheetTask(controller, `@import request ${url}`, async () => {
+            const response = await this.document.defaultView.fetch(url, init);
+            if (!response.ok) throw new Error(`stylesheet request failed with HTTP ${response.status}`);
+            const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+            if (contentType !== "text/css") {
+              throw new TypeError(`stylesheet response has invalid CSS MIME type ${contentType || "(missing)"}`);
+            }
+            const sourceUrl = response.url || url;
+            return Object.freeze({
+              text: await response.text(),
+              baseUrl: sourceUrl,
+              sourceUrl,
+            });
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -2325,6 +2412,8 @@ class CornerfillAutoController {
         this._waitForLinkedStylesheet(owner, request),
       ]);
     } catch (error) {
+      request.controller?.abort();
+      request.cancelWait?.();
       if (this.destroyed || request.aborted || this.sourceRequests.get(owner) !== request
         || !stylesheetElementIsEligible(owner) || stylesheetKey(owner) !== key) return;
       const ownerIdentity = isStylesheetLink(owner) ? owner.href : this._ownerIdentity(owner);
@@ -2554,36 +2643,45 @@ class CornerfillAutoController {
     const candidates = this.candidates;
     const ready: Promise<unknown>[] = [];
     for (const [element, handle] of [...this.handles]) {
-      this.automaticCounters.computedChecks += 1;
-      const computed = element.isConnected
-        ? this.document.defaultView.getComputedStyle(element)
-        : null;
-      const problem = computed ? carrierProblem(computed) : null;
-      if (candidates.has(element) && computed && hasShapeCarrier(computed) && !problem) {
-        this._clearErrors(element);
-        const signature = automaticComputedSignature(computed);
-        if (this.handleSignatures.get(element) === signature) {
-          try {
-            handle.verify();
-          } catch (error) {
-            this._recordElementError(error, element);
-            handle.dispose();
-            this.handles.delete(element);
-            this.handleSignatures.delete(element);
+      let failure: unknown = null;
+      if (candidates.has(element) && element.isConnected) {
+        this.automaticCounters.computedChecks += 1;
+        try {
+          const inspection = this.controller.inspectAuthoredStyle(
+            element,
+            AUTOMATIC_SIGNATURE_PROPERTIES,
+          );
+          const problem = carrierProblem(inspection);
+          if (problem) failure = new TypeError(problem);
+          else if (hasShapeCarrier(inspection) && inspection.requiresFallback) {
+            this._clearErrors(element);
+            const signature = automaticComputedSignature(inspection);
+            if (this.handleSignatures.get(element) === signature) {
+              try {
+                handle.verify();
+              } catch (error) {
+                this._recordElementError(error, element);
+                handle.dispose();
+                this.handles.delete(element);
+                this.handleSignatures.delete(element);
+              }
+              continue;
+            }
+            this.handleSignatures.set(element, signature);
+            this.automaticCounters.handleRefreshes += 1;
+            ready.push(handle.refresh().catch((error) => {
+              this._recordElementError(error, element);
+              handle.dispose();
+              this.handles.delete(element);
+              this.handleSignatures.delete(element);
+            }));
+            continue;
           }
-          continue;
+        } catch (error) {
+          failure = error;
         }
-        this.handleSignatures.set(element, signature);
-        this.automaticCounters.handleRefreshes += 1;
-        ready.push(handle.refresh().catch((error) => {
-          this._recordElementError(error, element);
-          handle.dispose();
-          this.handles.delete(element);
-          this.handleSignatures.delete(element);
-        }));
-        continue;
       }
-      if (problem) this._recordElementError(new TypeError(problem), element);
+      if (failure) this._recordElementError(failure, element);
       else this._clearErrors(element);
       handle.dispose();
       this.automaticCounters.handleDetaches += 1;
@@ -2597,19 +2695,22 @@ class CornerfillAutoController {
       }
       if (this.handles.has(element)) continue;
       this.automaticCounters.computedChecks += 1;
-      const computed = this.document.defaultView.getComputedStyle(element);
-      const problem = carrierProblem(computed);
-      if (problem) {
-        this._recordElementError(new TypeError(problem), element);
-        continue;
-      }
-      this._clearErrors(element);
-      if (!hasShapeCarrier(computed)) continue;
       try {
+        const inspection = this.controller.inspectAuthoredStyle(
+          element,
+          AUTOMATIC_SIGNATURE_PROPERTIES,
+        );
+        const problem = carrierProblem(inspection);
+        if (problem) {
+          this._recordElementError(new TypeError(problem), element);
+          continue;
+        }
+        this._clearErrors(element);
+        if (!hasShapeCarrier(inspection) || !inspection.requiresFallback) continue;
         const handle = this.controller.attach(element);
         this.automaticCounters.handleAttaches += 1;
         this.handles.set(element, handle);
-        this.handleSignatures.set(element, automaticComputedSignature(computed));
+        this.handleSignatures.set(element, automaticComputedSignature(inspection));
         ready.push(handle.ready.catch((error) => {
           this._recordElementError(error, element);
           handle.dispose();

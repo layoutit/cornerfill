@@ -25,7 +25,6 @@ import {
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(SCRIPT_DIRECTORY, "..");
-const DEFAULT_MARIO_TEXELS = "/Users/ekrof/fed/cssGraphics/dist/cssface/models/mario/assets/texels.webp";
 const VALID_BROWSERS = new Set(["chrome", "webkit", "firefox"]);
 const MANIFEST_SCHEMA = "cornerfill-oracle-run@1";
 
@@ -36,9 +35,9 @@ function usage() {
 
 Options:
   --browsers=<list>       Sequential browser list. Default: chrome
-  --cases=<list>          Fixture ids. Default: all
+  --cases=<list>          Fixture ids. Default: all portable cases
   --out=<directory>       Run output. Default: oracle/results/<UTC timestamp>
-  --mario-texels=<path>   Existing texels.webp source path
+  --mario-texels=<path>   Existing texels.webp source path, required by the Mario case
   --enforce-candidate     Exit nonzero unless approved candidate tolerances pass
 
 Environment:
@@ -58,9 +57,11 @@ function parseArguments(argv) {
   const values = {
     command,
     browsers: ["chrome"],
-    cases: oracleCases.map(({ id }) => id),
+    cases: oracleCases.filter(({ id }) => id !== "mario-texel-face").map(({ id }) => id),
     out: null,
-    marioTexels: process.env.CORNERFILL_MARIO_TEXELS || DEFAULT_MARIO_TEXELS,
+    marioTexels: process.env.CORNERFILL_MARIO_TEXELS
+      ? resolve(process.env.CORNERFILL_MARIO_TEXELS)
+      : null,
     enforceCandidate: false,
   };
   for (const argument of argv) {
@@ -153,7 +154,7 @@ async function startFixtureServer(marioTexels) {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/__mario/texels.webp") {
-        if (!existsSync(marioTexels)) {
+        if (!marioTexels || !existsSync(marioTexels)) {
           response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
           response.end("Mario texels source is unavailable\n");
           return;
@@ -478,8 +479,10 @@ async function runOracle(options) {
   const usesMario = (paint) => paint?.url === "/__mario/texels.webp"
     || paint?.layers?.some(usesMario) === true;
   const needsMario = selectedCases.some(({ paint }) => usesMario(paint));
-  if (needsMario && !existsSync(options.marioTexels)) {
-    throw new Error(`Mario case requires texels.webp: ${options.marioTexels}`);
+  if (needsMario && (!options.marioTexels || !existsSync(options.marioTexels))) {
+    throw new Error(
+      "Mario case requires texels.webp; set CORNERFILL_MARIO_TEXELS or pass --mario-texels=<path>",
+    );
   }
   const cli = locatePlaywrightCli();
   const driverDirectory = join(runDirectory, "driver");

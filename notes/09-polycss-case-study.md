@@ -7,7 +7,7 @@ This is the first high-value consumer for Cornerfill. It is also an unusually cl
 
 ## Current source facts
 
-The current Super Mario 64 adapter in `/Users/ekrof/fed/cssGraphics` emits 1,213 retained face leaves and an 820-frame loop.
+The inspected Super Mario 64 adapter in a sibling `cssGraphics` checkout emits 1,213 retained face leaves and an 820-frame loop.
 
 The common leaf style is:
 
@@ -52,11 +52,11 @@ research, but Cornerfill has no current parser/runtime/oracle support for it.
 
 Source anchors:
 
-- package CSS: `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/package.mjs`;
-- player leaf creation: `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/player/scene.ts`;
-- audit leaf creation: `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/audit/scene.ts`;
-- prepared playback contract: `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/stages/playbackPacket.mjs`;
-- prepared lighting contract: `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/stages/lighting.mjs`.
+- package CSS: `src/adapters/super-mario-64/package.mjs` in the inspected `cssGraphics` checkout;
+- player leaf creation: `src/adapters/super-mario-64/player/scene.ts`;
+- audit leaf creation: `src/adapters/super-mario-64/audit/scene.ts`;
+- prepared playback contract: `src/adapters/super-mario-64/stages/playbackPacket.mjs`;
+- prepared lighting contract: `src/adapters/super-mario-64/stages/lighting.mjs`.
 
 ## What Cornerfill changes
 

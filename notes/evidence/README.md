@@ -40,12 +40,10 @@ document.documentElement.dataset.phase   = "0" | "1"
 
 Source-workspace screenshots:
 
-- [WebKit initial](/Users/ekrof/fed/cssGraphics/.playwright-cli/page-2026-08-01T17-57-55-255Z.png)
-- [WebKit repaint](/Users/ekrof/fed/cssGraphics/.playwright-cli/page-2026-08-01T17-58-24-908Z.png)
-- [Firefox initial](/Users/ekrof/fed/cssGraphics/.playwright-cli/page-2026-08-01T17-59-07-135Z.png)
-- [Firefox repaint](/Users/ekrof/fed/cssGraphics/.playwright-cli/page-2026-08-01T17-59-25-017Z.png)
+- WebKit initial and repaint captures were retained in the original local `cssGraphics/.playwright-cli` session.
+- Firefox initial and repaint captures were retained in the original local `cssGraphics/.playwright-cli` session.
 
-The original scratch probe remains at `/Users/ekrof/fed/cssGraphics/output/playwright/live-paint-surface-probe.html`; the copy beside this record is the durable research artifact.
+The original scratch probe was run from `cssGraphics/output/playwright/live-paint-surface-probe.html`; the copy beside this record is the durable research artifact.
 
 ## What this establishes
 

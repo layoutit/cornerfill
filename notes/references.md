@@ -91,11 +91,11 @@ Pinned Firefox source snapshot: [`56ad29049a11ced909e25d7e1fabcc6155e1a516`](htt
 - [Preserved live-surface probe](evidence/live-paint-surface-probe.html): self-contained WebKit/Firefox transport experiment.
 - [Executable oracle contract](../oracle/README.md): production-adapter qualification states, exact native A/A requirement, and current contained-effect/external-outset boundary.
 - [Complete Firefox Mario ABBA trace](../output/playwright/firefox-mario/hardening-full-abba-v2-2026-08-02/README.md): eight fresh 820-tick workload-equivalent lanes with timing, paint, and teardown evidence; not native visual parity.
-- `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/package.mjs`: current paint declarations and atlas source.
-- `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/player/scene.ts`: current retained `u` face creation.
-- `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/stages/playbackPacket.mjs`: 820-frame, 1,213-leaf prepared playback contract.
-- `/Users/ekrof/fed/cssGraphics/src/adapters/super-mario-64/stages/lighting.mjs`: changed-only prepared lighting state and runtime contract.
-- `/Users/ekrof/fed/cssGraphics/build/generated/lean-mario-runtime-oracle-20260729/lighting-atlases.json`: inspected workload snapshot used in the case study; generated evidence, not a permanent API.
+- `src/adapters/super-mario-64/package.mjs` in the inspected `cssGraphics` checkout: current paint declarations and atlas source.
+- `src/adapters/super-mario-64/player/scene.ts`: current retained `u` face creation.
+- `src/adapters/super-mario-64/stages/playbackPacket.mjs`: 820-frame, 1,213-leaf prepared playback contract.
+- `src/adapters/super-mario-64/stages/lighting.mjs`: changed-only prepared lighting state and runtime contract.
+- `build/generated/lean-mario-runtime-oracle-20260729/lighting-atlases.json`: inspected workload snapshot used in the case study; generated evidence, not a permanent API.
 
 ## Source and license policy
 
