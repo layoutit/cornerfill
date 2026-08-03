@@ -90,7 +90,7 @@ export type RadiusSource =
   | BorderRadiusDeclarations
   | Readonly<{ kind: "longhands"; values: Four<string> }>;
 export type PaintSource = NormalizedPaintDescriptor;
-export type CornerfillSideValues<T> = T | Four<T> | Readonly<{
+type CornerfillSideValues<T> = T | Four<T> | Readonly<{
   bottom: T;
   left: T;
   right: T;
@@ -98,23 +98,14 @@ export type CornerfillSideValues<T> = T | Four<T> | Readonly<{
 }>;
 
 export interface CornerfillBorderDescriptor {
-  readonly color?: CornerfillSideValues<string> | undefined;
-  readonly colors?: CornerfillSideValues<string> | undefined;
-  readonly style?: CornerfillSideValues<string> | undefined;
-  readonly styles?: CornerfillSideValues<string> | undefined;
-  readonly width?: CornerfillSideValues<number> | null | undefined;
-  readonly widths?: CornerfillSideValues<number> | undefined;
+  readonly color?: string | undefined;
+  readonly style?: "none" | "solid" | undefined;
+  readonly width?: CornerfillSideValues<number> | undefined;
 }
 
 export interface CornerfillInsetShadowDescriptor {
-  readonly blur?: number | undefined;
   readonly color: string;
-  readonly inset?: true | undefined;
-  readonly kind?: "inset-solid-ring" | undefined;
-  readonly offset?: PixelPair | undefined;
-  readonly offsetX?: number | undefined;
-  readonly offsetY?: number | undefined;
-  readonly spread?: number | undefined;
+  readonly spread: number;
 }
 
 export interface CornerfillOutlineDescriptor {
@@ -122,14 +113,6 @@ export interface CornerfillOutlineDescriptor {
   readonly offset?: number | string | undefined;
   readonly style?: "none" | "solid" | undefined;
   readonly width: number | string;
-}
-
-export interface CornerfillFallbackRequirements {
-  readonly backdropFilterClip?: boolean | undefined;
-  readonly fragmentedBox?: boolean | undefined;
-  readonly hitTest?: boolean | undefined;
-  readonly overflowClip?: boolean | undefined;
-  readonly replacedContent?: boolean | undefined;
 }
 
 export interface CornerfillInstallOptions {
@@ -168,24 +151,25 @@ export interface CornerfillAttachConfig {
   readonly border?: Readonly<CornerfillBorderDescriptor> | null | undefined;
   readonly borderRadius?: RadiusSource | undefined;
   readonly cornerShape?: CornerShapeSource | undefined;
-  readonly dynamicCarriers?: boolean | undefined;
-  readonly mode?: "paint" | undefined;
   readonly observeBackgroundPosition?: boolean | undefined;
   readonly outline?: Readonly<CornerfillOutlineDescriptor> | null | undefined;
   readonly paint?: PaintSource | undefined;
   readonly rasterIsOpaque?: boolean | undefined;
-  readonly requirements?: Readonly<CornerfillFallbackRequirements> | undefined;
   readonly shadow?: string | Readonly<CornerfillInsetShadowDescriptor> | null | undefined;
   readonly visible?: boolean | undefined;
 }
 
-export interface CornerfillPreparedConfig extends CornerfillAttachConfig {
+export type CornerfillPreparedConfig = Omit<
+  CornerfillAttachConfig,
+  "observeBackgroundPosition" | "rasterIsOpaque"
+> & Readonly<{
   readonly deferHiddenSurface?: boolean | undefined;
   readonly dpr?: number | undefined;
   readonly geometry?: CornerGeometry | undefined;
   readonly size?: PixelPair | undefined;
-  readonly visibility?: boolean | undefined;
-}
+}>;
+
+type CornerfillPreparedResizeConfig = Omit<CornerfillPreparedConfig, "deferHiddenSurface" | "visible">;
 
 export interface CornerfillPreparedUpdate {
   readonly backgroundPosition?: PixelPair | undefined;
@@ -193,10 +177,12 @@ export interface CornerfillPreparedUpdate {
   readonly visible?: boolean | undefined;
 }
 
-export interface CornerfillHandleUpdate extends CornerfillAttachConfig {
-  readonly background?: PixelPair | undefined;
+export type CornerfillHandleUpdate = Omit<
+  CornerfillAttachConfig,
+  "observeBackgroundPosition" | "rasterIsOpaque"
+> & Readonly<{
   readonly backgroundPosition?: PixelPair | undefined;
-}
+}>;
 
 interface OwnershipSnapshot {
   readonly borderOwner: string | null;
@@ -225,20 +211,8 @@ export interface HostComposition {
 }
 
 interface EntryCounters {
-  dynamicPaintUpdates: number;
-  ignoredStyleChanges: number;
-  ignoredStyleMutations: number;
-  opaqueFastPaints: number;
-  ownershipRepairs: number;
-  paintOnlyUpdates: number;
   paints: number;
-  preparedLayoutUpdates: number;
-  preparedPaints: number;
-  preparedScheduledFlushes: number;
-  preparedUpdates: number;
   styleChecks: number;
-  surfaceResizes: number;
-  visibilityUpdates: number;
 }
 
 interface ControllerCounters extends EntryCounters {
@@ -246,16 +220,27 @@ interface ControllerCounters extends EntryCounters {
   cancelledInitializations: number;
   deferredSurfaceEntries: number;
   detachments: number;
+  dynamicPaintUpdates: number;
   fallbackEntries: number;
   geometryBuilds: number;
   geometryCacheHits: number;
+  ignoredStyleChanges: number;
+  ignoredStyleMutations: number;
   imageCacheEvictions: number;
   imageCacheHits: number;
   imageDecodes: number;
   nativeEntries: number;
+  opaqueFastPaints: number;
+  ownershipRepairs: number;
+  paintOnlyUpdates: number;
   preparedBatches: number;
   preparedEntries: number;
+  preparedLayoutUpdates: number;
+  preparedPaints: number;
+  preparedUpdates: number;
   staleRefreshes: number;
+  surfaceResizes: number;
+  visibilityUpdates: number;
 }
 
 export type CornerfillEntryCounters = Readonly<EntryCounters>;
@@ -280,19 +265,7 @@ interface EntryDynamicSources {
 interface InitialSources {
   readonly borderSource: Readonly<OwnedBorderPaintState> | null;
   readonly dynamic: Readonly<EntryDynamicSources>;
-  readonly dynamicCarriers: boolean;
-  readonly initialBackground: Readonly<{
-    backgroundAttachment: string;
-    backgroundBlendMode: string;
-    backgroundClip: string;
-    backgroundColor: string;
-    backgroundImage: string;
-    backgroundOrigin: string;
-    backgroundPosition: string;
-    backgroundRepeat: string;
-    backgroundSize: string;
-    imageRendering: string;
-  }>;
+  readonly initialBackgroundPosition: string;
   readonly outlineSource: Readonly<ContainedOutlinePaintState> | null;
   readonly paintSource: PaintSource;
   readonly radiusCarrierBaseline: PhysicalRadiusValues | null;
@@ -307,12 +280,12 @@ interface InitialSources {
 }
 
 interface EntryState {
-  border?: Readonly<CornerfillBorderDescriptor> | null | undefined;
+  border?: Readonly<OwnedBorderPaintState> | null | undefined;
   borderRadius?: RadiusSource | undefined;
   cornerShape?: CornerShapeSource | undefined;
-  outline?: Readonly<CornerfillOutlineDescriptor> | null | undefined;
+  outline?: Readonly<ContainedOutlinePaintState> | null | undefined;
   paint?: PaintSource | undefined;
-  shadow?: string | Readonly<CornerfillInsetShadowDescriptor> | null | undefined;
+  shadow?: Readonly<InsetShadowPaintState> | null | undefined;
 }
 
 interface RuntimeEntry {
@@ -323,8 +296,6 @@ interface RuntimeEntry {
   committedRevision: number;
   composition: Readonly<HostComposition> | null;
   controller: CornerfillController;
-  counters: EntryCounters;
-  deferHiddenSurface: boolean;
   disposed: boolean;
   dpr: number;
   dynamicBackgroundPositionSpec: BackgroundPositionSpec | null;
@@ -333,7 +304,6 @@ interface RuntimeEntry {
   element: CornerfillElement;
   elementOwnerRegistry?: WeakMap<CornerfillElement, RuntimeEntry> | undefined;
   error: Error | null;
-  forcePaint: boolean;
   fullRefreshPending: boolean;
   geometry: CornerGeometry | null;
   geometryKey: string | null;
@@ -347,47 +317,46 @@ interface RuntimeEntry {
   inlineCarrierSignature: string;
   lastError: Error | null;
   lastInvalidationReason: string | null;
-  layerImageLeases: Map<string, Readonly<ImageLease>>;
-  mode: "paint";
+  layerImageLeases: Map<string, Readonly<ImageLease>> | null;
   native: boolean;
   needsFullPreparedPaint: boolean;
   needsPaint: boolean;
   outline: Readonly<ContainedOutlinePaintState> | null;
-  ownershipLastVerified: number | null;
   ownershipRoot: OwnershipRoot;
   ownershipSnapshot: Readonly<OwnershipSnapshot>;
   ownershipToken: string | null;
   ownershipVerified: boolean;
   paintKey: string | null;
+  paintCount: number;
   paintResult: Readonly<CornerfillPaintExplanation> | null;
   pendingReason: string | null;
   positionX: number;
   positionY: number;
   prepared: boolean;
   preparedBorderRadius: RadiusSource | undefined;
-  preparedBorderSource: Readonly<CornerfillBorderDescriptor> | null;
+  preparedBorderSource: Readonly<OwnedBorderPaintState> | null;
   preparedCornerShape: CornerShapeSource | undefined;
   preparedLayoutChain: Promise<unknown> | null;
-  preparedOutlineSource: Readonly<CornerfillOutlineDescriptor> | null;
+  preparedOutlineSource: Readonly<ContainedOutlinePaintState> | null;
   preparedPaintProgram: Readonly<PreparedOpaqueImageProgram> | null;
   preparedPaintSource: PaintSource;
   preparedResolvedPaint: ResolvedPaintDescriptor | null;
-  preparedShadowSource: string | Readonly<CornerfillInsetShadowDescriptor> | null;
+  preparedShadowSource: Readonly<InsetShadowPaintState> | null;
   ready: Promise<CornerfillEntryExplanation> | null;
   requestedVisible: boolean;
   resolvedImage: CornerfillRasterSource | null;
   revision: number;
-  saved: Map<string, Readonly<{ priority: string; value: string }>>;
+  saved: Map<string, Readonly<{ priority: string; value: string }>> | null;
   shadow: Readonly<InsetShadowPaintState> | null;
   state: EntryState | null;
   styleVisible: boolean;
+  styleCheckCount: number;
   surface: CornerfillSurface | null;
   surfaceWasDeferred: boolean;
   visible: boolean;
-  waiters: EntryWaiter[];
+  waiters: EntryWaiter[] | null;
   watchCarriers: boolean;
   watchPosition: boolean;
-  watchVisibility: boolean;
   width: number;
 }
 
@@ -416,7 +385,6 @@ export interface CornerfillEntryExplanation {
   readonly lastInvalidationReason: string | null;
   readonly lastError: string | null;
   readonly limitations: Readonly<Partial<typeof CORNERFILL_LIMITATIONS>>;
-  readonly mode: "paint";
   readonly oracleQualification: typeof CORNERFILL_ORACLE_QUALIFICATION;
   readonly ownershipVerified: boolean;
   readonly paint: Readonly<CornerfillPaintExplanation> | null;
@@ -453,8 +421,7 @@ export interface CornerfillHandle {
     options?: CornerWritingOptions,
   ): Promise<CornerfillEntryExplanation>;
   refresh(): Promise<CornerfillEntryExplanation>;
-  resize(next?: CornerfillPreparedConfig): Promise<CornerfillEntryExplanation>;
-  setVisible(visible: boolean): Promise<CornerfillEntryExplanation>;
+  resize(next?: CornerfillPreparedResizeConfig): Promise<CornerfillEntryExplanation>;
   update(next?: CornerfillHandleUpdate): Promise<CornerfillEntryExplanation>;
   verify(): Readonly<CornerfillEntryExplanation>;
 }
@@ -493,19 +460,11 @@ export interface CornerfillControllerHandle {
   destroy(): void;
   detach(element: CornerfillElement): boolean;
   explain(element: CornerfillElement): Readonly<CornerfillEntryExplanation> | null;
-  flushPrepared(): number;
   inspectAuthoredStyle(
     element: CornerfillElement,
     properties: readonly string[],
   ): Readonly<CornerfillAuthoredStyleInspection>;
   refresh(): Promise<Readonly<CornerfillEntryExplanation>[]>;
-  resizePrepared(
-    element: CornerfillElement,
-    config?: Readonly<CornerfillPreparedConfig>,
-  ): Promise<CornerfillEntryExplanation>;
-  setPreparedBackgroundPosition(element: CornerfillElement, x: number, y: number): void;
-  setPreparedBackgroundPositionY(element: CornerfillElement, y: number): void;
-  setPreparedVisibility(element: CornerfillElement, visible: boolean): void;
   stats(): Readonly<CornerfillControllerStats>;
   updatePreparedBatch(updates: readonly Readonly<CornerfillPreparedUpdate>[]): number;
 }
@@ -572,25 +531,6 @@ function applyPreparedLayoutSnapshot(
   entry.preparedPaintProgram = snapshot.program;
 }
 
-function createEntryCounters(): EntryCounters {
-  return {
-    dynamicPaintUpdates: 0,
-    ignoredStyleChanges: 0,
-    ignoredStyleMutations: 0,
-    opaqueFastPaints: 0,
-    ownershipRepairs: 0,
-    paintOnlyUpdates: 0,
-    paints: 0,
-    preparedLayoutUpdates: 0,
-    preparedPaints: 0,
-    preparedScheduledFlushes: 0,
-    preparedUpdates: 0,
-    styleChecks: 0,
-    surfaceResizes: 0,
-    visibilityUpdates: 0,
-  };
-}
-
 const EMPTY_PAINT_SOURCE = Object.freeze({
   clip: "border-box",
   color: "transparent",
@@ -599,10 +539,10 @@ const EMPTY_PAINT_SOURCE = Object.freeze({
 
 type RuntimeEntrySeed = Pick<
   RuntimeEntry,
-  "controller" | "element" | "mode" | "native" | "ownershipRoot" | "ownershipSnapshot" | "prepared"
+  "controller" | "element" | "native" | "ownershipRoot" | "ownershipSnapshot" | "prepared"
 > & Partial<Omit<
   RuntimeEntry,
-  "controller" | "element" | "mode" | "native" | "ownershipRoot" | "ownershipSnapshot" | "prepared"
+  "controller" | "element" | "native" | "ownershipRoot" | "ownershipSnapshot" | "prepared"
 >>;
 
 function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
@@ -613,15 +553,12 @@ function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
     boxMetrics: null,
     committedRevision: -1,
     composition: null,
-    counters: createEntryCounters(),
-    deferHiddenSurface: false,
     disposed: false,
     dpr: 1,
     dynamicBackgroundPositionSpec: null,
     dynamicPaintSource: EMPTY_PAINT_SOURCE,
     effectsKey: null,
     error: null,
-    forcePaint: false,
     fullRefreshPending: false,
     geometry: null,
     geometryKey: null,
@@ -635,14 +572,14 @@ function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
     inlineCarrierSignature: "",
     lastError: null,
     lastInvalidationReason: null,
-    layerImageLeases: new Map(),
+    layerImageLeases: null,
     needsFullPreparedPaint: false,
     needsPaint: false,
     outline: null,
-    ownershipLastVerified: null,
     ownershipToken: null,
     ownershipVerified: false,
     paintKey: null,
+    paintCount: 0,
     paintResult: null,
     pendingReason: null,
     positionX: 0,
@@ -660,17 +597,17 @@ function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
     requestedVisible: true,
     resolvedImage: null,
     revision: 0,
-    saved: new Map(),
+    saved: null,
     shadow: null,
     state: null,
     styleVisible: true,
+    styleCheckCount: 0,
     surface: null,
     surfaceWasDeferred: false,
     visible: true,
-    waiters: [],
+    waiters: null,
     watchCarriers: false,
     watchPosition: false,
-    watchVisibility: false,
     width: 0,
     ...seed,
   };
@@ -771,7 +708,7 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
   }),
   preparedLayoutObservation: Object.freeze({
     supported: false,
-    reason: "Prepared entries are caller-clocked; size and DPR changes require resizePrepared() or handle.resize().",
+    reason: "Prepared entries are caller-clocked; size and DPR changes require handle.resize().",
   }),
   exceptionalBatchCommit: Object.freeze({
     supported: false,
@@ -1317,16 +1254,6 @@ function assertOutlineHost(
   }
 }
 
-function assertFallbackRequirements(
-  requirements: Readonly<CornerfillFallbackRequirements> = {},
-): void {
-  if (requirements.overflowClip) throw new Error(CORNERFILL_LIMITATIONS.descendantOverflowClipping.reason);
-  if (requirements.hitTest) throw new Error(CORNERFILL_LIMITATIONS.shapedHitTesting.reason);
-  if (requirements.replacedContent) throw new Error(CORNERFILL_LIMITATIONS.replacedContentClipping.reason);
-  if (requirements.fragmentedBox) throw new Error(CORNERFILL_LIMITATIONS.fragmentedBoxes.reason);
-  if (requirements.backdropFilterClip) throw new Error(CORNERFILL_LIMITATIONS.backdropFilterClipping.reason);
-}
-
 function backgroundBoxMetrics(computed: CSSStyleDeclaration): Readonly<BackgroundBoxMetrics> {
   return Object.freeze({
     border: Object.freeze([
@@ -1443,7 +1370,7 @@ function captureBorder(
     throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
   }
   return normalizeBorder({
-    widths,
+    width: widths,
     color: typeof colorOverride === "string" && colorOverride ? colorOverride : paintedColors[0],
   });
 }
@@ -1470,46 +1397,28 @@ function borderSides(input: unknown, label: string): Four<number> {
 function normalizeBorder(border: unknown): Readonly<OwnedBorderPaintState> | null {
   if (border === null || border === undefined) return null;
   if (!isRecord(border)) throw new TypeError("border descriptor must be an object");
-  const widths = borderSides(border.widths ?? border.width ?? 0, "border widths");
+  const widths = borderSides(border.width ?? 0, "border width");
   if (widths.every((width) => width === 0)) return null;
-  const styles = border.styles ?? border.style ?? "solid";
-  const styleSides = (typeof styles === "string"
-    ? [styles, styles, styles, styles]
-    : Array.isArray(styles) ? [...styles] : isRecord(styles)
-      ? [styles.top, styles.right, styles.bottom, styles.left]
-      : [])
-    .map((style) => String(style).toLowerCase());
-  if (styleSides.length !== 4
-    || styleSides.some((style, index) => widths[index]! > 0 && style !== "solid")) {
+  const style = border.style ?? "solid";
+  if (typeof style !== "string" || style.toLowerCase() !== "solid") {
     throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
   }
-  const colors = border.colors ?? border.color;
-  const colorSides = typeof colors === "string"
-    ? [colors, colors, colors, colors]
-    : Array.isArray(colors) ? [...colors] : isRecord(colors)
-      ? [colors.top, colors.right, colors.bottom, colors.left]
-      : [];
-  if (colorSides.length !== 4 || colorSides.some((color, index) => widths[index]! > 0 && !color)) {
-    throw new TypeError("painted border sides require colors");
+  if (typeof border.color !== "string") {
+    if (Array.isArray(border.color) || isRecord(border.color)) {
+      throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
+    }
+    throw new TypeError("painted border requires a color");
   }
-  const paintedColors = colorSides.filter((_, index) => widths[index]! > 0).map(String);
-  if (!paintedColors.every((color) => color === paintedColors[0])) {
-    throw new TypeError(CORNERFILL_LIMITATIONS.perSideBorderPaint.reason);
+  const color = border.color;
+  if (!color) {
+    throw new TypeError("painted border requires a color");
   }
-  const color = paintedColors[0];
-  if (color === undefined) throw new TypeError("painted border sides require colors");
-  const normalizedColors = colorSides.map((sideColor) => String(sideColor ?? color));
   const normalized: Readonly<OwnedBorderPaintState> = Object.freeze({
     widths: Object.freeze(widths),
     width: widths.every((width) => width === widths[0]) ? widths[0] : null,
     color,
-    colors: frozenFour(
-      normalizedColors[0]!,
-      normalizedColors[1]!,
-      normalizedColors[2]!,
-      normalizedColors[3]!,
-    ),
-    styles: frozenFour(styleSides[0]!, styleSides[1]!, styleSides[2]!, styleSides[3]!),
+    colors: frozenFour(color, color, color, color),
+    styles: frozenFour("solid", "solid", "solid", "solid"),
   });
   return normalized;
 }
@@ -1545,28 +1454,22 @@ function normalizeInsetShadow(shadow: unknown): Readonly<InsetShadowPaintState> 
     if (lengths.length < 2 || lengths.length > 4 || color.length === 0) {
       throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
     }
-    shadow = {
-      inset,
-      offset: lengths.slice(0, 2),
-      blur: lengths[2] ?? 0,
-      spread: lengths[3] ?? 0,
+    const [offsetX, offsetY, blur = 0, spread = 0] = lengths;
+    if (offsetX !== 0 || offsetY !== 0 || blur !== 0 || spread < 0) {
+      throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
+    }
+    if (spread === 0) return null;
+    return Object.freeze({
+      kind: "inset-solid-ring",
+      spread,
       color: color.join(" "),
-    };
+    });
   }
   if (!isRecord(shadow)) {
     throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
   }
-  const offset = shadow.offset ?? [shadow.offsetX ?? 0, shadow.offsetY ?? 0];
-  const offsetX = Number(Array.isArray(offset) ? offset[0] : undefined);
-  const offsetY = Number(Array.isArray(offset) ? offset[1] : undefined);
-  const blur = Number(shadow.blur ?? 0);
-  const spread = Number(shadow.spread ?? 0);
-  const inset = shadow.inset === true || shadow.kind === "inset-solid-ring";
-  if (!inset) throw new TypeError(CORNERFILL_LIMITATIONS.outerEffects.reason);
-  if (!Array.isArray(offset) || offset.length !== 2
-    || ![offsetX, offsetY, blur, spread].every(Number.isFinite)
-    || offsetX !== 0 || offsetY !== 0 || blur !== 0 || spread < 0
-    || !shadow.color) {
+  const spread = Number(shadow.spread);
+  if (!Number.isFinite(spread) || spread < 0 || !shadow.color) {
     throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
   }
   if (spread === 0) return null;
@@ -1624,7 +1527,6 @@ function captureInitialSources(
   config: Readonly<CornerfillAttachConfig>,
   computed: CSSStyleDeclaration,
 ): Readonly<InitialSources> {
-  const dynamicCarriers = config.dynamicCarriers === true;
   const radiusCapture = captureRadiusCarriers(computed);
   const computedShape = computed.getPropertyValue("corner-shape").trim();
   const shapeAttribute = element.getAttribute("data-cornerfill-shape");
@@ -1642,9 +1544,7 @@ function captureInitialSources(
       computed.borderBottomLeftRadius,
     ),
   });
-  const radiusSource: RadiusSource = config.borderRadius ?? (dynamicCarriers
-    ? computedRadiusSource
-    : radiusCapture?.present
+  const radiusSource: RadiusSource = config.borderRadius ?? (radiusCapture?.present
     ? radiusCapture.source
     : computedRadiusSource);
   const hasComputedShapeLonghands = Object.keys(shapeBaseline.physical).length > 0;
@@ -1710,21 +1610,13 @@ function captureInitialSources(
     borderSource,
     shadowSource,
     outlineSource,
-    radiusCarrierBaseline: dynamicCarriers
-      ? Object.freeze({
-        "top-left": "0px",
-        "top-right": "0px",
-        "bottom-right": "0px",
-        "bottom-left": "0px",
-      })
-      : radiusCapture?.baseline ?? null,
+    radiusCarrierBaseline: radiusCapture?.baseline ?? null,
     shapeCarrierBaseline: shapeCapture.baseline,
-    initialBackground,
+    initialBackgroundPosition: initialBackground.backgroundPosition,
     rasterIsOpaque: config.rasterIsOpaque === true,
-    dynamicCarriers,
     dynamic: Object.freeze({
       radius: config.borderRadius === undefined,
-      shape: config.cornerShape === undefined && (dynamicCarriers || shapeCapture.present === true),
+      shape: config.cornerShape === undefined && shapeCapture.present === true,
       paint: config.paint === undefined,
       paintPosition: config.paint === undefined
         && config.observeBackgroundPosition !== false
@@ -1738,11 +1630,11 @@ function captureInitialSources(
 }
 
 interface CurrentSources {
-  readonly borderSource: unknown;
-  readonly outlineSource: unknown;
+  readonly borderSource: Readonly<OwnedBorderPaintState> | null;
+  readonly outlineSource: Readonly<ContainedOutlinePaintState> | null;
   readonly paintSource: PaintSource;
   readonly radiusSource: RadiusSource;
-  readonly shadowSource: unknown;
+  readonly shadowSource: Readonly<InsetShadowPaintState> | null;
   readonly shapeSource: CornerShapeSource;
 }
 
@@ -1754,8 +1646,8 @@ function currentSources(
   if (!initial || !state) throw new TypeError("current sources require a dynamic Cornerfill entry");
   let radiusSource = state.borderRadius ?? initial.radiusSource;
   if (state.borderRadius === undefined && initial.dynamic.radius) {
-    radiusSource = initial.dynamicCarriers
-      ? Object.freeze({
+    radiusSource = captureRadiusCarriers(computed, initial.radiusCarrierBaseline)?.source
+      ?? Object.freeze({
         kind: "longhands",
         values: Object.freeze([
           computed.borderTopLeftRadius,
@@ -1763,17 +1655,7 @@ function currentSources(
           computed.borderBottomRightRadius,
           computed.borderBottomLeftRadius,
         ]) as Four<string>,
-      })
-      : captureRadiusCarriers(computed, initial.radiusCarrierBaseline)?.source
-        ?? Object.freeze({
-          kind: "longhands",
-          values: Object.freeze([
-            computed.borderTopLeftRadius,
-            computed.borderTopRightRadius,
-            computed.borderBottomRightRadius,
-            computed.borderBottomLeftRadius,
-          ]) as Four<string>,
-        });
+      });
   }
   let shapeSource = state.cornerShape ?? initial.shapeSource;
   if (state.cornerShape === undefined && initial.dynamic.shape) {
@@ -1782,18 +1664,7 @@ function currentSources(
   }
   let paintSource = state.paint ?? initial.paintSource;
   if (state.paint === undefined && initial.dynamic.paint) {
-    const paintDefaults = initial.dynamicCarriers ? {
-      backgroundColor: "transparent",
-      backgroundImage: "none",
-      backgroundSize: "auto",
-      backgroundPosition: "0% 0%",
-      backgroundRepeat: "repeat",
-      backgroundOrigin: "padding-box",
-      backgroundClip: "border-box",
-      backgroundBlendMode: "normal",
-      backgroundAttachment: "scroll",
-    } : computed;
-    paintSource = captureComputedPaint(paintDefaults, {
+    paintSource = captureComputedPaint(computed, {
       color: readColorCarrier(computed, CARRIER.backgroundColor),
       image: readCarrier(computed, CARRIER.backgroundImage),
       size: readCarrier(computed, CARRIER.backgroundSize),
@@ -1815,20 +1686,15 @@ function currentSources(
   if (initial.rasterIsOpaque && paintSource.kind === "image" && paintSource.opaque !== true) {
     paintSource = Object.freeze({ ...paintSource, opaque: true });
   }
-  let borderSource = state.border ?? initial.borderSource;
+  let borderSource = state.border !== undefined ? state.border : initial.borderSource;
   if (state.border === undefined && initial.dynamic.border) {
-    let colorCarrier = readBorderColorCarriers(computed);
-    if (initial.dynamicCarriers && Array.isArray(colorCarrier)) {
-      colorCarrier = colorCarrier.map((color) => color || computed.color);
-    }
+    const colorCarrier = readBorderColorCarriers(computed);
     borderSource = captureBorder(
       computed,
       colorCarrier
-        || (initial.dynamicCarriers
-          ? computed.color
-          : isRecord(initial.borderSource) && typeof initial.borderSource.color === "string"
-            ? initial.borderSource.color
-            : ""),
+        || (isRecord(initial.borderSource) && typeof initial.borderSource.color === "string"
+          ? initial.borderSource.color
+          : ""),
     );
   }
   let shadowSource = state.shadow !== undefined ? state.shadow : initial.shadowSource;
@@ -1975,11 +1841,14 @@ function imageRequest(
 }
 
 function releaseLayerImageLeases(entry: RuntimeEntry, keep: ReadonlySet<string> | null = null): void {
-  for (const [identity, lease] of entry.layerImageLeases ?? []) {
+  const leases = entry.layerImageLeases;
+  if (!leases) return;
+  for (const [identity, lease] of leases) {
     if (keep?.has(identity)) continue;
     lease.release();
-    entry.layerImageLeases.delete(identity);
+    leases.delete(identity);
   }
+  if (leases.size === 0) entry.layerImageLeases = null;
 }
 
 export function detectCornerfillCapabilities(
@@ -2242,7 +2111,7 @@ function captureBackgroundPosition(entry: RuntimeEntry): boolean {
       parseBackgroundPosition(
         computed.getPropertyValue("background-position").trim()
           || computed.backgroundPosition
-          || initial.initialBackground.backgroundPosition
+          || initial.initialBackgroundPosition
           || "0% 0%",
       ) as Extract<BackgroundPositionSpec, { kind: "components" }>
     ));
@@ -2341,7 +2210,6 @@ function entryExplanation(entry: RuntimeEntry): Readonly<CornerfillEntryExplanat
     schema: "cornerfill-entry-explanation@2",
     runtime: CORNERFILL_RUNTIME_SCHEMA,
     status: entry.disposed ? "disposed" : entry.error ? "error" : entry.initialized ? "active" : "initializing",
-    mode: entry.mode,
     backend: entry.native ? "native-corner-shape" : surface?.backend ?? "pending",
     paintOwnership: entry.native ? "browser-native" : "host-background-border-and-contained-effects",
     implementationStatus: entry.native ? "NATIVE" : "IMPLEMENTED",
@@ -2381,7 +2249,10 @@ function entryExplanation(entry: RuntimeEntry): Readonly<CornerfillEntryExplanat
         : null,
       layoutUpdates: "explicit",
     }) : null,
-    counters: Object.freeze({ ...entry.counters }),
+    counters: Object.freeze({
+      paints: entry.paintCount,
+      styleChecks: entry.styleCheckCount,
+    }),
   }) as Readonly<CornerfillEntryExplanation>;
 }
 
@@ -2407,7 +2278,6 @@ class CornerfillController {
   declare readonly preparedDirty: Set<RuntimeEntry>;
   declare readonly preparedOwnershipVerificationEntries: Set<RuntimeEntry>;
   declare preparedOwnershipVerification: Promise<Map<RuntimeEntry, unknown>> | null;
-  declare preparedFlushQueued: boolean;
   declare readonly activeAnimations: Map<RuntimeEntry, Set<string>>;
   declare flushHandle: number | null;
   declare flushRunning: boolean;
@@ -2457,7 +2327,6 @@ class CornerfillController {
     this.preparedDirty = new Set();
     this.preparedOwnershipVerificationEntries = new Set();
     this.preparedOwnershipVerification = null;
-    this.preparedFlushQueued = false;
     this.activeAnimations = new Map();
     this.flushHandle = null;
     this.flushRunning = false;
@@ -2485,7 +2354,6 @@ class CornerfillController {
       preparedEntries: 0,
       preparedUpdates: 0,
       preparedBatches: 0,
-      preparedScheduledFlushes: 0,
       preparedPaints: 0,
       deferredSurfaceEntries: 0,
       cancelledInitializations: 0,
@@ -2504,7 +2372,6 @@ class CornerfillController {
     this._onAnimationStart = this._onAnimationStart.bind(this);
     this._onAnimationEnd = this._onAnimationEnd.bind(this);
     this._animationTick = this._animationTick.bind(this);
-    this._flushPrepared = this._flushPrepared.bind(this);
     this.observersInstalled = false;
   }
 
@@ -2601,7 +2468,6 @@ class CornerfillController {
     if (entry.native || entry.disposed || !entry.surface || surfaceTokenIsApplied(entry)) return false;
     applyOwnedStyles(entry);
     this.counters.ownershipRepairs += 1;
-    entry.counters.ownershipRepairs += 1;
     entry.lastInvalidationReason = "ownership-repair-without-repaint";
     return true;
   }
@@ -2663,7 +2529,6 @@ class CornerfillController {
       );
     }
     entry.ownershipVerified = true;
-    entry.ownershipLastVerified = this.view.performance?.now?.() ?? Date.now();
   }
 
   _verifyPreparedOwnership(entry: RuntimeEntry): Promise<void> {
@@ -2853,7 +2718,6 @@ class CornerfillController {
             || record.attributeName === OWNED_SURFACE_ATTRIBUTE)
             && surfaceTokenIsApplied(entry)) {
             this.counters.ignoredStyleMutations += 1;
-            entry.counters.ignoredStyleMutations += 1;
             continue;
           }
           if (record.attributeName === "class") this._updateEntryStyleVisibility(entry);
@@ -2868,7 +2732,6 @@ class CornerfillController {
             continue;
           }
           this.counters.ignoredStyleMutations += 1;
-          entry.counters.ignoredStyleMutations += 1;
           continue;
         }
         if (visibilityInputChanged) visibilityStyleEntries.add(entry);
@@ -2898,9 +2761,8 @@ class CornerfillController {
         : false;
       if (positionChanged) {
         this.counters.dynamicPaintUpdates += 1;
-        entry.counters.dynamicPaintUpdates += 1;
       }
-      const visibilityChanged = entry.watchVisibility && visibilityStyleEntries.has(entry)
+      const visibilityChanged = visibilityStyleEntries.has(entry)
         ? this._updateEntryStyleVisibility(entry)
         : false;
       const paintInputChanged = paintStyleEntries.has(entry);
@@ -2916,12 +2778,11 @@ class CornerfillController {
         );
       } else {
         this.counters.ignoredStyleMutations += 1;
-        entry.counters.ignoredStyleMutations += 1;
       }
     }
     if (visibilityAncestors.size > 0) {
       for (const entry of this.entries) {
-        if (entry.native || entry.prepared || entry.disposed || !entry.watchVisibility
+        if (entry.native || entry.prepared || entry.disposed
           || visibilityAncestors.has(entry.element)) continue;
         const inheritedVisibilityMayHaveChanged = [...visibilityAncestors].some((ancestor) => (
           shadowIncludingContains(ancestor, entry.element)
@@ -2960,7 +2821,6 @@ class CornerfillController {
     entry.visible = nextVisible;
     if (nextVisible) entry.needsPaint = true;
     this.counters.visibilityUpdates += 1;
-    entry.counters.visibilityUpdates += 1;
     return true;
   }
 
@@ -2985,7 +2845,6 @@ class CornerfillController {
     }
     this._releaseOwnershipRoot(previousRoot);
     this.counters.ownershipRepairs += 1;
-    entry.counters.ownershipRepairs += 1;
     entry.lastInvalidationReason = "attachment-root-migration";
     return true;
   }
@@ -3096,6 +2955,7 @@ class CornerfillController {
   }
 
   _settleWaiters(entry: RuntimeEntry, revision: number, error: unknown = null): void {
+    if (!entry.waiters) return;
     const pending: EntryWaiter[] = [];
     for (const waiter of entry.waiters) {
       if (waiter.revision > revision) {
@@ -3105,7 +2965,7 @@ class CornerfillController {
       if (error) waiter.reject(error);
       else waiter.resolve(entryExplanation(entry));
     }
-    entry.waiters = pending;
+    entry.waiters = pending.length > 0 ? pending : null;
   }
 
   _markDirty(entry: RuntimeEntry, reason: string, needsFullRefresh: boolean): number {
@@ -3127,7 +2987,9 @@ class CornerfillController {
   ): Promise<CornerfillEntryExplanation> {
     if (entry.disposed) return Promise.resolve(entryExplanation(entry));
     const revision = this._markDirty(entry, reason, needsFullRefresh);
-    return new Promise((resolve, reject) => entry.waiters.push({ resolve, reject, revision }));
+    return new Promise((resolve, reject) => (
+      (entry.waiters ??= []).push({ resolve, reject, revision })
+    ));
   }
 
   async _flush() {
@@ -3218,6 +3080,7 @@ class CornerfillController {
       }
       const desired = new Set<string>();
       const layers: NormalizedBackgroundLayer[] = [];
+      const leases = entry.layerImageLeases ??= new Map();
       for (const layer of descriptor.layers) {
         if (layer.kind !== "image" || layer.image) {
           layers.push(layer);
@@ -3225,23 +3088,23 @@ class CornerfillController {
         }
         const request = imageRequest(this.document, layer);
         desired.add(request.identity);
-        let lease = entry.layerImageLeases.get(request.identity);
+        let lease = leases.get(request.identity);
         if (!lease) {
           lease = this.images.acquire(request.absoluteUrl, { crossOrigin: request.crossOrigin });
-          entry.layerImageLeases.set(request.identity, lease);
+          leases.set(request.identity, lease);
         }
         let image: CornerfillRasterSource;
         try {
           image = await lease.promise;
         } catch (error) {
           if (!this._entryIsCurrent(entry, revision)
-            || entry.layerImageLeases.get(request.identity) !== lease) {
+            || entry.layerImageLeases?.get(request.identity) !== lease) {
             throw new StaleEntryWorkError();
           }
           throw error;
         }
         if (!this._entryIsCurrent(entry, revision)
-          || entry.layerImageLeases.get(request.identity) !== lease) {
+          || entry.layerImageLeases?.get(request.identity) !== lease) {
           throw new StaleEntryWorkError();
         }
         layers.push(Object.freeze({ ...layer, image }));
@@ -3324,10 +3187,10 @@ class CornerfillController {
     const paint = await this._resolvedPaint(entry, descriptor, width, height, revision, boxMetrics);
     this._assertEntryCurrent(entry, revision);
     const nextPaintKey = `${width}|${height}|${descriptorKey}|${JSON.stringify(boxMetrics)}`;
-    const border = normalizeBorder(sources.borderSource);
+    const border = sources.borderSource;
     const nextBorderKey = border ? JSON.stringify(border) : "none";
-    const shadow = normalizeInsetShadow(sources.shadowSource);
-    const outline = normalizeContainedOutline(sources.outlineSource);
+    const shadow = sources.shadowSource;
+    const outline = sources.outlineSource;
     assertOutlineHost(this.view, entry.element, outline);
     const nextEffectsKey = JSON.stringify([shadow, outline]);
     return Object.freeze({
@@ -3397,7 +3260,7 @@ class CornerfillController {
         entry.surface.commit();
         this._assertEntryCurrent(entry, revision);
         applyOwnedStyles(entry);
-        entry.counters.paints += 1;
+        entry.paintCount += 1;
         this.counters.paints += 1;
         entry.initialized = true;
         entry.committedRevision = revision;
@@ -3447,9 +3310,8 @@ class CornerfillController {
     const descriptorKey = paintDescriptorKey(descriptor);
     const nextPaintKey = `${entry.width}|${entry.height}|${descriptorKey}|${JSON.stringify(entry.boxMetrics)}`;
     const paintChanged = nextPaintKey !== entry.paintKey;
-    if (!paintChanged && !entry.needsPaint && !entry.forcePaint) {
+    if (!paintChanged && !entry.needsPaint) {
       this.counters.ignoredStyleChanges += 1;
-      entry.counters.ignoredStyleChanges += 1;
       entry.lastInvalidationReason = "dynamic-position-without-paint-input-change";
       return true;
     }
@@ -3484,17 +3346,14 @@ class CornerfillController {
       dpr: entry.dpr,
     });
     if (fastPaint) {
-      entry.counters.opaqueFastPaints += 1;
       this.counters.opaqueFastPaints += 1;
     }
     surface.commit();
     if (surface.backend === "static-data-url") applyOwnedStyles(entry);
-    entry.counters.paints += 1;
+    entry.paintCount += 1;
     this.counters.paints += 1;
-    entry.counters.paintOnlyUpdates += 1;
     this.counters.paintOnlyUpdates += 1;
     entry.needsPaint = false;
-    entry.forcePaint = false;
     entry.lastInvalidationReason = reason || "dynamic-background-position";
     this._clearError(entry);
     return true;
@@ -3522,7 +3381,7 @@ class CornerfillController {
 
   async _refreshEntryFull(entry: RuntimeEntry, reason: string | null, revision: number): Promise<boolean> {
     this.counters.styleChecks += 1;
-    entry.counters.styleChecks += 1;
+    entry.styleCheckCount += 1;
     const snapshot = await this._snapshot(entry, revision);
     this._assertEntryCurrent(entry, revision);
     const surface = entry.surface;
@@ -3535,10 +3394,9 @@ class CornerfillController {
     const resized = surface.resize(snapshot.width, snapshot.height, snapshot.dpr);
     if (resized) {
       this.counters.surfaceResizes += 1;
-      entry.counters.surfaceResizes += 1;
     }
     const needsPaint = geometryChanged || paintChanged || borderChanged || effectsChanged
-      || resized || entry.needsPaint || entry.forcePaint;
+      || resized || entry.needsPaint;
     entry.geometry = snapshot.geometry;
     entry.geometryKey = snapshot.geometryKey;
     entry.width = snapshot.width;
@@ -3567,10 +3425,9 @@ class CornerfillController {
       });
       surface.commit();
       applyOwnedStyles(entry);
-      entry.counters.paints += 1;
+      entry.paintCount += 1;
       this.counters.paints += 1;
       entry.needsPaint = false;
-      entry.forcePaint = false;
       entry.lastInvalidationReason = reason || "direct-update";
     } else if (needsPaint) {
       entry.needsPaint = true;
@@ -3578,12 +3435,10 @@ class CornerfillController {
     } else if (!surfaceTokenIsApplied(entry)) {
       applyOwnedStyles(entry);
       this.counters.ownershipRepairs += 1;
-      entry.counters.ownershipRepairs += 1;
       entry.lastInvalidationReason = "ownership-repair-without-repaint";
     } else {
       this._assertOwnedStylesApplied(entry);
       this.counters.ignoredStyleChanges += 1;
-      entry.counters.ignoredStyleChanges += 1;
       entry.lastInvalidationReason = "style-change-without-paint-input-change";
     }
     this._clearError(entry);
@@ -3649,8 +3504,7 @@ class CornerfillController {
     applyOwnedStyles(entry, verifyOwnership);
     this._clearError(entry);
     entry.needsPaint = false;
-    entry.counters.paints += 1;
-    entry.counters.preparedPaints += 1;
+    entry.paintCount += 1;
     this.counters.paints += 1;
     this.counters.preparedPaints += 1;
     entry.needsFullPreparedPaint = false;
@@ -3686,10 +3540,7 @@ class CornerfillController {
     if (surface.backend === "static-data-url" || !surfaceTokenIsApplied(entry)) applyOwnedStyles(entry);
     entry.paintResult = null;
     entry.needsPaint = false;
-    entry.counters.paints += 1;
-    entry.counters.paintOnlyUpdates += 1;
-    entry.counters.opaqueFastPaints += 1;
-    entry.counters.preparedPaints += 1;
+    entry.paintCount += 1;
     this.counters.paints += 1;
     this.counters.paintOnlyUpdates += 1;
     this.counters.opaqueFastPaints += 1;
@@ -3698,36 +3549,29 @@ class CornerfillController {
     this._clearError(entry);
   }
 
-  _queuePrepared(entry: RuntimeEntry, schedule = true): void {
+  _queuePrepared(entry: RuntimeEntry): void {
     if (!entry.initialized || !entry.visible) {
       entry.needsPaint = true;
       return;
     }
     this.preparedDirty.add(entry);
-    if (schedule && !this.preparedFlushQueued) {
-      this.preparedFlushQueued = true;
-      this.counters.preparedScheduledFlushes += 1;
-      entry.counters.preparedScheduledFlushes += 1;
-      queueMicrotask(this._flushPrepared);
-    }
   }
 
   _flushPrepared(throwOnError = false): number {
-    this.preparedFlushQueued = false;
     if (this.preparedDirty.size === 0) return 0;
     const entries = [...this.preparedDirty];
     this.preparedDirty.clear();
     let painted = 0;
     let firstError = null;
     for (const entry of entries) {
-      const before = entry.counters.paints;
+      const before = entry.paintCount;
       try {
         this._paintPreparedEntry(entry);
       } catch (error) {
         this._recordError(entry, error);
         firstError ??= error;
       }
-      painted += entry.counters.paints - before;
+      painted += entry.paintCount - before;
     }
     if (firstError) {
       if (throwOnError) throw firstError;
@@ -3741,7 +3585,6 @@ class CornerfillController {
     entry: RuntimeEntry,
     x: number,
     y: number,
-    schedule = true,
   ): boolean {
     if (!entry.prepared) throw new TypeError("element is not attached through attachPrepared()");
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
@@ -3756,48 +3599,26 @@ class CornerfillController {
     entry.positionY = y;
     entry.paintResult = null;
     entry.needsPaint = true;
-    entry.counters.dynamicPaintUpdates += 1;
-    entry.counters.preparedUpdates += 1;
     this.counters.dynamicPaintUpdates += 1;
     this.counters.preparedUpdates += 1;
-    this._queuePrepared(entry, schedule);
+    this._queuePrepared(entry);
     return true;
   }
 
-  _setPreparedVisibility(entry: RuntimeEntry, visible: boolean, schedule = true): boolean {
+  _setPreparedVisibility(entry: RuntimeEntry, visible: boolean): boolean {
     if (!entry.prepared) throw new TypeError("element is not attached through attachPrepared()");
     const next = Boolean(visible);
     if (entry.visible === next) return false;
     entry.visible = next;
     entry.requestedVisible = next;
-    entry.counters.visibilityUpdates += 1;
-    entry.counters.preparedUpdates += 1;
     this.counters.visibilityUpdates += 1;
     this.counters.preparedUpdates += 1;
     if (!next) {
       this.preparedDirty.delete(entry);
       return true;
     }
-    this._queuePrepared(entry, schedule);
+    this._queuePrepared(entry);
     return true;
-  }
-
-  setPreparedBackgroundPosition(element: CornerfillElement, x: number, y: number): void {
-    const entry = this.entryByElement.get(element);
-    if (!entry || entry.disposed) throw new Error("prepared element is not attached");
-    this._setPreparedBackgroundPosition(entry, x, y, true);
-  }
-
-  setPreparedBackgroundPositionY(element: CornerfillElement, y: number): void {
-    const entry = this.entryByElement.get(element);
-    if (!entry || entry.disposed) throw new Error("prepared element is not attached");
-    this._setPreparedBackgroundPosition(entry, entry.positionX, y, true);
-  }
-
-  setPreparedVisibility(element: CornerfillElement, visible: boolean): void {
-    const entry = this.entryByElement.get(element);
-    if (!entry || entry.disposed) throw new Error("prepared element is not attached");
-    this._setPreparedVisibility(entry, visible, true);
   }
 
   updatePreparedBatch(updates: readonly CornerfillPreparedUpdate[]): number {
@@ -3842,16 +3663,11 @@ class CornerfillController {
           candidate.entry,
           candidate.positionX,
           candidate.positionY,
-          false,
         );
       }
-      this._setPreparedVisibility(candidate.entry, candidate.visible, false);
+      this._setPreparedVisibility(candidate.entry, candidate.visible);
     }
     this.counters.preparedBatches += 1;
-    return this._flushPrepared(true);
-  }
-
-  flushPrepared(): number {
     return this._flushPrepared(true);
   }
 
@@ -3906,12 +3722,15 @@ class CornerfillController {
         backgroundPosition: Object.freeze([entry.positionX, entry.positionY]) as PixelPair,
       });
     }
-    const borderSource = config.border === undefined ? entry.preparedBorderSource : config.border;
-    const border = normalizeBorder(borderSource ?? null);
-    const shadowSource = config.shadow === undefined ? entry.preparedShadowSource : config.shadow;
-    const outlineSource = config.outline === undefined ? entry.preparedOutlineSource : config.outline;
-    const shadow = normalizeInsetShadow(shadowSource ?? null);
-    const outline = normalizeContainedOutline(outlineSource ?? null);
+    const border = config.border === undefined
+      ? entry.preparedBorderSource
+      : normalizeBorder(config.border);
+    const shadow = config.shadow === undefined
+      ? entry.preparedShadowSource
+      : normalizeInsetShadow(config.shadow);
+    const outline = config.outline === undefined
+      ? entry.preparedOutlineSource
+      : normalizeContainedOutline(config.outline);
     assertOutlineHost(this.view, entry.element, outline);
     const program = paint.kind === "image" && paint.opaque === true && !border && !shadow && !outline
       ? createPreparedOpaqueImageProgram({ geometry, paint, dpr })
@@ -3943,7 +3762,6 @@ class CornerfillController {
     const resized = entry.surface?.resize(snapshot.width, snapshot.height, snapshot.dpr) ?? false;
     if (resized) {
       this.counters.surfaceResizes += 1;
-      entry.counters.surfaceResizes += 1;
     }
     applyPreparedLayoutSnapshot(entry, snapshot);
     entry.needsPaint = true;
@@ -3952,17 +3770,15 @@ class CornerfillController {
       if (!entry.surface) this._createPreparedSurface(entry);
       else this._paintPreparedFull(entry);
     }
-    entry.counters.preparedUpdates += 1;
-    entry.counters.preparedLayoutUpdates += 1;
     this.counters.preparedUpdates += 1;
     this.counters.preparedLayoutUpdates += 1;
     entry.lastInvalidationReason = reason;
     this._clearError(entry);
   }
 
-  resizePrepared(
+  _resizePrepared(
     element: CornerfillElement,
-    config: Readonly<CornerfillPreparedConfig> = {},
+    config: Readonly<CornerfillPreparedResizeConfig> = {},
   ): Promise<CornerfillEntryExplanation> {
     const entry = this.entryByElement.get(element);
     if (!entry || entry.disposed || !entry.prepared) throw new Error("prepared element is not attached");
@@ -3999,7 +3815,7 @@ class CornerfillController {
       this._assertEntryCurrent(entry, revision);
       applyPreparedLayoutSnapshot(entry, snapshot);
       entry.initialized = true;
-      if (entry.visible || !entry.deferHiddenSurface) {
+      if (entry.visible || config.deferHiddenSurface !== true) {
         this._createPreparedSurface(entry, false);
         await this._verifyPreparedOwnership(entry);
         this._assertEntryCurrent(entry, revision);
@@ -4048,8 +3864,6 @@ class CornerfillController {
       throw new TypeError("attachPrepared() requires prepared geometry or explicit borderRadius and cornerShape");
     }
     if (!config.paint) throw new TypeError("attachPrepared() requires normalized paint state");
-    const requirements = config.requirements ?? {};
-    assertFallbackRequirements(requirements);
     assertCooperativeOwnership(element);
     const composition = inspectFallbackHost(this.view, element, this.view.getComputedStyle(element));
     const backend = this._selectedFallbackBackend();
@@ -4063,67 +3877,28 @@ class CornerfillController {
     if (backend === "static-data-url" && !this.options.staticFallback) {
       throw new Error("static fallback is disabled");
     }
-    const visible = config.visibility ?? config.visible ?? true;
+    const visible = config.visible ?? true;
     const entry = createRuntimeEntry({
       controller: this,
       element,
       native: false,
       prepared: true,
       backend,
-      mode: config.mode ?? "paint",
-      initial: null,
-      state: null,
       ownershipSnapshot: captureOwnershipState(element),
       ownershipRoot: element.getRootNode() as OwnershipRoot,
-      ownershipToken: null,
-      surface: null,
-      geometry: null,
-      geometryKey: null,
       width: config.size[0],
       height: config.size[1],
       dpr: config.dpr ?? this.view.devicePixelRatio ?? 1,
       paintKey: "prepared",
       borderKey: "none",
-      border: null,
       effectsKey: "[null,null]",
-      shadow: null,
-      outline: null,
       composition,
-      boxMetrics: null,
-      paintResult: null,
-      preparedResolvedPaint: null,
-      preparedPaintProgram: null,
       preparedPaintSource: config.paint,
-      preparedBorderSource: config.border ?? null,
-      preparedShadowSource: config.shadow ?? null,
-      preparedOutlineSource: config.outline ?? null,
       preparedBorderRadius: config.borderRadius,
       preparedCornerShape: config.cornerShape,
-      positionX: 0,
-      positionY: 0,
-      imageLease: null,
-      imageLeaseUrl: null,
-      layerImageLeases: new Map(),
-      resolvedImage: null,
       requestedVisible: Boolean(visible),
-      styleVisible: true,
       visible: Boolean(visible),
-      deferHiddenSurface: config.deferHiddenSurface === true,
-      surfaceWasDeferred: false,
-      needsPaint: false,
-      needsFullPreparedPaint: false,
-      forcePaint: false,
-      initialized: false,
-      disposed: false,
-      error: null,
-      lastError: null,
-      revision: 0,
-      committedRevision: -1,
-      pendingReason: null,
-      fullRefreshPending: false,
-      waiters: [],
       lastInvalidationReason: "prepared-attach",
-      counters: createEntryCounters(),
     });
     claimElement(entry);
     this._retainOwnershipRoot(entry.ownershipRoot, false);
@@ -4166,19 +3941,12 @@ class CornerfillController {
       element,
       native: true,
       prepared: false,
-      mode: config.mode ?? "paint",
       ownershipSnapshot: Object.freeze({ borderOwner: null, owner: null, surfaceOwner: null }),
       ownershipRoot: this.document,
-      disposed: false,
       initialized: true,
-      error: null,
-      lastError: null,
-      revision: 0,
       committedRevision: 0,
-      waiters: [],
       saved,
       lastInvalidationReason: "native-qualified",
-      counters: createEntryCounters(),
     });
     entry.ready = Promise.resolve(entryExplanation(entry));
     claimElement(entry);
@@ -4207,7 +3975,7 @@ class CornerfillController {
           return Promise.resolve(entryExplanation(entry));
         }
         if (entry.prepared) {
-          const backgroundPosition = next.backgroundPosition ?? next.background;
+          const backgroundPosition = next.backgroundPosition;
           if (backgroundPosition !== undefined) {
             if (!Array.isArray(backgroundPosition) || backgroundPosition.length !== 2) {
               throw new TypeError("prepared background update requires [x, y]");
@@ -4216,10 +3984,9 @@ class CornerfillController {
               entry,
               backgroundPosition[0],
               backgroundPosition[1],
-              false,
             );
           }
-          if (next.visible !== undefined) controller._setPreparedVisibility(entry, next.visible, false);
+          if (next.visible !== undefined) controller._setPreparedVisibility(entry, next.visible);
           controller._flushPrepared(true);
           return Promise.resolve(entryExplanation(entry));
         }
@@ -4239,29 +4006,32 @@ class CornerfillController {
         }
         if (next.paint !== undefined) {
           state.paint = next.paint;
-          entry.forcePaint = true;
+          entry.needsPaint = true;
           changed = true;
         }
         if (next.border !== undefined) {
-          state.border = next.border;
-          entry.forcePaint = true;
+          state.border = normalizeBorder(next.border);
+          entry.needsPaint = true;
           changed = true;
         }
         if (next.shadow !== undefined) {
-          state.shadow = next.shadow;
-          entry.forcePaint = true;
+          state.shadow = normalizeInsetShadow(next.shadow);
+          entry.needsPaint = true;
           changed = true;
         }
         if (next.outline !== undefined) {
-          state.outline = next.outline;
-          entry.forcePaint = true;
+          state.outline = normalizeContainedOutline(next.outline);
+          entry.needsPaint = true;
           changed = true;
         }
         if (next.visible !== undefined) {
           const previousVisible = entry.visible;
           entry.requestedVisible = Boolean(next.visible);
           entry.visible = entry.requestedVisible && entry.styleVisible;
-          if (entry.visible !== previousVisible) changed = true;
+          if (entry.visible !== previousVisible) {
+            if (entry.visible) entry.needsPaint = true;
+            changed = true;
+          }
         }
         if (!changed) return Promise.resolve(entryExplanation(entry));
         return controller._scheduleAndWait(entry, "direct-update", true);
@@ -4283,7 +4053,7 @@ class CornerfillController {
             entry.preparedCornerShape = cornerShape;
             return Promise.resolve(entryExplanation(entry));
           }
-          return controller.resizePrepared(entry.element, { cornerShape });
+          return controller._resizePrepared(entry.element, { cornerShape });
         }
         const state = entry.state;
         if (!state) throw new TypeError("corner-shape interpolation requires a dynamic Cornerfill entry");
@@ -4293,37 +4063,22 @@ class CornerfillController {
         }
         return controller._scheduleAndWait(entry, "corner-shape-interpolation", true);
       },
-      setVisible(visible: boolean) {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
-        if (entry.native) return Promise.resolve(entryExplanation(entry));
-        if (entry.prepared) {
-          controller._setPreparedVisibility(entry, visible, false);
-          controller._flushPrepared(true);
-          return Promise.resolve(entryExplanation(entry));
-        }
-        const next = Boolean(visible);
-        if (entry.requestedVisible === next) return Promise.resolve(entryExplanation(entry));
-        entry.requestedVisible = next;
-        entry.visible = entry.requestedVisible && entry.styleVisible;
-        if (entry.visible) entry.needsPaint = true;
-        return controller._scheduleAndWait(entry, entry.visible ? "visible" : "hidden", true);
-      },
       refresh() {
         if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
         if (entry.native) return Promise.resolve(entryExplanation(entry));
         if (entry.prepared) {
           entry.needsPaint = true;
-          controller._queuePrepared(entry, false);
+          controller._queuePrepared(entry);
           controller._flushPrepared(true);
           return Promise.resolve(entryExplanation(entry));
         }
         return controller._scheduleAndWait(entry, "explicit-refresh", true);
       },
-      resize(next: CornerfillPreparedConfig = {}) {
+      resize(next: CornerfillPreparedResizeConfig = {}) {
         if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
         if (entry.native) return Promise.resolve(entryExplanation(entry));
         if (!entry.prepared) throw new TypeError("resize() is available only for attachPrepared() handles");
-        return controller.resizePrepared(entry.element, next);
+        return controller._resizePrepared(entry.element, next);
       },
       verify() {
         if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
@@ -4355,9 +4110,7 @@ class CornerfillController {
     const existing = this.entryByElement.get(element);
     if (existing && !existing.disposed) throw new Error("element is already attached to this Cornerfill controller");
     assertElementAvailable(element);
-    const requirements = config.requirements ?? {};
     const useNative = this._shouldUseNative(config);
-    if (!useNative) assertFallbackRequirements(requirements);
     if (useNative) return this._attachNative(element, config);
 
     assertCooperativeOwnership(element);
@@ -4372,8 +4125,6 @@ class CornerfillController {
       element,
       native: false,
       prepared: false,
-      backend: null,
-      mode: config.mode ?? "paint",
       state: {},
       initial,
       dynamicPaintSource: initial.paintSource,
@@ -4382,48 +4133,16 @@ class CornerfillController {
         : null,
       watchCarriers,
       watchPosition: initial.dynamic.paintPosition,
-      watchVisibility: true,
       inlineCarrierSignature: watchCarriers ? inlineCarrierSignature(element) : "",
       inlineBackgroundPositionX: element.style.getPropertyValue("background-position-x").trim(),
       inlineBackgroundPositionY: element.style.getPropertyValue("background-position-y").trim(),
       ownershipSnapshot: captureOwnershipState(element),
       ownershipRoot: element.getRootNode() as OwnershipRoot,
-      ownershipToken: null,
-      surface: null,
-      geometry: null,
-      geometryKey: null,
-      width: 0,
-      height: 0,
-      dpr: 1,
-      paintKey: null,
-      borderKey: null,
-      border: null,
-      effectsKey: null,
-      shadow: null,
-      outline: null,
       composition,
-      boxMetrics: null,
-      paintResult: null,
-      imageLease: null,
-      imageLeaseUrl: null,
-      layerImageLeases: new Map(),
-      resolvedImage: null,
       requestedVisible: config.visible !== false,
       styleVisible: computed.visibility !== "hidden",
       visible: config.visible !== false && computed.visibility !== "hidden",
-      needsPaint: false,
-      forcePaint: false,
-      initialized: false,
-      disposed: false,
-      error: null,
-      lastError: null,
-      revision: 0,
-      committedRevision: -1,
-      pendingReason: null,
-      fullRefreshPending: false,
-      waiters: [],
       lastInvalidationReason: "attach",
-      counters: createEntryCounters(),
     });
     claimElement(entry);
     try {
@@ -4452,9 +4171,11 @@ class CornerfillController {
     this.activeAnimations.delete(entry);
     this.resizeObserver?.unobserve(element);
     if (entry.native) {
-      for (const [property, saved] of entry.saved) {
-        element.style.removeProperty(property);
-        if (saved.value) element.style.setProperty(property, saved.value, saved.priority);
+      if (entry.saved) {
+        for (const [property, saved] of entry.saved) {
+          element.style.removeProperty(property);
+          if (saved.value) element.style.setProperty(property, saved.value, saved.priority);
+        }
       }
       this.counters.nativeEntries -= 1;
     } else {
@@ -4477,7 +4198,8 @@ class CornerfillController {
       this._releaseOwnershipRoot(entry.ownershipRoot);
     }
     releaseElement(entry);
-    const waiters = entry.waiters.splice(0);
+    const waiters = entry.waiters?.splice(0) ?? [];
+    entry.waiters = null;
     if (waiters.length > 0) {
       const explanation = entryExplanation(entry);
       for (const waiter of waiters) waiter.resolve(explanation);

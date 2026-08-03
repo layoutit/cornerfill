@@ -1289,7 +1289,7 @@ await test("unequal solid borders use the shaped inner contour", async () => {
     borderRadius: "5px 4px 3px 2px",
     cornerShape: "squircle bevel scoop notch",
     paint: { kind: "solid", color: "#246" },
-    border: { widths: [1, 2, 3, 1], color: "#fed" },
+    border: { width: [1, 2, 3, 1], color: "#fed" },
   });
   await handle.ready;
   const explanation = handle.explain();
@@ -1304,7 +1304,7 @@ await test("unequal solid borders use the shaped inner contour", async () => {
       borderRadius: "4px",
       cornerShape: "bevel",
       paint: { kind: "solid", color: "#246" },
-      border: { width: 1, colors: ["red", "blue", "red", "blue"] },
+      border: { width: 1, color: ["red", "blue", "red", "blue"] },
     });
   } catch (error) {
     rejection = error;
@@ -1562,7 +1562,6 @@ await test("prepared batches validate before mutating", async () => {
   assert(error, "invalid prepared batch was accepted");
   equal(handle.explain().prepared.backgroundPosition, before.prepared.backgroundPosition, "failed batch mutated crop state");
   assert(handle.explain().counters.paints === before.counters.paints, "failed batch painted");
-  assert(controller.flushPrepared() === 0, "failed batch leaked dirty work");
   handle.dispose();
   controller.destroy();
   element.remove();
@@ -1575,10 +1574,13 @@ await test("prepared errors do not poison later successful state", async () => {
   const handle = controller.attachPrepared(element, preparedConfig());
   await handle.ready;
   let error = null;
-  try { controller.setPreparedBackgroundPosition(element, 1, 0); } catch (caught) { error = caught; }
+  try {
+    controller.updatePreparedBatch([{ element, backgroundPosition: [1, 0] }]);
+  } catch (caught) {
+    error = caught;
+  }
   assert(error instanceof RangeError, "invalid crop did not fail before mutation");
-  controller.setPreparedBackgroundPosition(element, -1, 0);
-  controller.flushPrepared();
+  controller.updatePreparedBatch([{ element, backgroundPosition: [-1, 0] }]);
   assert(handle.explain().status === "active" && handle.explain().error === null, "successful crop retained current error state");
   handle.dispose();
   controller.destroy();
@@ -1705,6 +1707,13 @@ await test("generic lifecycle migrates roots and defers hidden paint", async () 
     && hiddenHandle.explain().counters.paints === paintsBeforeHiddenUpdate + 1
   ), "deferred reveal paint");
   assert(hiddenHandle.explain().paint.layer.color === "blue", "reveal painted stale pixels");
+  const paintsBeforeDirectVisibility = hiddenHandle.explain().counters.paints;
+  await hiddenHandle.update({ visible: false });
+  await hiddenHandle.update({ visible: true });
+  assert(
+    hiddenHandle.explain().counters.paints === paintsBeforeDirectVisibility + 1,
+    "direct visibility reveal did not repaint exactly once",
+  );
   hiddenHandle.dispose();
   visibility.destroy();
   wrapper.remove();
@@ -1760,7 +1769,7 @@ await test("solid prepared visibility batches do not require an image program", 
     borderRadius: "6px",
     cornerShape: "bevel",
     paint: { kind: "solid", color: "#08f" },
-    visibility: false,
+    visible: false,
   });
   await handle.ready;
   assert(controller.stats().surfaces === 1, "hidden prepared entry did not preallocate its surface");

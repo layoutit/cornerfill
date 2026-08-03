@@ -274,13 +274,13 @@ export type CornerfillAutomaticCounters = Readonly<AutomaticCounters>;
 export interface CornerfillAutoOptions extends CornerfillInstallOptions {
   readonly adoptedStyleSheets?: boolean | undefined;
   readonly autoObserve?: boolean | undefined;
-  readonly controller?: CornerfillControllerHandle | undefined;
   readonly onError?: ((error: unknown, context: string) => void) | undefined;
   readonly root?: AutoRoot | undefined;
   readonly stylesheetTimeoutMs?: number | undefined;
 }
 
 interface InternalCornerfillAutoOptions extends CornerfillAutoOptions {
+  readonly controller?: CornerfillControllerHandle | undefined;
   readonly parentAuto?: CornerfillAutoController | null | undefined;
 }
 
@@ -321,18 +321,17 @@ export interface CornerfillAutoExplanation {
 }
 
 export interface CornerfillAutoControllerHandle {
-  readonly ready: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  readonly ready: Promise<Readonly<CornerfillAutoExplanation>>;
   destroy(): void;
-  explain(
-    element?: HTMLElement | null,
-  ): Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null;
+  explain(): Readonly<CornerfillAutoExplanation>;
+  explain(element: HTMLElement): Readonly<CornerfillEntryExplanation> | null;
   refresh(
     options?: Readonly<{ retryFailed?: boolean | undefined }>,
-  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  ): Promise<Readonly<CornerfillAutoExplanation>>;
   refreshAdoptedStyleSheet(
     sheet: CSSStyleSheet,
     source: string,
-  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  ): Promise<Readonly<CornerfillAutoExplanation>>;
   registerRoot(
     root: ShadowRoot,
     options?: Readonly<RegisterRootOptions>,
@@ -1520,9 +1519,9 @@ class CornerfillAutoController {
   declare readonly parentAuto: CornerfillAutoController | null;
   declare readonly pendingFetches: Set<AbortController>;
   declare readonly pendingStylesheetWaits: Set<() => void>;
-  declare readonly ready: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null>;
+  declare readonly ready: Promise<Readonly<CornerfillAutoExplanation>>;
   declare refreshFrame: number | null;
-  declare refreshPromise: Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> | null;
+  declare refreshPromise: Promise<Readonly<CornerfillAutoExplanation>> | null;
   declare refreshQueued: boolean;
   declare registrationAcquired: boolean;
   declare registrationStyle: HTMLStyleElement | null;
@@ -2861,7 +2860,7 @@ class CornerfillAutoController {
     this._configureObservation();
   }
 
-  async _start(): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> {
+  async _start(): Promise<Readonly<CornerfillAutoExplanation>> {
     if (this.destroyed || this.native) return this.explain();
     this._ensureCarrierRegistration();
     this._installObserver();
@@ -2891,9 +2890,7 @@ class CornerfillAutoController {
     candidates = false,
     attachments = false,
     retryFailed = false,
-  }: Readonly<RefreshRequestOptions> = {}): Promise<
-    Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null
-  > {
+  }: Readonly<RefreshRequestOptions> = {}): Promise<Readonly<CornerfillAutoExplanation>> {
     if (this.destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
     if (this.native) return Promise.resolve(this.explain());
     this.workRequested = true;
@@ -2941,7 +2938,7 @@ class CornerfillAutoController {
   refreshAdoptedStyleSheet(
     sheet: CSSStyleSheet,
     source: string,
-  ): Promise<Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null> {
+  ): Promise<Readonly<CornerfillAutoExplanation>> {
     if (!this.includeAdoptedStyleSheets) {
       return Promise.reject(new TypeError("This automatic scope did not opt in to adopted stylesheets"));
     }
@@ -2989,6 +2986,8 @@ class CornerfillAutoController {
     return true;
   }
 
+  explain(): Readonly<CornerfillAutoExplanation>;
+  explain(element: HTMLElement): Readonly<CornerfillEntryExplanation> | null;
   explain(
     element: HTMLElement | null = null,
   ): Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null {

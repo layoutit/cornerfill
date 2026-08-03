@@ -125,16 +125,7 @@ Do not promise recovery of an unknown declaration already dropped by a foreign p
 
 ## Direct prepared-state path
 
-High-frequency renderers should not repeatedly serialize and reparse CSS. Expose an internal/direct controller:
-
-```ts
-interface CornerfillHandle {
-  setGeometry(state: ResolvedGeometry): void;
-  setPaint(state: ResolvedPaint): void;
-  setVisibility(visible: boolean): void;
-  dispose(): void;
-}
-```
+High-frequency renderers should not repeatedly serialize and reparse CSS. `attachPrepared()` accepts resolved geometry and paint state, `updatePreparedBatch()` changes crop and visibility synchronously, and the returned handle owns resize and teardown.
 
 PolyCSS preparation can emit normalized radii, a fixed bevel shape, atlas identity, crop metadata, and canonical surface dimensions. Runtime lighting updates then change only the crop key. This stays a generic Cornerfill backend while avoiding CSSOM work in a known prepared pipeline.
 
@@ -267,14 +258,14 @@ Possible later optimizations:
 - pool detached canvases by backing size;
 - delay allocation for culled/offscreen entries;
 - keep small canonical PolyCSS surfaces rather than transformed screen bounds;
-- batch repaint scheduling while retaining per-element live image identity.
+- synchronous batch repaint submission while retaining per-element live image identity.
 
 Do not share surfaces whose pixels diverge per animation frame merely because their shape is identical.
 
 ## Historical public API sketch
 
 The following illustrates intent but is not the shipped signature. Current
-exports and behavior live in [`src/index.mts`](../src/index.mts) and
+exports and behavior live in [`package.json`](../package.json) and
 [`src/runtime.mts`](../src/runtime.mts).
 
 ```ts
