@@ -97,7 +97,7 @@ function requirement(
 function unresolvedRequirements(
   requirements: CornerfillNativeRequirements,
 ): readonly (keyof CornerfillNativeRequirements)[] {
-  return Object.freeze((Object.keys(requirements) as (keyof CornerfillNativeRequirements)[])
+  return Object.freeze((["syntax", "computedValues"] as const)
     .filter((name) => !requirements[name].supported));
 }
 
@@ -107,16 +107,20 @@ function qualification(
 ): Readonly<CornerfillNativeQualification> {
   const unresolved = unresolvedRequirements(requirements);
   const qualified = unresolved.length === 0;
-  const observed = (supported: boolean): CornerfillNativeCapabilityStatus => (
-    supported ? "supported" : "unsupported"
+  const observed = (
+    requirement: Readonly<CornerfillNativeRequirement>,
+  ): CornerfillNativeCapabilityStatus => (
+    requirement.observable === false
+      ? "unobserved"
+      : requirement.supported ? "supported" : "unsupported"
   );
   return Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
     capabilities: Object.freeze({
-      syntax: observed(requirements.syntax.supported),
-      computedValues: observed(requirements.computedValues.supported),
-      shapedHitTesting: observed(requirements.shapedBehavior.supported),
+      syntax: observed(requirements.syntax),
+      computedValues: observed(requirements.computedValues),
+      shapedHitTesting: observed(requirements.shapedBehavior),
       outerPaint: "unobserved",
       innerBorderContour: "unobserved",
       backgroundClip: "unobserved",
@@ -128,7 +132,7 @@ function qualification(
     requirements: Object.freeze(requirements),
     unresolved,
     reason: qualified
-      ? "The conservative native-selection probes passed; unprobed capabilities remain explicitly unobserved."
+      ? "Native corner-shape syntax and computed-value probes passed; behavior capabilities are reported separately."
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
@@ -273,15 +277,20 @@ export function qualifyNativeCornerShape(
   let element: HTMLElement | null = null;
   let result: Readonly<CornerfillNativeQualification>;
   try {
-    const isolated = isolatedProbeDocument(document);
-    frame = isolated.frame;
-    element = probeElement(isolated.document);
-    isolated.document.documentElement.append(element);
+    let probeDocument = document;
+    try {
+      const isolated = isolatedProbeDocument(document);
+      frame = isolated.frame;
+      probeDocument = isolated.document;
+    } catch {
+      // CSP can block iframe documents. Syntax/computed-value selection still has a host probe.
+    }
+    element = probeElement(probeDocument);
+    probeDocument.documentElement.append(element);
     result = qualification({
       syntax,
-      computedValues: computedRequirement(isolated.document, element),
-      // Paint-only fallback cannot supply hit testing, so partial native behavior must not qualify.
-      shapedBehavior: behaviorRequirement(isolated.document, element),
+      computedValues: computedRequirement(probeDocument, element),
+      shapedBehavior: behaviorRequirement(probeDocument, element),
     });
   } catch (error) {
     result = qualification({
@@ -293,8 +302,7 @@ export function qualifyNativeCornerShape(
     element?.remove();
     frame?.remove();
   }
-  const observable = result.requirements.computedValues.observable !== false
-    && result.requirements.shapedBehavior.observable !== false;
+  const observable = result.requirements.computedValues.observable !== false;
   if (observable) CACHE.set(document, result);
   return result;
 }

@@ -34,6 +34,7 @@ function host(root = document.body, id = "") {
   Object.assign(element.style, {
     width: "12px",
     height: "10px",
+    borderRadius: "5px",
     backgroundColor: "rgb(255, 0, 0)",
   });
   root.append(element);
@@ -107,13 +108,16 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = `data:text/css,${encodeURIComponent(`
-    .cornerfill-auto-fixture,.cornerfill-auto-dynamic,.cornerfill-auto-inline,.cornerfill-auto-focus,.cornerfill-auto-media {
+    .cornerfill-auto-fixture,.cornerfill-auto-dynamic,.cornerfill-auto-inline,.cornerfill-auto-focus,.cornerfill-auto-media,.cornerfill-auto-zero,.cornerfill-auto-partial {
       width:12px;height:10px;border-radius:6px;background:red;border:0;outline:none
     }
     .cornerfill-auto-fixture { corner-shape:bevel;corner-top-left-shape:round }
     .cornerfill-auto-dynamic { corner-shape:bevel }
-    .cornerfill-auto-dynamic.changed { corner-shape:round;border-radius:0;background:blue }
-    .cornerfill-auto-focus:focus { corner-shape:scoop }
+    .cornerfill-auto-dynamic.changed { corner-shape:round;background:blue }
+    .cornerfill-auto-focus { corner-shape:bevel }
+    .cornerfill-auto-focus:focus { corner-shape:bevel;border-radius:4px;background:blue }
+    .cornerfill-auto-zero { corner-shape:bevel;border-radius:0 }
+    .cornerfill-auto-partial { corner-shape:bevel square scoop notch;border-radius:6px 0 0 0 }
     @media (prefers-color-scheme: dark) { .cornerfill-auto-media { corner-shape:bevel } }
   `)}`;
   document.head.append(link);
@@ -128,6 +132,10 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   focus.tabIndex = 0;
   const media = document.createElement("div");
   media.className = "cornerfill-auto-media";
+  const zero = document.createElement("div");
+  zero.className = "cornerfill-auto-zero";
+  const partial = document.createElement("div");
+  partial.className = "cornerfill-auto-partial";
   const cssomStyle = document.createElement("style");
   document.head.append(cssomStyle);
   const cssom = host();
@@ -151,7 +159,7 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   const escaped = host();
   escaped.className = "cornerfill:escaped";
   document.body.append(toggle);
-  document.body.append(element, dynamic, inline, focus, media);
+  document.body.append(element, dynamic, inline, focus, media, zero, partial);
   const { cornerfill: auto } = await import("../dist/auto.mjs");
   await auto.ready;
   rootImportResources = Object.freeze(performance.getEntriesByType("resource")
@@ -176,19 +184,28 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     assert(!initialObservation.attributes.includes("data-cornerfill-noise"), "unreferenced attributes were observed");
     assert(initialObservation.mediaQueries.includes("(prefers-color-scheme: dark)"), "media dependency was not observed");
     assert(auto.explain(media) === null, "inactive color-scheme media attached early");
+    assert(auto.explain(zero) === null, "zero-radius shape started an unnecessary fallback surface");
+    assert(auto.explain(partial)?.status === "active", "one non-round non-zero corner did not attach");
+    equal(auto.explain(partial).geometry.radii.slice(1), [
+      { rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 },
+    ], "zero-area corners were not retained beside the active corner");
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const candidatePassesBeforeNoise = auto.explain().automatic.counters.candidatePasses;
     element.setAttribute("data-cornerfill-noise", "1");
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     assert(auto.explain().automatic.counters.candidatePasses === candidatePassesBeforeNoise, "unreferenced attribute churn ran selector reconciliation");
     const countersBeforeState = auto.explain().automatic.counters;
+    const focusPaintsBeforeState = auto.explain(focus).counters.paints;
     dynamic.classList.add("changed");
     inline.setAttribute("style", "corner-shape:bevel");
     focus.focus();
     await waitFor(() => (
-      auto.explain(dynamic)?.geometry?.shapeParameters?.[0] === 1
+      auto.explain(dynamic) === null
       && auto.explain(inline)?.status === "active"
-      && auto.explain(focus)?.status === "active"
+      && auto.explain(focus)?.geometry?.radii?.[0]?.rx === 4
+      && /(?:blue|0,\s*0,\s*255)/u.test(auto.explain(focus)?.paint?.layer?.color ?? "")
     ), "automatic dynamic CSS refresh");
+    assert(auto.explain(focus).counters.paints === focusPaintsBeforeState + 1, "focus-on authored state did not repaint exactly once");
     const countersAfterState = auto.explain().automatic.counters;
     assert(countersAfterState.sourceReads === countersBeforeState.sourceReads, "selector state refetched stylesheets");
     assert(countersAfterState.sourceCompiles === countersBeforeState.sourceCompiles, "selector state reparsed stylesheets");
@@ -199,22 +216,23 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     assert(afterStableSourceRefresh.sourceReads === beforeStableSourceRefresh.sourceReads, "unchanged source was refetched");
     assert(afterStableSourceRefresh.sourceCompiles === beforeStableSourceRefresh.sourceCompiles, "unchanged source was reparsed");
     assert(afterStableSourceRefresh.handleRefreshes === beforeStableSourceRefresh.handleRefreshes, "unchanged source refreshed a handle");
-    equal(auto.explain(dynamic).geometry.shapeParameters, [1, 1, 1, 1], "class shape change was not recaptured");
-    equal(auto.explain(dynamic).geometry.radii, [
-      { rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 },
-    ], "class radius change was not recaptured");
-    const dynamicColor = auto.explain(dynamic).paint.layer.color;
-    assert(
-      /^(?:blue|rgb\(0,\s*0,\s*255\))$/u.test(dynamicColor),
-      `class paint change was not recaptured: ${dynamicColor}`,
-    );
+    dynamic.classList.remove("changed");
+    await waitFor(() => auto.explain(dynamic)?.status === "active", "round-to-bevel fallback reattachment");
+    equal(auto.explain(dynamic).geometry.shapeParameters, [0, 0, 0, 0], "class shape reattachment was not recaptured");
     equal(auto.explain(inline).geometry.shapeParameters, [0, 0, 0, 0], "raw inline corner-shape was not retained");
     inline.setAttribute(
       "style",
       (inline.getAttribute("style") ?? "").replace(/corner-shape\s*:\s*bevel/iu, "corner-shape:scoop"),
     );
     await waitFor(() => auto.explain(inline)?.geometry?.shapeParameters?.[0] === -1, "raw inline read-modify-write refresh");
-    equal(auto.explain(focus).geometry.shapeParameters, [-1, -1, -1, -1], "focus selector state was not refreshed");
+    equal(auto.explain(focus).geometry.shapeParameters, [0, 0, 0, 0], "focus selector changed the persistent shape");
+    element.tabIndex = -1;
+    element.focus();
+    await waitFor(() => (
+      auto.explain(focus)?.geometry?.radii?.[0]?.rx === 5
+      && /(?:red|255,\s*0,\s*0)/u.test(auto.explain(focus)?.paint?.layer?.color ?? "")
+    ), "persistent authored focus state restoration");
+    assert(auto.explain(focus).counters.paints === focusPaintsBeforeState + 2, "focus-off authored state did not repaint exactly once");
     const inserted = cssomStyle.sheet.insertRule(
       ".cornerfill-auto-cssom{corner-shape:bevel;border-radius:5px;background:green}",
     );
@@ -325,6 +343,8 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   inline.remove();
   focus.remove();
   media.remove();
+  zero.remove();
+  partial.remove();
   cssom.remove();
   byId.remove();
   attributed.remove();
@@ -491,6 +511,60 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
   globalThis.__CORNERFILL_TEST_STAGE__ = "";
 });
 
+await test("automatic root and import fetches settle at the configured timeout", async () => {
+  const originalFetch = window.fetch;
+  const response = (css) => ({
+    headers: { get: (name) => name.toLowerCase() === "content-type" ? "text/css" : null },
+    ok: true,
+    status: 200,
+    text: async () => css,
+    url: "https://assets.example/root.css",
+  });
+  const run = async (rootCss) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = `data:text/css,${encodeURIComponent(".cornerfill-timeout-owner{display:block}")}`;
+    const loaded = new Promise((resolve, reject) => {
+      link.addEventListener("load", resolve, { once: true });
+      link.addEventListener("error", () => reject(new Error("timeout owner did not load")), { once: true });
+    });
+    document.head.append(link);
+    await loaded;
+    const requests = [];
+    window.fetch = (_url, init = {}) => {
+      requests.push(init.signal);
+      if (rootCss !== null && requests.length === 1) return Promise.resolve(response(rootCss));
+      return new Promise(() => {});
+    };
+    const errors = [];
+    const auto = installCornerfillAuto(options({
+      autoObserve: false,
+      stylesheetTimeoutMs: 25,
+      onError(error) { errors.push(error.message); },
+    }));
+    try {
+      await Promise.race([
+        auto.ready,
+        new Promise((_resolve, reject) => setTimeout(
+          () => reject(new Error("automatic stylesheet timeout did not settle readiness")),
+          1_000,
+        )),
+      ]);
+      assert(requests.at(-1)?.aborted, "timed-out stylesheet request was not aborted");
+      assert(errors.some((message) => /timed out after 25ms/u.test(message)), "stylesheet timeout was not diagnosed");
+    } finally {
+      auto.destroy();
+      link.remove();
+    }
+  };
+  try {
+    await run(null);
+    await run('@import "https://assets.example/hanging.css";');
+  } finally {
+    window.fetch = originalFetch;
+  }
+});
+
 await test("automatic imports preserve cascade and idle selector state", async () => {
   const originalFetch = window.fetch;
   const fetched = [];
@@ -574,7 +648,7 @@ await test("automatic import requests are stale-safe, cycle-bounded, and failure
     link.href = `data:text/css,${encodeURIComponent(css)}`;
     if (!link.isConnected) document.head.append(link);
   });
-  await loadLink(".cornerfill-import-stale{width:12px;height:10px;background:red}");
+  await loadLink(".cornerfill-import-stale{width:12px;height:10px;border-radius:5px;background:red}");
   const originalFetch = window.fetch;
   const requests = [];
   window.fetch = (url, init = {}) => new Promise((resolve) => {
@@ -591,7 +665,7 @@ await test("automatic import requests are stale-safe, cycle-bounded, and failure
     await waitFor(() => requests.length === 1, "mock root stylesheet request");
     requests[0].resolve(response('@import "./old.css";', "https://assets.example/root.css"));
     await waitFor(() => requests.length === 2, "mock stale import request");
-    await loadLink(".cornerfill-import-stale{width:12px;height:10px;background:green}");
+    await loadLink(".cornerfill-import-stale{width:12px;height:10px;border-radius:5px;background:green}");
     const replacement = auto.refresh();
     await waitFor(() => requests[1].init.signal.aborted, "obsolete import abort signal");
     requests[1].resolve(response(
@@ -606,7 +680,7 @@ await test("automatic import requests are stale-safe, cycle-bounded, and failure
     await Promise.all([auto.ready, replacement]);
     assert(auto.explain(element)?.geometry.shapeParameters.every((value) => value === Number.NEGATIVE_INFINITY), "stale imported declarations won replacement");
 
-    await loadLink(".cornerfill-import-stale{width:12px;height:10px;background:blue}");
+    await loadLink(".cornerfill-import-stale{width:12px;height:10px;border-radius:5px;background:blue}");
     const cycle = auto.refresh();
     await waitFor(() => requests.length === 4, "cycle root stylesheet request");
     requests[3].resolve(response('@import "./a.css";', "https://assets.example/cycle/root.css"));
@@ -728,7 +802,7 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
 
 await test("automatic diagnostics belong to the current source generation", async () => {
   const style = document.createElement("style");
-  style.textContent = ".cornerfill-diagnostic{corner-shape:superellipse(calc(1 * 2));border-radius:5px;background:red}";
+  style.textContent = ".cornerfill-diagnostic{corner-shape:superellipse(sin(1));border-radius:5px;background:red}";
   document.head.append(style);
   const element = host(document.body, "cornerfill-diagnostic-owner");
   element.className = "cornerfill-diagnostic";
@@ -784,11 +858,13 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
       .cornerfill-layer-normal { corner-shape: bevel; background: red }
       .cornerfill-layer-important { corner-shape: bevel !important; background: red }
       .cornerfill-all-layer { corner-shape: bevel }
+      .cornerfill-all-var-layer { corner-shape: bevel }
     }
     @layer theme {
       .cornerfill-layer-normal { corner-shape: scoop; background: blue }
       .cornerfill-layer-important { corner-shape: scoop !important; background: blue }
       .cornerfill-all-layer { all: unset; display: block }
+      .cornerfill-all-var-layer { all: var(--cornerfill-missing-layer, revert-layer); display: block }
     }
     .cornerfill-var-inherit { corner-shape: var(--cornerfill-test-shape, bevel) }
     .cornerfill-var-fallback { corner-shape: var(--cornerfill-missing-shape, scoop) }
@@ -804,6 +880,9 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     .cornerfill-all-before { all: unset; corner-shape: bevel; display: block }
     .cornerfill-all-after { corner-shape: bevel; all: unset; display: block }
     .cornerfill-all-important { corner-shape: bevel !important; all: unset !important; display: block !important }
+    .cornerfill-all-var { --cornerfill-all-value: unset; corner-shape: bevel; all: var(--cornerfill-all-value); display: block }
+    .cornerfill-all-var-fallback { corner-shape: bevel; all: var(--cornerfill-missing-all, unset); display: block }
+    .cornerfill-all-var-important { --cornerfill-all-important-value: unset; corner-shape: bevel !important; all: var(--cornerfill-all-important-value) !important; display: block !important }
     .cornerfill-invalid-low { corner-shape: potato }
     #cornerfill-valid-high { corner-shape: bevel }
     #cornerfill-invalid-important { corner-shape: potato !important }
@@ -875,6 +954,14 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   allLayer.className = "cornerfill-all-layer";
   const allImportant = host();
   allImportant.className = "cornerfill-all-important";
+  const allVar = host();
+  allVar.className = "cornerfill-all-var";
+  const allVarFallback = host();
+  allVarFallback.className = "cornerfill-all-var-fallback";
+  const allVarImportant = host();
+  allVarImportant.className = "cornerfill-all-var-important";
+  const allVarLayer = host();
+  allVarLayer.className = "cornerfill-all-var-layer";
   const validHigh = host(document.body, "cornerfill-valid-high");
   validHigh.className = "cornerfill-invalid-low";
   const validBelowInvalidImportant = host(document.body, "cornerfill-invalid-important");
@@ -887,6 +974,7 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   ].map(([className, expected]) => {
     const target = host();
     target.className = className;
+    target.style.removeProperty("border-radius");
     target.style.width = "200px";
     target.style.height = "100px";
     return { target, expected };
@@ -919,6 +1007,10 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(allAfter) === null, "all: unset after shape did not reset the carrier");
     assert(auto.explain(allLayer) === null, "all: unset did not reset a shape from an earlier layer");
     assert(auto.explain(allImportant) === null, "important all: unset did not reset an important shape");
+    assert(auto.explain(allVar) === null, "all: var() did not transport its resolved carrier reset");
+    assert(auto.explain(allVarFallback) === null, "all: var() fallback did not reset shape carriers");
+    assert(auto.explain(allVarImportant) === null, "important all: var() did not reset important shape carriers");
+    assert(auto.explain(allVarLayer) === null, "all: var(..., revert-layer) was partially owned");
     equal(auto.explain(validHigh).geometry.shapeParameters, [0, 0, 0, 0], "losing invalid shape poisoned a valid winner");
     equal(auto.explain(validBelowInvalidImportant).geometry.shapeParameters, [-1, -1, -1, -1], "invalid important shape participated in the cascade");
     for (const { target: radiusTarget, expected } of relativeRadii) {
@@ -934,6 +1026,11 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(/anonymous cascade layer/u.test(messages), "anonymous layer refusal was not reported");
     assert(/nested selector rule/u.test(messages), "nested selector refusal was not reported");
     assert(/complex corner-shape support condition/u.test(messages), "complex supports refusal was not reported");
+    assert(/cannot safely transport this all: var/u.test(messages), "unsafe all: var() result was not reported");
+    const allVarErrors = auto.explain().errors.filter(({ message }) => (
+      /cannot safely transport this all: var/u.test(message)
+    ));
+    assert(allVarErrors.length === 1, `supported all: var() resets were refused: ${JSON.stringify(allVarErrors)}`);
     const ownership = document.querySelector("style[data-cornerfill-ownership-styles]");
     const paintsBeforeRepair = auto.explain(layerNormal).counters.paints;
     const repairsBefore = auto.explain().runtime.counters.ownershipRepairs;
@@ -954,7 +1051,9 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
       layerNormal, layerImportant, varParent, varFallback, varConflict, logical, media,
       supportsPositive, supportsNegative, supportsInvalidNegative, mixed,
       anonymous, nesting, complex, inert, alternateElement,
-      allReset, allBefore, allAfter, allLayer, allImportant, validHigh, validBelowInvalidImportant,
+      allReset, allBefore, allAfter, allLayer, allImportant, allVar, allVarFallback,
+      allVarImportant, allVarLayer,
+      validHigh, validBelowInvalidImportant,
       ...relativeRadii.map(({ target: radiusTarget }) => radiusTarget),
     ]) element.remove();
   }
@@ -1661,8 +1760,12 @@ await test("solid prepared visibility batches do not require an image program", 
     borderRadius: "6px",
     cornerShape: "bevel",
     paint: { kind: "solid", color: "#08f" },
+    visibility: false,
   });
   await handle.ready;
+  assert(controller.stats().surfaces === 1, "hidden prepared entry did not preallocate its surface");
+  assert(controller.stats().counters.deferredSurfaceEntries === 0, "hidden prepared entry deferred by default");
+  controller.updatePreparedBatch([{ element, visible: true }]);
   controller.updatePreparedBatch([{ element, visible: false }]);
   controller.updatePreparedBatch([{ element, visible: true }]);
   assert(handle.explain().status === "active", "solid visibility batch failed");

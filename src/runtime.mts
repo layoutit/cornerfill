@@ -473,6 +473,11 @@ export interface CornerfillControllerStats {
   readonly surfaces: number;
 }
 
+export interface CornerfillAuthoredStyleInspection {
+  readonly requiresFallback: boolean;
+  readonly values: Readonly<Record<string, string>>;
+}
+
 export interface CornerfillControllerHandle {
   readonly capabilities: ReturnType<typeof detectCornerfillCapabilities>;
   readonly document: Document;
@@ -489,6 +494,10 @@ export interface CornerfillControllerHandle {
   detach(element: CornerfillElement): boolean;
   explain(element: CornerfillElement): Readonly<CornerfillEntryExplanation> | null;
   flushPrepared(): number;
+  inspectAuthoredStyle(
+    element: CornerfillElement,
+    properties: readonly string[],
+  ): Readonly<CornerfillAuthoredStyleInspection>;
   refresh(): Promise<Readonly<CornerfillEntryExplanation>[]>;
   resizePrepared(
     element: CornerfillElement,
@@ -1889,6 +1898,36 @@ function resolveRadiusSource(
     }
   }
   throw new TypeError("unsupported border-radius source");
+}
+
+function authoredCornerRequiresFallback(
+  element: CornerfillElement,
+  computed: CSSStyleDeclaration,
+): boolean {
+  const flow = flowFromComputed(computed);
+  const shapeCapture = captureShapeCarriers(computed);
+  const shapeSource: CornerShapeSource = shapeCapture?.present
+    ? shapeCapture.source
+    : computed.getPropertyValue("corner-shape").trim() || "round";
+  const shapes = resolveCornerShape(shapeSource, flow);
+  if (shapes.every((shape) => shape === 1)) return false;
+  const { width, height } = measureBorderBox(element, computed);
+  const radiusCapture = captureRadiusCarriers(computed);
+  const radiusSource: RadiusSource = radiusCapture?.present
+    ? radiusCapture.source
+    : Object.freeze({
+      kind: "longhands",
+      values: frozenFour(
+        computed.getPropertyValue(RADIUS_LONGHANDS[0]!),
+        computed.getPropertyValue(RADIUS_LONGHANDS[1]!),
+        computed.getPropertyValue(RADIUS_LONGHANDS[2]!),
+        computed.getPropertyValue(RADIUS_LONGHANDS[3]!),
+      ),
+    });
+  const radii = resolveRadiusSource(radiusSource, width, height, flow);
+  return shapes.some((shape, index) => (
+    shape !== 1 && radii[index]!.rx > 0 && radii[index]!.ry > 0
+  ));
 }
 
 function shapeKey(value: number): string {
@@ -4069,7 +4108,7 @@ class CornerfillController {
       requestedVisible: Boolean(visible),
       styleVisible: true,
       visible: Boolean(visible),
-      deferHiddenSurface: config.deferHiddenSurface !== false,
+      deferHiddenSurface: config.deferHiddenSurface === true,
       surfaceWasDeferred: false,
       needsPaint: false,
       needsFullPreparedPaint: false,
@@ -4474,6 +4513,25 @@ class CornerfillController {
       imageCache: this.images.stats(),
       counters: Object.freeze({ ...this.counters }),
     }) as Readonly<CornerfillControllerStats>;
+  }
+
+  inspectAuthoredStyle(
+    element: CornerfillElement,
+    properties: readonly string[],
+  ): Readonly<CornerfillAuthoredStyleInspection> {
+    if (element.ownerDocument !== this.document) {
+      throw new TypeError("Cornerfill cannot inspect an element from another document");
+    }
+    const inspect = (computed: CSSStyleDeclaration) => Object.freeze({
+      requiresFallback: authoredCornerRequiresFallback(element, computed),
+      values: Object.freeze(Object.fromEntries(properties.map((property) => (
+        [property, computed.getPropertyValue(property)]
+      )))),
+    });
+    const entry = this.entryByElement.get(element);
+    return entry
+      ? withAuthoredComputedStyle(this.view, entry, inspect)
+      : inspect(this.view.getComputedStyle(element));
   }
 
   explain(element: CornerfillElement): Readonly<CornerfillEntryExplanation> | null {

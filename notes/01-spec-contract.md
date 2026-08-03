@@ -1,9 +1,9 @@
 # Spec contract
 
-Status: current semantic synthesis against the 26 March 2026 Working Draft.
+Status: current semantic synthesis against a pinned 31 July 2026 editor's-draft repository snapshot.
 Project/backend limitations are recorded separately from native semantics.
 
-Primary target: [CSS Borders and Box Decorations Level 4](https://drafts.csswg.org/css-borders-4/), Working Draft dated 26 March 2026. The editor's draft is live and can change; the pinned source revision used for this research is listed in [references](references.md).
+Primary target: [CSS Borders and Box Decorations Level 4](https://drafts.csswg.org/css-borders-4/). The latest published Working Draft is dated 16 December 2025; the editor's draft is live and can change, so the exact 31 July 2026 repository snapshot used for this research is listed in [references](references.md).
 
 ## `corner-shape` value model
 

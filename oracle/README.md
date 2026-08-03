@@ -45,7 +45,7 @@ The driver uses direct Playwright page code because it needs clipped raster evid
 
 The current Playwright Firefox/BiDi backend cannot request a transparent page background. Firefox frames are therefore captured twice against opaque black and white, then reconstructed as RGBA from the two composites. Both opaque inputs are retained, the manifest records the method and reconstruction diagnostics, and the reconstructor rejects transparent inputs or mismatched dimensions. This preserves painted `-moz-element()` evidence instead of substituting the source canvas.
 
-The default is Chromium only:
+The default is Chromium only and excludes the external Mario asset:
 
 ```bash
 npm run build
@@ -70,22 +70,22 @@ List the fixed corpus:
 node scripts/oracle.mjs list
 ```
 
-Run the small integration proof:
+Run the portable small integration proof:
 
 ```bash
-node scripts/oracle.mjs run --cases=bevel,round,mario-texel-face
+npm run oracle:smoke
 ```
 
-Run the representative Chrome/WebKit/Firefox proof, sequentially. It includes a compound 3D transform and the Mario crop:
+Run the portable Chrome/WebKit/Firefox proof sequentially. It includes a compound 3D transform:
 
 ```bash
-node scripts/oracle.mjs run --browsers=chrome,webkit,firefox --cases=bevel,bevel-rotated,mario-texel-face
+npm run oracle:cross
 ```
 
-Run selected cases:
+Run the real Mario texel-face stress case in all three engines:
 
 ```bash
-node scripts/oracle.mjs run --cases=bevel,squircle,mario-texel-face
+CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp npm run oracle:mario
 ```
 
 Choose an explicit output directory:
@@ -133,13 +133,7 @@ measured pixel counts.
 
 ## Mario evidence
 
-The `mario-texel-face` case reads, but does not copy or modify, the existing source at:
-
-```text
-/Users/ekrof/fed/cssGraphics/dist/cssface/models/mario/assets/texels.webp
-```
-
-Override it portably with `CORNERFILL_MARIO_TEXELS` or `--mario-texels=`. The run manifest hashes the exact file.
+The `mario-texel-face` case reads, but does not copy or modify, the file supplied through `CORNERFILL_MARIO_TEXELS` or `--mario-texels=`. The run manifest hashes the exact file.
 
 The fixture uses prepared face index 7:
 

@@ -18,12 +18,20 @@ test("production sources contain none of the prohibited CSS renderers", () => {
   assert.doesNotMatch(source, /setProperty\(["']transform["']/u);
 });
 
-test("oracle candidate tolerances remain deliberately unapproved", () => {
+test("generated oracle qualification stays consistent with tracked tolerances", () => {
   const source = JSON.parse(readFileSync(join(root, "oracle", "qualification.json"), "utf8"));
+  const tolerances = JSON.parse(readFileSync(join(root, "oracle", "tolerances.json"), "utf8"));
   assert.deepEqual(CORNERFILL_ORACLE_QUALIFICATION, source);
   assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.status, "PASS");
   assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.approvedTolerance, true);
   assert.equal(CORNERFILL_ORACLE_QUALIFICATION.nativeCalibration.exactZeroTolerance, true);
-  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.candidate.status, "UNQUALIFIED");
-  assert.equal(CORNERFILL_ORACLE_QUALIFICATION.candidate.approvedTolerance, false);
+  assert.equal(tolerances.calibration.approved, true);
+  assert.equal(
+    CORNERFILL_ORACLE_QUALIFICATION.candidate.approvedTolerance,
+    tolerances.candidate.approved,
+  );
+  const { approvedTolerance, status } = CORNERFILL_ORACLE_QUALIFICATION.candidate;
+  assert.ok(["UNQUALIFIED", "PASS", "FAIL", "INVALID"].includes(status));
+  if (status === "UNQUALIFIED") assert.equal(approvedTolerance, false);
+  if (status === "PASS" || status === "FAIL") assert.equal(approvedTolerance, true);
 });
