@@ -13,12 +13,15 @@ class FakeImage {
   decode() {
     return Promise.resolve();
   }
+
+  addEventListener() {}
+  removeEventListener() {}
 }
 
 function document() {
   return {
     baseURI: "https://cornerfill.test/",
-    defaultView: { Image: FakeImage },
+    defaultView: { Image: FakeImage, clearTimeout, setTimeout },
   };
 }
 
@@ -62,18 +65,32 @@ test("decoded image cache enforces its retained pixel budget", async () => {
   assert.equal(cache.stats().evictions, 1);
 });
 
-test("image cache bounds released loads that have not decoded", () => {
+test("image cache cancels a pending load when its last lease is released", async () => {
   class PendingImage extends FakeImage {
     decode() { return new Promise(() => {}); }
   }
   const cache = new ImageCache({
     baseURI: "https://cornerfill.test/",
-    defaultView: { Image: PendingImage },
-  }, { maxZeroReferenceEntries: 1 });
-  for (let index = 0; index < 5; index += 1) {
-    cache.acquire(`pending-${index}.webp`).release();
+    defaultView: { Image: PendingImage, clearTimeout, setTimeout },
+  });
+  const lease = cache.acquire("pending.webp");
+  const rejected = assert.rejects(lease.promise, /released before decode completed/u);
+  lease.release();
+  await rejected;
+  assert.equal(cache.stats().entries, 0);
+  assert.equal(cache.stats().loading, 0);
+});
+
+test("image cache times out and aborts an active pending load", async () => {
+  class PendingImage extends FakeImage {
+    decode() { return new Promise(() => {}); }
   }
-  assert.equal(cache.stats().entries, 1);
-  assert.equal(cache.stats().loading, 1);
-  assert.equal(cache.stats().evictions, 4);
+  const cache = new ImageCache({
+    baseURI: "https://cornerfill.test/",
+    defaultView: { Image: PendingImage, clearTimeout, setTimeout },
+  }, { timeoutMs: 5 });
+  const lease = cache.acquire("hanging.webp");
+  await assert.rejects(lease.promise, /timed out after 5ms/u);
+  assert.equal(cache.stats().entries, 0);
+  assert.equal(cache.stats().loading, 0);
 });

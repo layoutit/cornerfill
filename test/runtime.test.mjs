@@ -97,6 +97,58 @@ test("native handles dispose and controllers destroy without teardown errors", a
   assert.equal(destroyController.stats().counters.detachments, 1);
 });
 
+test("native teardown restores owned declarations without overwriting concurrent edits", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-partial-teardown-test");
+  const fixture = nativeDocument();
+  const element = fixture.element();
+  element.style.setProperty("color", "red");
+  element.style.setProperty("corner-shape", "round");
+  element.style.setProperty("corner-bottom-right-shape", "notch");
+  element.style.setProperty("border-radius", "4px");
+  element.style.setProperty("opacity", "0.5");
+  const controller = installCornerfill({
+    document: fixture.document,
+    nativeQualification: qualifiedNative,
+  });
+  const handle = controller.attach(element, {
+    cornerShape: {
+      shorthand: "bevel",
+      physical: { "top-left": "scoop", "top-right": "notch" },
+    },
+    borderRadius: {
+      shorthand: "16px",
+      physical: { "top-left": "8px", "top-right": "9px" },
+    },
+  });
+  await handle.ready;
+
+  element.style.setProperty("corner-top-left-shape", "square");
+  element.style.setProperty("corner-bottom-left-shape", "superellipse(2)");
+  element.style.setProperty("border-radius", "22px");
+  handle.dispose();
+
+  assert.equal(element.style.getPropertyValue("corner-shape"), "round");
+  assert.equal(element.style.getPropertyValue("corner-bottom-right-shape"), "notch");
+  assert.equal(element.style.getPropertyValue("corner-top-left-shape"), "square");
+  assert.equal(element.style.getPropertyValue("corner-top-right-shape"), "");
+  assert.equal(element.style.getPropertyValue("corner-bottom-left-shape"), "superellipse(2)");
+  assert.equal(element.style.getPropertyValue("border-radius"), "22px");
+  assert.equal(element.style.getPropertyValue("border-top-left-radius"), "");
+  assert.deepEqual(
+    Array.from({ length: element.style.length }, (_value, index) => element.style.item(index)),
+    [
+      "color",
+      "corner-shape",
+      "corner-bottom-right-shape",
+      "border-radius",
+      "opacity",
+      "corner-top-left-shape",
+      "corner-bottom-left-shape",
+    ],
+  );
+  controller.destroy();
+});
+
 test("query-distinct runtime modules share one per-document element owner registry", async () => {
   const firstRuntime = await import("../dist/runtime.mjs?owner-registry-first");
   const secondRuntime = await import("../dist/runtime.mjs?owner-registry-second");

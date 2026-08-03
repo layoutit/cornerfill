@@ -4,6 +4,7 @@ export type ImageCacheRecordState = "loading" | "ready" | "error";
 
 export interface ImageCacheRecord {
   absoluteUrl: string;
+  cancel: (reason?: unknown) => void;
   error: unknown;
   image: HTMLImageElement;
   key: string;
@@ -18,6 +19,7 @@ export interface ImageCacheOptions {
   onDecode?: ((record: ImageCacheRecord) => void) | null;
   onEvict?: ((record: ImageCacheRecord) => void) | null;
   onHit?: ((record: ImageCacheRecord) => void) | null;
+  timeoutMs?: number;
 }
 
 export interface ImageLease {
@@ -27,18 +29,55 @@ export interface ImageLease {
   readonly url: string;
 }
 
-function waitForImage(image: HTMLImageElement): Promise<void> {
-  if (typeof image.decode === "function") {
-    return image.decode().catch((error) => {
-      if (image.complete && image.naturalWidth > 0) return;
-      throw error;
-    });
-  }
-  if (image.complete && image.naturalWidth > 0) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    image.addEventListener("load", () => resolve(), { once: true });
-    image.addEventListener("error", () => reject(new Error(`image failed to load: ${image.src}`)), { once: true });
+function waitForImage(
+  image: HTMLImageElement,
+  view: Window & typeof globalThis,
+  timeoutMs: number,
+  absoluteUrl: string,
+): Readonly<{ cancel: (reason?: unknown) => void; promise: Promise<void> }> {
+  let cancel = (_reason?: unknown): void => {};
+  const promise = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer = 0;
+    const cleanup = () => {
+      view.clearTimeout(timer);
+      image.removeEventListener("load", loaded);
+      image.removeEventListener("error", failed);
+    };
+    const finish = (error: unknown = null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error !== null) reject(error);
+      else resolve();
+    };
+    const loaded = () => finish();
+    const failed = () => finish(new Error(`image failed to load: ${absoluteUrl}`));
+    cancel = (reason = new Error(`image load was cancelled: ${absoluteUrl}`)) => {
+      if (settled) return;
+      finish(reason);
+      image.src = "";
+    };
+    timer = view.setTimeout(() => cancel(
+      new Error(`image load timed out after ${timeoutMs}ms: ${absoluteUrl}`),
+    ), timeoutMs);
+    if (typeof image.decode === "function") {
+      try {
+        image.decode().then(() => finish()).catch((error) => {
+          if (image.complete && image.naturalWidth > 0) finish();
+          else finish(error);
+        });
+      } catch (error) {
+        finish(error);
+      }
+    } else if (image.complete && image.naturalWidth > 0) {
+      finish();
+    } else {
+      image.addEventListener("load", loaded, { once: true });
+      image.addEventListener("error", failed, { once: true });
+    }
   });
+  return Object.freeze({ promise, cancel: (reason?: unknown) => cancel(reason) });
 }
 
 export class ImageCache {
@@ -49,6 +88,7 @@ export class ImageCache {
   declare readonly onEvict: ((record: ImageCacheRecord) => void) | null;
   declare readonly maxZeroReferenceEntries: number;
   declare readonly maxEstimatedPixels: number;
+  declare readonly timeoutMs: number;
   declare evictions: number;
   declare destroyed: boolean;
 
@@ -58,6 +98,7 @@ export class ImageCache {
     onEvict = null,
     maxZeroReferenceEntries = 32,
     maxEstimatedPixels = 67_108_864,
+    timeoutMs = 10_000,
   }: ImageCacheOptions = {}) {
     if (!document?.defaultView?.Image) throw new TypeError("ImageCache requires a browser document");
     if (!Number.isSafeInteger(maxZeroReferenceEntries) || maxZeroReferenceEntries < 0) {
@@ -66,6 +107,9 @@ export class ImageCache {
     if (!Number.isFinite(maxEstimatedPixels) || maxEstimatedPixels < 0) {
       throw new TypeError("maxEstimatedPixels must be finite and non-negative");
     }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError("timeoutMs must be finite and positive");
+    }
     this.document = document;
     this.records = new Map();
     this.onDecode = onDecode;
@@ -73,6 +117,7 @@ export class ImageCache {
     this.onEvict = onEvict;
     this.maxZeroReferenceEntries = maxZeroReferenceEntries;
     this.maxEstimatedPixels = maxEstimatedPixels;
+    this.timeoutMs = timeoutMs;
     this.evictions = 0;
     this.destroyed = false;
   }
@@ -100,7 +145,11 @@ export class ImageCache {
       if (record.refs !== 0 || this.records.get(record.key) !== record) continue;
       const pixels = this._estimatedPixels(record);
       this.records.delete(record.key);
-      record.image.src = "";
+      if (record.state === "loading") {
+        record.cancel(new Error(`image load was evicted before decode completed: ${record.absoluteUrl}`));
+      } else {
+        record.image.src = "";
+      }
       zeroReferenceEntries -= 1;
       estimatedPixels -= pixels;
       this.evictions += 1;
@@ -121,9 +170,15 @@ export class ImageCache {
       image.decoding = "async";
       if (crossOrigin !== null) image.crossOrigin = crossOrigin;
       let created!: ImageCacheRecord;
+      image.src = absoluteUrl;
+      const wait = waitForImage(
+        image,
+        this.document.defaultView as Window & typeof globalThis,
+        this.timeoutMs,
+        absoluteUrl,
+      );
       const promise = (async () => {
-        image.src = absoluteUrl;
-        await waitForImage(image);
+        await wait.promise;
         if (this.records.get(key) !== created) {
           throw new Error(`image load was evicted before decode completed: ${absoluteUrl}`);
         }
@@ -143,6 +198,7 @@ export class ImageCache {
       created = {
         key,
         absoluteUrl,
+        cancel: wait.cancel,
         image,
         refs: 0,
         state: "loading",
@@ -165,6 +221,11 @@ export class ImageCache {
         if (released) return;
         released = true;
         record.refs = Math.max(0, record.refs - 1);
+        if (record.refs === 0 && record.state === "loading") {
+          if (this.records.get(record.key) === record) this.records.delete(record.key);
+          record.cancel(new Error(`image load was released before decode completed: ${record.absoluteUrl}`));
+          return;
+        }
         this._touch(record);
         this._evict();
       },
@@ -186,6 +247,7 @@ export class ImageCache {
       limits: Object.freeze({
         zeroReferenceEntries: this.maxZeroReferenceEntries,
         estimatedPixels: this.maxEstimatedPixels,
+        timeoutMs: this.timeoutMs,
       }),
     });
   }
@@ -193,7 +255,11 @@ export class ImageCache {
   destroy(): void {
     if (this.destroyed) return;
     for (const record of this.records.values()) {
-      if (record.refs === 0) record.image.src = "";
+      if (record.state === "loading") {
+        record.cancel(new Error(`image cache was destroyed before decode completed: ${record.absoluteUrl}`));
+      } else {
+        record.image.src = "";
+      }
     }
     this.records.clear();
     this.destroyed = true;

@@ -71,6 +71,7 @@
     "build": "npm run clean && npm run generate && tsc -p tsconfig.json && tsc -p tsconfig.types.json",
     "prepare": "npm run build",
     "test": "npm run build && node --test",
+    "test:package": "npm run build && node scripts/package-consumer.mjs",
     "test:browser:runtime": "npm run build && node scripts/runtime-regressions.mjs",
     "test:browser:runtime:built": "node scripts/runtime-regressions.mjs",
     "oracle:list": "node scripts/oracle.mjs list",

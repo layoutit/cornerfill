@@ -1,5 +1,7 @@
 # Cornerfill
 
+> Experimental paint-only polyfill. Candidate pixel parity is currently `UNQUALIFIED`.
+
 Cornerfill makes CSS `corner-shape` work in Safari and Firefox. You write ordinary CSS; Cornerfill paints the host background and border into a transparent Canvas-backed background image while leaving the original element, layout, and transform in place. A syntax-, computed-value-, and observable-behavior-qualified native engine stays native and never starts the fallback renderer.
 
 Cornerfill shapes host paint. It does not add descendant overflow clipping or shaped hit testing. It is built for retained DOM renderers such as [PolyCSS](https://github.com/LayoutitStudio/polycss), but the runtime and geometry are standalone.
@@ -56,7 +58,9 @@ Native selection requires shorthand, all physical and logical longhands, aliases
 
 ## Automatic Sources and Shadow Roots
 
-Document mode reads `<style>` text, inline `style` attributes, and same-origin or CORS-readable stylesheet links. Supported top-level `@import` trees are fetched recursively; child URLs, media conditions, direct `@supports` conditions, and named layers retain their source context. Relevant selector state and source changes are coalesced into one animation-frame pass. They do not restart a settled import graph.
+Document mode reads `<style>` text, inline `style` attributes, and same-origin or CORS-readable stylesheet links. Supported top-level `@import` trees are fetched recursively; child URLs, media conditions, direct `@supports` conditions, and named layers retain their source context. A failed import contributes no imported rules while later local rules remain active; its diagnostic and source identity remain retryable. Relevant selector state and source changes are coalesced into one animation-frame pass. They do not restart a settled import graph.
+
+The initial source set is applied transactionally after every discovered owner settles or reaches `stylesheetTimeoutMs`. This avoids painting an incomplete cascade and repainting it as slower sheets arrive, but one slow sheet can delay the first automatic attachment pass up to that bound.
 
 Open shadow roots are explicit because discovery does not cross a shadow boundary:
 
@@ -123,6 +127,7 @@ import { installCornerfillAuto } from "cornerfill/auto";
 
 const cornerfill = installCornerfillAuto({
   stylesheetTimeoutMs: 5_000,
+  imageTimeoutMs: 10_000,
   nonce: document.currentScript?.nonce,
   onError(error, context) {
     console.error(`Cornerfill source error in ${context}`, error);
@@ -132,7 +137,7 @@ const cornerfill = installCornerfillAuto({
 await cornerfill.ready;
 ```
 
-`autoObserve: false` switches off automatic source/state observation. `adoptedStyleSheets: true` opts a registered open shadow root into constructed-sheet handling. These options are for controlled integrations; normal document use should import `cornerfill`.
+`autoObserve: false` switches off automatic source/state observation. `adoptedStyleSheets: true` opts a registered open shadow root into constructed-sheet handling. URL-backed raster decoding has its own `imageTimeoutMs` bound, defaulting to 10 seconds; timeout aborts that image and diagnoses only its element so automatic readiness can settle. These options are for controlled integrations; normal document use should import `cornerfill`.
 
 Use the scanner-free runtime when your application already owns element state:
 
@@ -217,10 +222,11 @@ Prepared surfaces are allocated during attachment so reactivation does not alloc
 - General background blending is not supported. Automatic mode cannot prove raster opacity, so the bounded `multiply` path is explicit-runtime only.
 - Automatic discovery supports one physical or logical declaration family at a time. Mixed families are rejected. Automatic CSS animations and transitions of shape or paint dependencies are not reproduced with native timing or interpolation; use the explicit update/interpolation API when that behavior matters.
 - Direct declaration tests such as `@supports (corner-shape: bevel)` are preserved only when the affected rules contain transported shape declarations. A conditional block that also controls ordinary declarations or author custom properties is refused instead of splitting the block's semantics. Complex conditions, container-query paint dependencies, anonymous layers, nested selector rules, and unknown at-rule contexts are likewise refused before ownership.
+- An ownership-blocking source disables automatic fallback for its entire registered document or shadow root until that source is removed or repaired. This root-wide fail-closed boundary prevents Cornerfill from painting against an incomplete cascade.
 - Pending-substitution `all: var(...)` and `all: env(...)` resets are transported when they resolve to `initial`, `unset`, or the invalid-at-computed-value reset behavior. Cascade-dependent results such as `revert-layer` are reported and refused instead of leaving stale shape carriers active.
 - Cross-origin stylesheets and imports require CORS. Closed or unregistered shadow roots are not discovered. Constructed/adopted sheets require explicit open-root registration and the exact-source refresh shown above. Generated styles require a CSP nonce when the page policy does.
-- After installation, automatic mode mirrors `insertRule()` and `deleteRule()` on directly discovered, non-import stylesheet instances and restores the original instance methods on teardown. Rules inserted before startup and unsupported values assigned through `CSSStyleDeclaration` cannot be recovered after the browser discards them.
-- A failed linked stylesheet stays cached until its source changes or `cornerfill.refresh({ retryFailed: true })` is requested. Refusals and source failures appear in `cornerfill.explain().errors`.
+- After installation, automatic mode mirrors `insertRule()` and `deleteRule()` on directly discovered, non-import stylesheet instances and restores the original instance methods on teardown. Mutating an existing rule's `style`, `cssText`, `selectorText`, nested grouping rules, or media list is not observable; call `await cornerfill.refresh()` after those CSSOM operations. Rules inserted before startup and unsupported values assigned through `CSSStyleDeclaration` cannot be recovered after the browser discards them.
+- A failed linked stylesheet or imported source stays cached until its source changes or `cornerfill.refresh({ retryFailed: true })` is requested. Refusals and source failures appear in `cornerfill.explain().errors`.
 
 Cornerfill refuses unsupported cases instead of painting a result with different semantics.
 
@@ -229,6 +235,7 @@ Cornerfill refuses unsupported cases instead of painting a result with different
 ```sh
 npm run build
 npm test
+npm run test:package
 npm run test:browser:runtime
 npm run oracle:smoke
 npm run oracle:cross

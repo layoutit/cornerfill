@@ -400,6 +400,26 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
 ({ installCornerfill } = await import("../dist/runtime.mjs"));
 ({ installCornerfillAuto } = await import("../dist/auto-runtime.mjs"));
 
+await test("explicit paint rejects invalid CSS colors before taking ownership", async () => {
+  const element = host();
+  const controller = installCornerfill(options());
+  let error = null;
+  try {
+    controller.attach(element, {
+      borderRadius: "5px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: "definitely-not-a-color" },
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert(error instanceof SyntaxError, "invalid explicit color was accepted");
+  assert(controller.stats().entries === 0, "invalid explicit color created a runtime entry");
+  assert(!element.hasAttribute("data-cornerfill-owned"), "invalid explicit color took element ownership");
+  controller.destroy();
+  element.remove();
+});
+
 await test("automatic state observation refuses shaped backdrop-filter paint", async () => {
   const style = document.createElement("style");
   style.textContent = `
@@ -559,7 +579,7 @@ await test("automatic stylesheet refresh is serialized, stale-safe, and retryabl
     const pending = auto.refresh();
     await waitFor(() => requests.length === 5, "in-flight teardown stylesheet request");
     try {
-      await waitFor(() => auto.explain(localElement)?.status === "active", "slow link blocked a readable local stylesheet");
+      await waitFor(() => auto.explain(localElement)?.status === "active", "local stylesheet did not recover after slow link timeout");
     } catch (error) {
       throw new Error(`${error.message}: ${JSON.stringify({
         auto: auto.explain(),
@@ -643,6 +663,177 @@ await test("automatic root and import fetches settle at the configured timeout",
     await run('@import "https://assets.example/hanging.css";');
   } finally {
     window.fetch = originalFetch;
+  }
+});
+
+await test("inactive conditional imports do not establish their named layer", async () => {
+  const importUrl = "data:text/css,/*cornerfill-empty-conditional*/";
+  const originalFetch = window.fetch;
+  window.fetch = (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url !== importUrl) return originalFetch(input, init);
+    return Promise.resolve({
+      headers: { get: (name) => name.toLowerCase() === "content-type" ? "text/css" : null },
+      ok: true,
+      status: 200,
+      text: async () => "",
+      url: importUrl,
+    });
+  };
+  const imported = document.createElement("style");
+  imported.textContent = `@import "${importUrl}" layer(cornerfill-conditional-theme) not all;`;
+  const cascade = document.createElement("style");
+  cascade.textContent = `
+    @layer cornerfill-conditional-base, cornerfill-conditional-theme;
+    @layer cornerfill-conditional-base {
+      .cornerfill-conditional-layer { corner-shape: bevel; background: red }
+    }
+    @layer cornerfill-conditional-theme {
+      .cornerfill-conditional-layer { corner-shape: scoop; background: blue }
+    }
+  `;
+  document.head.append(imported, cascade);
+  const element = host();
+  element.className = "cornerfill-conditional-layer";
+  element.style.removeProperty("background-color");
+  const auto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await auto.ready;
+    equal(
+      auto.explain(element)?.geometry.shapeParameters,
+      [-1, -1, -1, -1],
+      "inactive layered import inverted later layer order",
+    );
+    assert(
+      /(?:blue|0,\s*0,\s*255)/u.test(auto.explain(element)?.paint?.layer?.color ?? ""),
+      "inactive layered import inverted later layer paint",
+    );
+  } finally {
+    auto.destroy();
+    window.fetch = originalFetch;
+    imported.remove();
+    cascade.remove();
+    element.remove();
+  }
+});
+
+await test("a failed import preserves later local corner rules", async () => {
+  const importUrl = "data:text/css,/*cornerfill-missing-import*/";
+  const originalFetch = window.fetch;
+  let requests = 0;
+  window.fetch = (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url !== importUrl) return originalFetch(input, init);
+    requests += 1;
+    return Promise.reject(new Error("intentional missing import"));
+  };
+  const style = document.createElement("style");
+  style.textContent = `
+    @import "${importUrl}" not all;
+    .cornerfill-local-after-failed-import {
+      corner-shape: bevel;
+      border-radius: 5px;
+      background: red;
+    }
+  `;
+  document.head.append(style);
+  const element = host();
+  element.className = "cornerfill-local-after-failed-import";
+  const auto = installCornerfillAuto(options({ autoObserve: false, onError() {} }));
+  try {
+    await auto.ready;
+    assert(auto.explain(element)?.status === "active", "failed import discarded a later local rule");
+    assert(requests === 1, "failed import was requested more than once during initial discovery");
+    const record = auto.stylesheets.get(style);
+    assert(record?.failed === true, "partially compiled import owner was not retained as retryable");
+    assert(record?.sources.includes(importUrl), "failed import was absent from source provenance");
+    assert(
+      auto.explain().errors.some(({ message }) => /intentional missing import/u.test(message)),
+      "failed import was not diagnosed",
+    );
+  } finally {
+    auto.destroy();
+    window.fetch = originalFetch;
+    style.remove();
+    element.remove();
+  }
+});
+
+await test("automatic source recovery handles comments and CSS identifier escapes", async () => {
+  const style = document.createElement("style");
+  style.textContent = String.raw`
+    .cornerfill-token-comment { corner-shape/**/: bevel }
+    .cornerfill-token-property { corner-\73hape: bevel }
+    @layer c\61 fé {
+      .cornerfill-token-value { corner-shape: b\65 vel }
+    }
+  `;
+  document.head.append(style);
+  const elements = [
+    "cornerfill-token-comment",
+    "cornerfill-token-property",
+    "cornerfill-token-value",
+  ].map((className) => {
+    const element = host();
+    element.className = className;
+    return element;
+  });
+  const auto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await auto.ready;
+    for (const element of elements) {
+      equal(
+        auto.explain(element)?.geometry.shapeParameters,
+        [0, 0, 0, 0],
+        `automatic source scanner lost ${element.className}`,
+      );
+    }
+  } finally {
+    auto.destroy();
+    style.remove();
+    for (const element of elements) element.remove();
+  }
+});
+
+await test("a hanging raster times out without holding automatic readiness", async () => {
+  const originalDecode = Image.prototype.decode;
+  Image.prototype.decode = () => new Promise(() => {});
+  const style = document.createElement("style");
+  const imageUrl = raster(2, 2, "#0af").toDataURL();
+  style.textContent = `
+    .cornerfill-hanging-image {
+      corner-shape: bevel;
+      border-radius: 5px;
+      background-image: url("${imageUrl}");
+    }
+  `;
+  document.head.append(style);
+  const element = host();
+  element.className = "cornerfill-hanging-image";
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    imageTimeoutMs: 25,
+    onError() {},
+  }));
+  try {
+    await Promise.race([
+      auto.ready,
+      new Promise((_resolve, reject) => setTimeout(
+        () => reject(new Error("hanging raster held automatic readiness")),
+        1_000,
+      )),
+    ]);
+    assert(auto.explain(element) === null, "timed-out raster retained a failed attachment");
+    assert(
+      auto.explain().errors.some(({ message }) => /image load timed out after 25ms/u.test(message)),
+      "timed-out raster was not diagnosed",
+    );
+    assert(auto.explain().runtime.imageCache.loading === 0, "timed-out raster retained a loading cache record");
+  } finally {
+    auto.destroy();
+    Image.prototype.decode = originalDecode;
+    style.remove();
+    element.remove();
   }
 });
 

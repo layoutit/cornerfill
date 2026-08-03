@@ -60,6 +60,7 @@ interface ElementDiagnostic {
 
 interface CarrierCompilation {
   readonly css: string;
+  readonly failedImports?: number | undefined;
   readonly imports?: number | undefined;
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
@@ -97,6 +98,7 @@ interface ImportFunctionParse {
 }
 
 interface CompiledSourceTree extends CarrierCompilation {
+  readonly failedImports: number;
   readonly imports: number;
   readonly sources: readonly string[];
 }
@@ -141,6 +143,7 @@ export interface DiagnosticRecord {
 
 type DiagnosticError = Error & Readonly<{
   cornerfillDiagnostic?: DiagnosticDetails | undefined;
+  cornerfillImportLoadFailure?: true | undefined;
   cornerfillOwnershipBlocking?: true | undefined;
 }>;
 
@@ -440,6 +443,8 @@ const AUTOMATIC_DISCOVERY = Object.freeze({
     "corner-shape or paint changes driven by CSS animations or transitions",
     "alternate stylesheet sets",
     "corner-shape rules inserted through CSSOM before Cornerfill starts",
+    "mutations of existing CSSRule declarations, selectors, grouping rules, or media lists until explicit refresh()",
+    "one ownership-blocking source disables fallback for its registered root",
     "unsupported declarations assigned through CSSStyleDeclaration, which the browser discards",
   ]),
 });
@@ -479,6 +484,106 @@ function isShapeProperty(value: string): value is ShapeProperty {
 
 function isCssWhitespaceOrComments(value: string): boolean {
   return value.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim() === "";
+}
+
+interface CssIdentifierParse {
+  readonly end: number;
+  readonly start: number;
+  readonly value: string;
+}
+
+function cssEscapeEnd(source: string, start: number): number {
+  if (source[start] !== "\\") return -1;
+  const first = source[start + 1];
+  if (!first || /[\n\f\r]/u.test(first)) return -1;
+  if (!/[0-9a-f]/iu.test(first)) return start + 2;
+  let index = start + 1;
+  let digits = 0;
+  while (digits < 6 && /[0-9a-f]/iu.test(source[index] ?? "")) {
+    index += 1;
+    digits += 1;
+  }
+  if (source[index] === "\r" && source[index + 1] === "\n") return index + 2;
+  if (/[\t\n\f\r ]/u.test(source[index] ?? "")) index += 1;
+  return index;
+}
+
+function cssNameStart(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  return /[a-z_]/iu.test(character) || (codePoint !== undefined && codePoint >= 0x80);
+}
+
+function cssNameCharacter(character: string): boolean {
+  return cssNameStart(character) || /[\d-]/u.test(character);
+}
+
+function consumeCssIdentifier(source: string, start: number): Readonly<CssIdentifierParse> | null {
+  let index = start;
+  const first = source[index] ?? "";
+  if (first === "-") {
+    index += 1;
+    const next = source[index] ?? "";
+    if (next === "\\") {
+      const end = cssEscapeEnd(source, index);
+      if (end < 0) return null;
+      index = end;
+    } else if (next === "-" || cssNameStart(next)) {
+      index += 1;
+    } else {
+      return null;
+    }
+  } else if (first === "\\") {
+    const end = cssEscapeEnd(source, index);
+    if (end < 0) return null;
+    index = end;
+  } else if (cssNameStart(first)) {
+    index += 1;
+  } else {
+    return null;
+  }
+  while (index < source.length) {
+    const character = source[index]!;
+    if (cssNameCharacter(character)) {
+      index += 1;
+      continue;
+    }
+    if (character !== "\\") break;
+    const end = cssEscapeEnd(source, index);
+    if (end < 0) break;
+    index = end;
+  }
+  return Object.freeze({
+    start,
+    end: index,
+    value: decodeCssEscapes(source.slice(start, index)),
+  });
+}
+
+function wholeCssIdentifier(source: string): Readonly<CssIdentifierParse> | null {
+  const start = skipCssTrivia(source, 0);
+  const identifier = consumeCssIdentifier(source, start);
+  return identifier && isCssWhitespaceOrComments(source.slice(identifier.end)) ? identifier : null;
+}
+
+function validLayerName(source: string): boolean {
+  let cursor = 0;
+  let segments = 0;
+  while (cursor < source.length) {
+    cursor = skipCssTrivia(source, cursor);
+    const identifier = consumeCssIdentifier(source, cursor);
+    if (!identifier) return false;
+    segments += 1;
+    cursor = skipCssTrivia(source, identifier.end);
+    if (cursor >= source.length) return segments > 0;
+    if (source[cursor] !== ".") return false;
+    cursor += 1;
+  }
+  return false;
+}
+
+function namedLayerBlockHeader(header: string): boolean {
+  const match = /^@layer\s+([\s\S]+?)\s*$/iu.exec(header);
+  return Boolean(match && validLayerName(match[1]!));
 }
 
 type CssTokenVisitor = (
@@ -613,6 +718,7 @@ function potentiallyValidUnsupportedShape(value: string): boolean {
 
 function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): string {
   const { value, priority } = declarationValue(rawValue);
+  const decodedValue = decodeCssEscapes(value);
   const longhands: readonly Exclude<ShapeProperty, "corner-shape">[] = property === "corner-shape"
     ? PHYSICAL_SHAPE_PROPERTIES
     : [property as Exclude<ShapeProperty, "corner-shape">];
@@ -620,25 +726,25 @@ function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): str
     ? AUTO_PHYSICAL_SHAPE
     : AUTO_LOGICAL_SHAPE;
   const state = shapeDeclarationState(priority);
-  if (/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value)) {
-    return `${shapeCssWideDeclaration(property, value, priority, longhands, marker)}${state}`;
+  if (/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(decodedValue)) {
+    return `${shapeCssWideDeclaration(property, decodedValue, priority, longhands, marker)}${state}`;
   }
   try {
-    if (/\b(?:env|var)\s*\(/iu.test(value)) {
+    if (/\b(?:env|var)\s*\(/iu.test(decodedValue)) {
       const carrier = SHAPE_PROPERTIES[property];
       return `${carrier}:${value}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};${state}`;
     }
     if (property === "corner-shape") {
-      const values = parseCornerShape(value);
+      const values = parseCornerShape(decodedValue);
       return `${PHYSICAL_SHAPE_PROPERTIES.map((longhand, index) => (
         `${SHAPE_PROPERTIES[longhand]}:${serializeShapeParameter(values[index]!)}${priority};`
       )).join("")}${shapeStatusDeclarations(longhands, "ok", priority)}${AUTO_PHYSICAL_SHAPE}:1${priority};${state}`;
     }
     const carrier = SHAPE_PROPERTIES[property];
-    const parsed = serializeShapeParameter(parseCornerShapeValue(value));
+    const parsed = serializeShapeParameter(parseCornerShapeValue(decodedValue));
     return `${carrier}:${parsed}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};${state}`;
   } catch {
-    return potentiallyValidUnsupportedShape(value)
+    return potentiallyValidUnsupportedShape(decodedValue)
       ? `${shapeStatusDeclarations(longhands, "unsupported", priority)}${marker}:1${priority};${state}`
       : "";
   }
@@ -672,12 +778,12 @@ function canonicalizeCornerShapeDeclarations(
     if (parentheses !== 0 || brackets !== 0) return;
     if (character === ":") {
       const statement = source.slice(statementStart, index);
-      const match = /([\w-]+)\s*$/u.exec(statement);
-      if (!match || !isCssWhitespaceOrComments(statement.slice(0, match.index))) return;
-      const property = match[1]!.toLowerCase();
+      const identifier = wholeCssIdentifier(statement);
+      if (!identifier) return;
+      const property = identifier.value.toLowerCase();
       if (!isShapeProperty(property) && property !== "all") return;
       const end = declarationEnd(source, index + 1);
-      const start = statementStart + match.index;
+      const start = statementStart + identifier.start;
       if (property === "all") {
         const replacement = allCarrierDeclaration(
           source.slice(start, end),
@@ -867,10 +973,11 @@ function serializeCarrierRules(
       }
       continue;
     }
+    const namedLayer = namedLayerBlockHeader(header);
     const supportedGroupingRule = Boolean(rule.cssRules) && (
       /^@supports\b/iu.test(header)
       || /^@media\b/iu.test(header)
-      || /^@layer\s+[\w.-]+\s*$/iu.test(header)
+      || namedLayer
     );
     if (strictShapeSupports && typeof rule.selectorText !== "string" && !supportedGroupingRule) {
       throw ownershipBlockingSyntaxError(
@@ -928,13 +1035,13 @@ function serializeCarrierRules(
       if (declarations.css) output += `${rule.keyText}{${declarations.css}}`;
       continue;
     }
-    const preserveEmptyLayer = strictShapeSupports && /^@layer\s+[\w.-]+\s*$/iu.test(header);
+    const preserveEmptyLayer = strictShapeSupports && namedLayer;
     if (nested || preserveEmptyLayer) {
       if (/^@layer\s*$/iu.test(header)) {
         throw new SyntaxError("Automatic CSS cannot preserve an anonymous cascade layer");
       }
       if (/^@supports\b/iu.test(header)) output += `${carrierSupportsHeader(header)}{${nested}}`;
-      else if (/^@media\b/iu.test(header) || /^@layer\s+[\w.-]+\s*$/iu.test(header)) {
+      else if (/^@media\b/iu.test(header) || namedLayer) {
         output += `${header}{${nested}}`;
       } else {
         throw new SyntaxError(`Automatic CSS cannot preserve at-rule context: ${header}`);
@@ -1211,7 +1318,7 @@ function parseImportStatement(statement: string, baseUrl: string): Readonly<Pars
   if (/^layer\b/iu.test(rest)) {
     const layerFunction = consumeImportFunction(rest, "layer");
     if (!layerFunction) throw new SyntaxError("Automatic CSS refuses anonymous @import layers");
-    if (!/^[-_a-z][\w.-]*$/iu.test(layerFunction.value)) {
+    if (!validLayerName(layerFunction.value)) {
       throw new SyntaxError(`Automatic CSS cannot preserve @import layer name: ${layerFunction.value}`);
     }
     layer = layerFunction.value;
@@ -1232,14 +1339,14 @@ function parseImportStatement(statement: string, baseUrl: string): Readonly<Pars
 
 function wrapImportedCarrierCss(css: string, imported: Readonly<ParsedImport>): string {
   let output = css;
-  if (imported.media) output = `@media ${imported.media}{${output}}`;
+  if (imported.layer) output = `@layer ${imported.layer}{${output}}`;
   if (imported.supports) {
     const condition = /^(?:\(|not\b)/iu.test(imported.supports)
       ? imported.supports
       : `(${imported.supports})`;
     output = `${carrierSupportsHeader(`@supports ${condition}`)}{${output}}`;
   }
-  if (imported.layer) output = `@layer ${imported.layer}{${output}}`;
+  if (imported.media) output = `@media ${imported.media}{${output}}`;
   return output;
 }
 
@@ -1273,6 +1380,11 @@ function ownershipBlockingSyntaxError(message: string): DiagnosticError {
 function ownershipBlockingError(error: unknown): boolean {
   return error instanceof Error
     && (error as DiagnosticError).cornerfillOwnershipBlocking === true;
+}
+
+function importLoadFailure(error: unknown): boolean {
+  return error instanceof Error
+    && (error as DiagnosticError).cornerfillImportLoadFailure === true;
 }
 
 function annotateDiagnostic(error: unknown, details: Readonly<DiagnosticDetails>): DiagnosticError {
@@ -1958,7 +2070,9 @@ class CornerfillAutoController {
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          throw new Error(`@import ${url} failed: ${message}`, { cause: error });
+          const failure = new Error(`@import ${url} failed: ${message}`, { cause: error }) as DiagnosticError;
+          Object.defineProperty(failure, "cornerfillImportLoadFailure", { value: true });
+          throw failure;
         } finally {
           created.settled = true;
           if (created.consumers.size === 0 && this.importRequests.get(key) === created) {
@@ -1990,6 +2104,7 @@ class CornerfillAutoController {
     request.provenance.add(identity);
     const split = leadingImportStatements(source.text);
     const parts: CarrierCompilation[] = [];
+    let failedImports = 0;
     for (const statement of split.imports) {
       let imported: Readonly<ParsedImport>;
       try {
@@ -2000,6 +2115,7 @@ class CornerfillAutoController {
       if (nextStack.includes(imported.url)) {
         throw new SyntaxError(`Automatic CSS rejected an @import cycle: ${[...nextStack, imported.url].join(" -> ")}`);
       }
+      request.provenance.add(imported.url);
       const importedStrictShapeSupports = strictShapeSupports || Boolean(
         imported.supports && /\bcorner-(?:[\w-]*-)?shape\b/iu.test(imported.supports),
       );
@@ -2018,7 +2134,32 @@ class CornerfillAutoController {
         })();
         request.importCache.set(importCacheKey, compiledPromise);
       }
-      const compiled = await compiledPromise;
+      let compiled: Readonly<CompiledSourceTree>;
+      try {
+        compiled = await compiledPromise;
+      } catch (error) {
+        if (this.destroyed || request.aborted || !importLoadFailure(error)) throw error;
+        const diagnostic = annotateDiagnostic(error, {
+          source: imported.url,
+          declaration: statement.prelude,
+        });
+        this._recordError(diagnostic, `@import ${imported.url}`, {
+          bucket: owner,
+          ownerIdentity: this._ownerIdentity(owner),
+          source: imported.url,
+          declaration: statement.prelude,
+        });
+        failedImports += 1;
+        parts.push(Object.freeze({
+          css: imported.layer ? wrapImportedCarrierCss("", imported) : "",
+          selectors: Object.freeze([]),
+          selectorRecords: Object.freeze([]),
+          observation: selectorObservation([]),
+          mediaQueries: Object.freeze(imported.media ? [imported.media] : []),
+        }));
+        continue;
+      }
+      failedImports += compiled.failedImports;
       parts.push(Object.freeze({
         ...compiled,
         css: wrapImportedCarrierCss(compiled.css, imported),
@@ -2050,6 +2191,7 @@ class CornerfillAutoController {
       observation: mergeSelectorObservation(parts.map((part) => part.observation)),
       mediaQueries: Object.freeze([...new Set(parts.flatMap((part) => part.mediaQueries))].sort()),
       sources: Object.freeze([...request.provenance]),
+      failedImports,
       imports: split.imports.length,
     });
   }
@@ -2130,7 +2272,7 @@ class CornerfillAutoController {
       owner,
       companion,
       key,
-      failed: false,
+      failed: (compiled.failedImports ?? 0) > 0,
       media: stylesheetMedia(owner),
       selectors: compiled.selectors,
       selectorRecords: compiled.selectorRecords ?? Object.freeze([]),

@@ -123,6 +123,7 @@ export interface CornerfillInstallOptions {
   readonly document?: Document | undefined;
   readonly forceFallback?: boolean | undefined;
   readonly idPrefix?: string | undefined;
+  readonly imageTimeoutMs?: number | undefined;
   readonly maxActiveEntries?: number | undefined;
   readonly maxGeometryCacheEntries?: number | undefined;
   readonly maxImageCacheEntries?: number | undefined;
@@ -141,6 +142,7 @@ export interface ResolvedCornerfillOptions {
   readonly backend: SurfaceBackend;
   readonly forceFallback: boolean;
   readonly idPrefix: string;
+  readonly imageTimeoutMs: number;
   readonly maxActiveEntries: number;
   readonly maxGeometryCacheEntries: number;
   readonly maxImageCacheEntries: number;
@@ -383,6 +385,7 @@ interface RuntimeEntry {
   paintKey: string | null;
   paintCount: number;
   paintResult: Readonly<CornerfillPaintExplanation> | null;
+  pendingImageLeases: Set<Readonly<ImageLease>> | null;
   pendingReason: string | null;
   positionX: number;
   positionY: number;
@@ -401,13 +404,14 @@ interface RuntimeEntry {
   resolvedImage: CornerfillRasterSource | null;
   revision: number;
   saved: Map<string, Readonly<{
-    order: number;
+    ownedPresent: boolean;
     ownedPriority: string;
     ownedValue: string;
     present: boolean;
     priority: string;
     value: string;
   }>> | null;
+  savedDeclarationOrder: readonly string[] | null;
   shadow: Readonly<InsetShadowPaintState> | null;
   state: EntryState | null;
   styleVisible: boolean;
@@ -651,6 +655,7 @@ function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
     paintKey: null,
     paintCount: 0,
     paintResult: null,
+    pendingImageLeases: null,
     pendingReason: null,
     positionX: 0,
     positionY: 0,
@@ -668,6 +673,7 @@ function createRuntimeEntry(seed: RuntimeEntrySeed): RuntimeEntry {
     resolvedImage: null,
     revision: 0,
     saved: null,
+    savedDeclarationOrder: null,
     shadow: null,
     state: null,
     styleVisible: true,
@@ -955,6 +961,11 @@ const NATIVE_SHAPE_PROPERTIES = Object.freeze([
   ...LOGICAL_SHAPE_LONGHANDS,
 ]);
 
+const NATIVE_OWNED_PROPERTIES = Object.freeze([
+  ...NATIVE_SHAPE_PROPERTIES,
+  ...NATIVE_RADIUS_PROPERTIES,
+]);
+
 const PHYSICAL_RADIUS_PROPERTY_BY_CORNER = Object.freeze(Object.fromEntries(
   ["top-left", "top-right", "bottom-right", "bottom-left"].map((corner, index) => (
     [corner, RADIUS_LONGHANDS[index]]
@@ -1090,7 +1101,7 @@ function nativeShapeDeclarations(
 }
 
 function writeNativeDeclarations(
-  entry: Pick<RuntimeEntry, "element" | "saved">,
+  entry: Pick<RuntimeEntry, "element" | "saved" | "savedDeclarationOrder">,
   properties: readonly string[],
   declarations: readonly (readonly [property: string, value: string])[],
 ): void {
@@ -1100,13 +1111,15 @@ function writeNativeDeclarations(
     { length: entry.element.style.length },
     (_value, index) => entry.element.style.item(index),
   );
+  const originalOrder = entry.savedDeclarationOrder ?? declared;
   for (const property of properties) {
     if (!saved.has(property)) {
+      const order = originalOrder.indexOf(property);
       saved.set(property, Object.freeze({
-        order: declared.indexOf(property),
-        present: declared.includes(property),
+        present: order >= 0,
         value: entry.element.style.getPropertyValue(property),
         priority: entry.element.style.getPropertyPriority(property),
+        ownedPresent: false,
         ownedValue: "",
         ownedPriority: "",
       }));
@@ -1114,10 +1127,15 @@ function writeNativeDeclarations(
   }
   for (const property of properties) entry.element.style.removeProperty(property);
   for (const [property, value] of declarations) entry.element.style.setProperty(property, value);
+  const ownedDeclarations = new Set(Array.from(
+    { length: entry.element.style.length },
+    (_value, index) => entry.element.style.item(index),
+  ));
   for (const property of properties) {
     const original = saved.get(property)!;
     saved.set(property, Object.freeze({
       ...original,
+      ownedPresent: ownedDeclarations.has(property),
       ownedValue: entry.element.style.getPropertyValue(property),
       ownedPriority: entry.element.style.getPropertyPriority(property),
     }));
@@ -1125,24 +1143,66 @@ function writeNativeDeclarations(
 }
 
 function restoreNativeDeclarationGroup(
-  entry: Pick<RuntimeEntry, "element" | "saved">,
+  entry: Pick<RuntimeEntry, "element" | "saved" | "savedDeclarationOrder">,
   properties: readonly string[],
 ): void {
   const saved = entry.saved;
-  if (!saved) return;
+  const originalOrder = entry.savedDeclarationOrder;
+  if (!saved || !originalOrder) return;
+  const style = entry.element.style;
+  const currentOrder = Array.from(
+    { length: style.length },
+    (_value, index) => style.item(index),
+  );
+  const currentProperties = new Set(currentOrder);
+  const desired = new Map(currentOrder.map((property) => [property, Object.freeze({
+    value: style.getPropertyValue(property),
+    priority: style.getPropertyPriority(property),
+  })]));
   const records = properties.flatMap((property) => {
     const record = saved.get(property);
     return record ? [Object.freeze({ property, record })] : [];
   });
-  if (records.length === 0 || records.some(({ property, record }) => (
-    entry.element.style.getPropertyValue(property) !== record.ownedValue
-      || entry.element.style.getPropertyPriority(property) !== record.ownedPriority
-  ))) return;
-  for (const property of properties) entry.element.style.removeProperty(property);
-  for (const { property, record } of records
-    .filter(({ record }) => record.present)
-    .sort((left, right) => left.record.order - right.record.order)) {
-    entry.element.style.setProperty(property, record.value, record.priority);
+  let changed = false;
+  for (const { property, record } of records) {
+    const currentPresent = currentProperties.has(property);
+    const stillOwned = currentPresent === record.ownedPresent
+      && (!currentPresent || (
+        style.getPropertyValue(property) === record.ownedValue
+        && style.getPropertyPriority(property) === record.ownedPriority
+      ));
+    if (!stillOwned) continue;
+    changed = true;
+    if (record.present) {
+      desired.set(property, Object.freeze({ value: record.value, priority: record.priority }));
+    } else {
+      desired.delete(property);
+    }
+  }
+  if (!changed) return;
+
+  const reposition = new Set(records
+    .filter(({ property, record }) => record.present && desired.has(property))
+    .map(({ property }) => property));
+  const order = currentOrder.filter((property) => desired.has(property) && !reposition.has(property));
+  for (let index = 0; index < originalOrder.length; index += 1) {
+    const property = originalOrder[index]!;
+    if (!reposition.has(property)) continue;
+    const next = originalOrder.slice(index + 1).find((candidate) => order.includes(candidate));
+    if (next) {
+      order.splice(order.indexOf(next), 0, property);
+      continue;
+    }
+    const previous = originalOrder.slice(0, index).reverse().find((candidate) => order.includes(candidate));
+    if (previous) order.splice(order.indexOf(previous) + 1, 0, property);
+    else order.push(property);
+  }
+  for (const property of desired.keys()) if (!order.includes(property)) order.push(property);
+
+  for (const property of currentOrder) style.removeProperty(property);
+  for (const property of order) {
+    const declaration = desired.get(property)!;
+    style.setProperty(property, declaration.value, declaration.priority);
   }
 }
 
@@ -1678,6 +1738,30 @@ function normalizeContainedOutline(outline: unknown): Readonly<ContainedOutlineP
   });
 }
 
+type ExplicitColorValidator = (value: string, label: string) => void;
+
+function validateNormalizedColors(
+  validate: ExplicitColorValidator,
+  paint: Readonly<NormalizedPaintDescriptor> | null = null,
+  border: Readonly<OwnedBorderPaintState> | null = null,
+  shadow: Readonly<InsetShadowPaintState> | null = null,
+  outline: Readonly<ContainedOutlinePaintState> | null = null,
+): void {
+  if (paint) {
+    validate(paint.color, "background color");
+    const layers = paint.kind === "layers" ? paint.layers : [paint];
+    for (const layer of layers) {
+      if (layer.kind !== "linear-gradient"
+        && layer.kind !== "radial-gradient"
+        && layer.kind !== "conic-gradient") continue;
+      for (const [, color] of layer.stops) validate(color, `${layer.kind} stop color`);
+    }
+  }
+  if (border) validate(border.color, "border color");
+  if (shadow) validate(shadow.color, "inset shadow color");
+  if (outline) validate(outline.color, "outline color");
+}
+
 interface OutlineOverrides {
   readonly color?: string | undefined;
   readonly offset?: string | undefined;
@@ -1701,6 +1785,7 @@ function captureInitialSources(
   element: CornerfillElement,
   config: Readonly<CornerfillAttachConfig>,
   computed: CSSStyleDeclaration,
+  validateColor: ExplicitColorValidator,
 ): Readonly<InitialSources> {
   const radiusCapture = captureRadiusCarriers(computed);
   const computedShape = computed.getPropertyValue("corner-shape").trim();
@@ -1780,6 +1865,13 @@ function captureInitialSources(
   const outlineSource = config.outline === undefined
     ? captureOutline(computed, outlineCarrierValues)
     : normalizeContainedOutline(config.outline);
+  validateNormalizedColors(
+    validateColor,
+    config.paint === undefined ? null : paintSource,
+    config.border === undefined ? null : borderSource,
+    config.shadow === undefined ? null : shadowSource,
+    config.outline === undefined ? null : outlineSource,
+  );
   const initial: Readonly<InitialSources> = Object.freeze({
     radiusSource,
     shapeSource,
@@ -2459,6 +2551,8 @@ class CornerfillController {
   declare readonly preparedOwnershipVerificationEntries: Set<RuntimeEntry>;
   declare preparedOwnershipVerification: Promise<Map<RuntimeEntry, unknown>> | null;
   declare readonly activeAnimations: Map<RuntimeEntry, Set<string>>;
+  declare colorValidationContext: CanvasRenderingContext2D | null;
+  declare readonly validatedColors: Set<string>;
   declare flushHandle: number | null;
   declare flushRunning: boolean;
   declare destroyed: boolean;
@@ -2484,6 +2578,7 @@ class CornerfillController {
       maxGeometryCacheEntries: options.maxGeometryCacheEntries ?? 2048,
       maxImageCacheEntries: options.maxImageCacheEntries ?? 32,
       maxImageCachePixels: options.maxImageCachePixels ?? 67_108_864,
+      imageTimeoutMs: options.imageTimeoutMs ?? 10_000,
       maxWebkitPoolEntries: options.maxWebkitPoolEntries ?? 256,
       maxWebkitPoolPrefixes: options.maxWebkitPoolPrefixes ?? 16,
       idPrefix: options.idPrefix ?? "cornerfill",
@@ -2495,6 +2590,9 @@ class CornerfillController {
     if (!Number.isFinite(this.options.maxTotalSurfacePixels)
       || this.options.maxTotalSurfacePixels < 1) {
       throw new TypeError("maxTotalSurfacePixels must be finite and positive");
+    }
+    if (!Number.isFinite(this.options.imageTimeoutMs) || this.options.imageTimeoutMs <= 0) {
+      throw new TypeError("imageTimeoutMs must be finite and positive");
     }
     this.capabilities = detectCornerfillCapabilities(this.document, {
       nativeQualification: options.nativeQualification,
@@ -2517,6 +2615,8 @@ class CornerfillController {
     this.preparedOwnershipVerificationEntries = new Set();
     this.preparedOwnershipVerification = null;
     this.activeAnimations = new Map();
+    this.colorValidationContext = null;
+    this.validatedColors = new Set();
     this.flushHandle = null;
     this.flushRunning = false;
     this.destroyed = false;
@@ -2555,6 +2655,7 @@ class CornerfillController {
       onEvict: () => { this.counters.imageCacheEvictions += 1; },
       maxZeroReferenceEntries: this.options.maxImageCacheEntries,
       maxEstimatedPixels: this.options.maxImageCachePixels,
+      timeoutMs: this.options.imageTimeoutMs,
     });
     this._onMutation = this._onMutation.bind(this);
     this._onResize = this._onResize.bind(this);
@@ -2562,6 +2663,24 @@ class CornerfillController {
     this._onAnimationEnd = this._onAnimationEnd.bind(this);
     this._animationTick = this._animationTick.bind(this);
     this.observersInstalled = false;
+  }
+
+  _validateExplicitColor(value: string, label: string): void {
+    const color = String(value).trim();
+    if (!color) throw new SyntaxError(`${label} must be a valid CSS color`);
+    if (this.validatedColors.has(color)) return;
+    const context = this.colorValidationContext
+      ?? this.document.createElement("canvas").getContext("2d");
+    if (!context) throw new Error("CSS color validation requires a 2D Canvas context");
+    this.colorValidationContext = context;
+    context.fillStyle = "#010203";
+    context.fillStyle = color;
+    const first = String(context.fillStyle);
+    context.fillStyle = "#fefdfc";
+    context.fillStyle = color;
+    const second = String(context.fillStyle);
+    if (first !== second) throw new SyntaxError(`invalid ${label}: ${value}`);
+    this.validatedColors.add(color);
   }
 
   _ownershipStylesheetIsConnected(root: OwnershipRoot): boolean {
@@ -3270,10 +3389,19 @@ class CornerfillController {
     let desiredResolvedImage: CornerfillRasterSource | null = null;
     let settled = false;
 
+    const trackAcquired = (lease: Readonly<ImageLease>): void => {
+      acquired.add(lease);
+      (entry.pendingImageLeases ??= new Set()).add(lease);
+    };
+
     const rollback = () => {
       if (settled) return;
       settled = true;
-      for (const lease of acquired) lease.release();
+      for (const lease of acquired) {
+        entry.pendingImageLeases?.delete(lease);
+        lease.release();
+      }
+      if (entry.pendingImageLeases?.size === 0) entry.pendingImageLeases = null;
       acquired.clear();
     };
     const discardRejectedLease = (lease: Readonly<ImageLease>, identity: string): void => {
@@ -3303,7 +3431,7 @@ class CornerfillController {
             ?? (entry.imageLeaseUrl === request.identity ? entry.imageLease : null);
           if (!lease) {
             lease = this.images.acquire(request.absoluteUrl, { crossOrigin: request.crossOrigin });
-            acquired.add(lease);
+            trackAcquired(lease);
           }
           desiredLayerLeases.set(request.identity, lease);
           let image: CornerfillRasterSource;
@@ -3334,7 +3462,7 @@ class CornerfillController {
             : entry.layerImageLeases?.get(request.identity) ?? null;
           if (!lease) {
             lease = this.images.acquire(request.absoluteUrl, { crossOrigin: request.crossOrigin });
-            acquired.add(lease);
+            trackAcquired(lease);
           }
           desiredImageLease = lease;
           try {
@@ -3372,6 +3500,8 @@ class CornerfillController {
       entry.imageLeaseUrl = desiredImageLeaseUrl;
       entry.layerImageLeases = desiredLayerLeases.size > 0 ? desiredLayerLeases : null;
       entry.resolvedImage = desiredResolvedImage;
+      for (const lease of acquired) entry.pendingImageLeases?.delete(lease);
+      if (entry.pendingImageLeases?.size === 0) entry.pendingImageLeases = null;
       acquired.clear();
     };
     return Object.freeze({ paint, commit, rollback });
@@ -3995,6 +4125,13 @@ class CornerfillController {
     const outline = config.outline === undefined
       ? entry.preparedOutlineSource
       : normalizeContainedOutline(config.outline);
+    validateNormalizedColors(
+      (color, label) => this._validateExplicitColor(color, label),
+      descriptor,
+      border,
+      shadow,
+      outline,
+    );
     assertOutlineHost(this.view, entry.element, outline);
     const paintLeases = await this._resolvePaintTransaction(
       entry,
@@ -4302,6 +4439,10 @@ class CornerfillController {
     const shapeDeclarations = shape === null ? null : nativeShapeDeclarations(element, shape);
     const radiusDeclarations = radius === null ? null : nativeRadiusDeclarations(element, radius);
     const saved = new Map();
+    const savedDeclarationOrder = Object.freeze(Array.from(
+      { length: element.style.length },
+      (_value, index) => element.style.item(index),
+    ));
     const entry = createRuntimeEntry({
       controller: this,
       element,
@@ -4312,6 +4453,7 @@ class CornerfillController {
       initialized: true,
       committedRevision: 0,
       saved,
+      savedDeclarationOrder,
       lastInvalidationReason: "native-qualified",
     });
     if (shapeDeclarations) writeNativeDeclarations(entry, NATIVE_SHAPE_PROPERTIES, shapeDeclarations);
@@ -4373,6 +4515,13 @@ class CornerfillController {
         const border = next.border === undefined ? undefined : normalizeBorder(next.border);
         const shadow = next.shadow === undefined ? undefined : normalizeInsetShadow(next.shadow);
         const outline = next.outline === undefined ? undefined : normalizeContainedOutline(next.outline);
+        validateNormalizedColors(
+          (color, label) => controller._validateExplicitColor(color, label),
+          paint ?? null,
+          border ?? null,
+          shadow ?? null,
+          outline ?? null,
+        );
         if (outline !== undefined) assertOutlineHost(controller.view, entry.element, outline);
         const updatesGeometry = next.borderRadius !== undefined || next.cornerShape !== undefined;
         const flow = updatesGeometry
@@ -4512,7 +4661,12 @@ class CornerfillController {
     assertCooperativeOwnership(element);
     const computed = this.view.getComputedStyle(element);
     const composition = inspectFallbackHost(this.view, element, computed);
-    const initial = captureInitialSources(element, config, computed);
+    const initial = captureInitialSources(
+      element,
+      config,
+      computed,
+      (color, label) => this._validateExplicitColor(color, label),
+    );
     const watchCarriers = initial.dynamic.radius || initial.dynamic.shape || initial.dynamic.paint
       || (initial.dynamic.border && Boolean(initial.borderSource))
       || initial.dynamic.shadow || initial.dynamic.outline;
@@ -4567,14 +4721,15 @@ class CornerfillController {
     this.activeAnimations.delete(entry);
     this.resizeObserver?.unobserve(element);
     if (entry.native) {
-      restoreNativeDeclarationGroup(entry, NATIVE_SHAPE_PROPERTIES);
-      restoreNativeDeclarationGroup(entry, NATIVE_RADIUS_PROPERTIES);
+      restoreNativeDeclarationGroup(entry, NATIVE_OWNED_PROPERTIES);
       this.counters.nativeEntries -= 1;
     } else {
       this._removeOwnershipSurface(entry);
       restoreOwnershipState(element, entry.ownershipSnapshot);
       try { entry.surface?.dispose(); } catch (error) { cleanupError = error; }
       entry.surface = null;
+      for (const lease of entry.pendingImageLeases ?? []) lease.release();
+      entry.pendingImageLeases = null;
       entry.imageLease?.release();
       entry.imageLease = null;
       releaseLayerImageLeases(entry);
