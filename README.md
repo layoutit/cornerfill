@@ -1,4 +1,4 @@
-# Cornerfill
+# Cornerfill 📐
 
 Experimental paint-only CSS `corner-shape` support for Safari and Firefox. Import Cornerfill once, write normal CSS, and keep qualified native browsers native.
 
