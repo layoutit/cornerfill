@@ -360,10 +360,20 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     assert(auto.explain().automatic.counters.handleRefreshes === refreshesBeforeNoise, "unrelated DOM mutation refreshed a handle");
     noise.remove();
-    const paints = explanation.counters.paints;
-    element.style.transform = "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,3,4,0,1)";
+    const transformOnlyElements = [element, dynamic, inline, focus, paintFocus, fontFocus, partial];
+    const transformPaints = new Map(transformOnlyElements.map((candidate) => (
+      [candidate, auto.explain(candidate).counters.paints]
+    )));
+    transformOnlyElements.forEach((candidate, index) => {
+      candidate.style.transform = `matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,${index + 1},${index + 2},0,1)`;
+    });
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    assert(auto.explain(element).counters.paints === paints, "automatic element repainted for a transform-only change");
+    for (const candidate of transformOnlyElements) {
+      assert(
+        auto.explain(candidate).counters.paints === transformPaints.get(candidate),
+        "automatic element repainted during a transform-only mutation burst",
+      );
+    }
     inline.style.backgroundColor = "blue";
     await auto.refresh();
   }
@@ -2304,6 +2314,12 @@ await test("prepared layout resize rebuilds once and crop remains paint-only", a
   const resized = handle.explain();
   equal([resized.geometry.width, resized.geometry.height, resized.geometry.dpr], [15, 11, 2], "prepared geometry did not resize");
   equal([resized.surface.size.backingWidth, resized.surface.size.backingHeight], [30, 22], "prepared backing did not resize for DPR");
+  const siblingSurface = siblingHandle.explain().surface.size;
+  assert(
+    controller.stats().surfacePixels
+      === 30 * 22 + siblingSurface.backingWidth * siblingSurface.backingHeight,
+    "surface ledger drifted across a transactional resize",
+  );
   assert(resized.counters.paints === before + 1, "prepared layout change did not repaint exactly once");
   const afterLayout = resized.counters.paints;
   controller.updatePreparedBatch([{ element, backgroundPosition: [-1, 0] }]);
@@ -2344,6 +2360,56 @@ await test("shadow-root ownership paints and verifies", async () => {
   controller.destroy();
   shell.remove();
   destinationShell.remove();
+});
+
+await test("prepared rollback disposes its replacement when ownership restoration fails", async () => {
+  const element = host();
+  const controller = installCornerfill(options());
+  const handle = controller.attachPrepared(element, {
+    size: [12, 10],
+    borderRadius: "6px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "#08f" },
+  });
+  await handle.ready;
+  const before = controller.stats();
+  const previousId = handle.explain().surface.id;
+  const owner = element.getAttribute("data-cornerfill-owned");
+  const ownershipStyle = [...document.querySelectorAll("style[data-cornerfill-ownership-styles]")]
+    .find((style) => style.getAttribute("data-cornerfill-ownership-styles") === owner);
+  assert(ownershipStyle, "prepared rollback fixture could not find its ownership stylesheet");
+  ownershipStyle.remove();
+  const originalInsertRule = CSSStyleSheet.prototype.insertRule;
+  CSSStyleSheet.prototype.insertRule = function insertRule(rule, index) {
+    if (String(rule).includes("--cornerfill-live-image")) {
+      throw new Error("injected ownership rule failure");
+    }
+    return originalInsertRule.call(this, rule, index);
+  };
+  let error = null;
+  try {
+    await handle.resize({ cornerShape: "round" });
+  } catch (caught) {
+    error = caught;
+  } finally {
+    CSSStyleSheet.prototype.insertRule = originalInsertRule;
+  }
+  assert(error instanceof AggregateError, "prepared rollback did not preserve both ownership failures");
+  const after = controller.stats();
+  assert(after.surfaces === before.surfaces, "failed rollback retained an accounted replacement surface");
+  assert(after.surfacePixels === before.surfacePixels, "failed rollback corrupted the surface pixel ledger");
+  assert(
+    after.surfaceResources.webkit.activeCanvases === before.surfaceResources.webkit.activeCanvases,
+    "failed rollback leaked a WebKit replacement canvas",
+  );
+  assert(
+    after.surfaceResources.firefox.registrations === before.surfaceResources.firefox.registrations,
+    "failed rollback leaked a Firefox replacement registration",
+  );
+  assert(handle.explain().surface.id === previousId, "failed rollback displaced the previous surface");
+  handle.dispose();
+  controller.destroy();
+  element.remove();
 });
 
 await test("generic lifecycle migrates roots and defers hidden paint", async () => {
@@ -2514,18 +2580,23 @@ await test("fallback entry and aggregate surface budgets refuse new work", async
   };
   const firstPixels = pixelController.attachPrepared(firstElement, pixelConfig);
   await firstPixels.ready;
+  assert(pixelController.stats().surfacePixels === 64, "surface ledger missed the initial allocation");
+  assert(pixelController.stats().surfaces === 1, "surface ledger missed the initial surface");
   let replacementBudgetError = null;
   try { await firstPixels.resize({ cornerShape: "round" }); } catch (error) { replacementBudgetError = error; }
   assert(
     /aggregate surface allocation/u.test(replacementBudgetError?.message ?? ""),
     "transactional replacement exceeded the aggregate peak budget",
   );
+  assert(pixelController.stats().surfacePixels === 64, "failed replacement corrupted surface accounting");
   const secondPixels = pixelController.attachPrepared(secondElement, pixelConfig);
   let pixelError = null;
   try { await secondPixels.ready; } catch (error) { pixelError = error; }
   assert(/aggregate surface allocation/u.test(pixelError?.message ?? ""), "aggregate surface budget did not refuse new work");
   firstPixels.dispose();
   secondPixels.dispose();
+  assert(pixelController.stats().surfacePixels === 0, "surface ledger retained pixels after teardown");
+  assert(pixelController.stats().surfaces === 0, "surface ledger retained a surface after teardown");
   pixelController.destroy();
   firstElement.remove();
   secondElement.remove();

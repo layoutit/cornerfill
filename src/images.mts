@@ -83,6 +83,7 @@ function waitForImage(
 export class ImageCache {
   declare readonly document: Document;
   declare readonly records: Map<string, ImageCacheRecord>;
+  private readonly zeroReferenceRecords: Map<string, ImageCacheRecord>;
   declare readonly onDecode: ((record: ImageCacheRecord) => void) | null;
   declare readonly onHit: ((record: ImageCacheRecord) => void) | null;
   declare readonly onEvict: ((record: ImageCacheRecord) => void) | null;
@@ -91,6 +92,7 @@ export class ImageCache {
   declare readonly timeoutMs: number;
   declare evictions: number;
   declare destroyed: boolean;
+  private estimatedPixels: number;
 
   constructor(document: Document, {
     onDecode = null,
@@ -112,6 +114,7 @@ export class ImageCache {
     }
     this.document = document;
     this.records = new Map();
+    this.zeroReferenceRecords = new Map();
     this.onDecode = onDecode;
     this.onHit = onHit;
     this.onEvict = onEvict;
@@ -120,12 +123,7 @@ export class ImageCache {
     this.timeoutMs = timeoutMs;
     this.evictions = 0;
     this.destroyed = false;
-  }
-
-  private _touch(record: ImageCacheRecord): void {
-    if (this.records.get(record.key) !== record) return;
-    this.records.delete(record.key);
-    this.records.set(record.key, record);
+    this.estimatedPixels = 0;
   }
 
   private _estimatedPixels(record: ImageCacheRecord): number {
@@ -136,12 +134,12 @@ export class ImageCache {
 
   private _evict(): void {
     if (this.destroyed) return;
-    const records = [...this.records.values()];
-    let zeroReferenceEntries = records.filter(({ refs }) => refs === 0).length;
-    let estimatedPixels = records.reduce((total, record) => total + this._estimatedPixels(record), 0);
-    for (const record of records) {
-      if (zeroReferenceEntries <= this.maxZeroReferenceEntries
-        && estimatedPixels <= this.maxEstimatedPixels) break;
+    while (this.zeroReferenceRecords.size > 0
+      && (this.zeroReferenceRecords.size > this.maxZeroReferenceEntries
+        || this.estimatedPixels > this.maxEstimatedPixels)) {
+      const record = this.zeroReferenceRecords.values().next().value;
+      if (!record) break;
+      this.zeroReferenceRecords.delete(record.key);
       if (record.refs !== 0 || this.records.get(record.key) !== record) continue;
       const pixels = this._estimatedPixels(record);
       this.records.delete(record.key);
@@ -150,8 +148,7 @@ export class ImageCache {
       } else {
         record.image.src = "";
       }
-      zeroReferenceEntries -= 1;
-      estimatedPixels -= pixels;
+      this.estimatedPixels -= pixels;
       this.evictions += 1;
       this.onEvict?.(record);
     }
@@ -186,10 +183,15 @@ export class ImageCache {
           throw new Error(`decoded image has no intrinsic dimensions: ${absoluteUrl}`);
         }
         created.state = "ready";
+        this.estimatedPixels += this._estimatedPixels(created);
         this.onDecode?.(created);
         this._evict();
         return image;
       })().catch((error) => {
+        if (created.state === "ready") {
+          this.estimatedPixels -= this._estimatedPixels(created);
+        }
+        this.zeroReferenceRecords.delete(key);
         created.state = "error";
         created.error = error;
         if (this.records.get(key) === created) this.records.delete(key);
@@ -208,7 +210,7 @@ export class ImageCache {
       this.records.set(key, created);
       record = created;
     } else {
-      this._touch(record);
+      this.zeroReferenceRecords.delete(record.key);
       this.onHit?.(record);
     }
     record.refs += 1;
@@ -226,8 +228,10 @@ export class ImageCache {
           record.cancel(new Error(`image load was released before decode completed: ${record.absoluteUrl}`));
           return;
         }
-        this._touch(record);
-        this._evict();
+        if (record.refs === 0 && this.records.get(record.key) === record) {
+          this.zeroReferenceRecords.set(record.key, record);
+          this._evict();
+        }
       },
     });
   }
@@ -241,8 +245,8 @@ export class ImageCache {
       ready: records.filter(({ state }) => state === "ready").length,
       errors: records.filter(({ state }) => state === "error").length,
       references: records.reduce((total, { refs }) => total + refs, 0),
-      zeroReferenceEntries: records.filter(({ refs }) => refs === 0).length,
-      estimatedPixels: records.reduce((total, record) => total + this._estimatedPixels(record), 0),
+      zeroReferenceEntries: this.zeroReferenceRecords.size,
+      estimatedPixels: this.estimatedPixels,
       evictions: this.evictions,
       limits: Object.freeze({
         zeroReferenceEntries: this.maxZeroReferenceEntries,
@@ -262,6 +266,8 @@ export class ImageCache {
       }
     }
     this.records.clear();
+    this.zeroReferenceRecords.clear();
+    this.estimatedPixels = 0;
     this.destroyed = true;
   }
 }

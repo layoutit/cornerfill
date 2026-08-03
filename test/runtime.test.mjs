@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { parseBackgroundPosition } from "../dist/background.mjs";
+import {
+  canRefreshDynamicPaint,
+  captureBackgroundPosition,
+} from "../dist/style.mjs";
 
 const qualifiedNative = Object.freeze({ qualified: true });
 
@@ -55,16 +58,6 @@ function nativeDocument() {
     document,
     element() { return new Element(document); },
   };
-}
-
-async function runtimeInternals() {
-  const runtimeUrl = new URL("../dist/runtime.mjs", import.meta.url);
-  const source = readFileSync(runtimeUrl, "utf8")
-    .replace(/(from\s+["'])(\.\/[^"']+)(["'])/gu, (_match, start, relative, end) => (
-      `${start}${new URL(relative, runtimeUrl).href}${end}`
-    ));
-  const instrumented = `${source}\nexport { captureBackgroundPosition as __captureBackgroundPosition, CornerfillController as __CornerfillController };`;
-  return import(`data:text/javascript;base64,${Buffer.from(instrumented).toString("base64")}`);
 }
 
 test("native handles dispose and controllers destroy without teardown errors", async () => {
@@ -183,7 +176,6 @@ test("query-distinct runtime modules share one per-document element owner regist
 });
 
 test("removing observed inline position axes restores the authored computed position", async () => {
-  const { __captureBackgroundPosition } = await runtimeInternals();
   const style = new FakeStyle();
   const attributes = new Map([
     ["data-cornerfill-owned", "owner-1"],
@@ -207,45 +199,45 @@ test("removing observed inline position axes restores the authored computed posi
     },
   };
   const entry = {
-    controller: { ownershipId: "owner-1", view },
     dynamicBackgroundPositionSpec: parseBackgroundPosition("-64px -48px"),
     element,
     initial: {
       dynamic: { paintPosition: true },
-      initialBackground: { backgroundPosition: "13px 17px" },
+      initialBackgroundPosition: "13px 17px",
     },
     inlineBackgroundPositionX: "-64px",
     inlineBackgroundPositionY: "-48px",
   };
 
-  assert.equal(__captureBackgroundPosition(entry), true);
+  assert.equal(captureBackgroundPosition(entry, (callback) => {
+    attributes.delete("data-cornerfill-owned");
+    attributes.delete("data-cornerfill-owned-border");
+    try {
+      return callback(view.getComputedStyle(element));
+    } finally {
+      attributes.set("data-cornerfill-owned", "owner-1");
+      attributes.set("data-cornerfill-owned-border", "owner-1");
+    }
+  }), true);
   assert.equal(entry.dynamicBackgroundPositionSpec.x.source, "13px");
   assert.equal(entry.dynamicBackgroundPositionSpec.y.source, "17px");
   assert.equal(attributes.get("data-cornerfill-owned"), "owner-1");
   assert.equal(attributes.get("data-cornerfill-owned-border"), "owner-1");
 });
 
-test("an observed position-only mutation uses the paint-only refresh path", async () => {
-  const { __CornerfillController } = await runtimeInternals();
-  const calls = [];
-  const controller = Object.create(__CornerfillController.prototype);
-  controller._reconcileEntryOwnershipRoot = () => false;
-  controller._refreshDynamicPaint = (_entry, reason) => {
-    calls.push(["paint-only", reason]);
-    return "paint-only";
-  };
-  controller._refreshEntryFull = (_entry, reason) => {
-    calls.push(["full", reason]);
-    return "full";
-  };
-  const entry = {
-    dynamicPaintSource: { kind: "image" },
-    fullRefreshPending: false,
-    initial: { dynamic: { paint: true, paintPosition: true } },
-    pendingReason: "background-position",
-    state: {},
-  };
-
-  assert.equal(controller._refreshEntry(entry, 1), "paint-only");
-  assert.deepEqual(calls, [["paint-only", "background-position"]]);
+test("an observed position-only mutation uses the paint-only refresh path", () => {
+  assert.equal(canRefreshDynamicPaint({
+    explicitPaint: false,
+    fullRefresh: false,
+    paintKind: "image",
+    paintPosition: true,
+    reason: "background-position",
+  }), true);
+  assert.equal(canRefreshDynamicPaint({
+    explicitPaint: false,
+    fullRefresh: true,
+    paintKind: "image",
+    paintPosition: true,
+    reason: "background-position",
+  }), false);
 });
