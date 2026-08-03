@@ -49,7 +49,7 @@ function nativeController(
       nativeQualification,
       decision: Object.freeze({
         selected: "native",
-        reason: "native-requirements-satisfied",
+        reason: "native-observable-proxy-satisfied",
         unresolvedNativeRequirements: Object.freeze([]),
       }),
       implementation: Object.freeze({

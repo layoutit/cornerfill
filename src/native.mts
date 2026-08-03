@@ -21,7 +21,7 @@ export interface CornerfillNativeRequirement {
 export interface CornerfillNativeRequirements {
   readonly syntax: Readonly<CornerfillNativeRequirement>;
   readonly computedValues: Readonly<CornerfillNativeRequirement>;
-  readonly shapedBehavior: Readonly<CornerfillNativeRequirement>;
+  readonly shapedHitTesting: Readonly<CornerfillNativeRequirement>;
 }
 
 export type CornerfillNativeCapabilityStatus = "supported" | "unsupported" | "unobserved";
@@ -46,7 +46,7 @@ export interface CornerfillNativeQualification {
   readonly requirements: Readonly<CornerfillNativeRequirements>;
   readonly tiers: Readonly<{
     readonly animationQualified: boolean;
-    readonly basicPaintQualified: boolean;
+    readonly observableShapeQualified: boolean;
     readonly computedValuesQualified: boolean;
     readonly fullNativeQualified: boolean;
     readonly semanticClippingQualified: boolean;
@@ -113,7 +113,7 @@ function requirement(
 function unresolvedRequirements(
   requirements: CornerfillNativeRequirements,
 ): readonly (keyof CornerfillNativeRequirements)[] {
-  return Object.freeze((["syntax", "computedValues", "shapedBehavior"] as const)
+  return Object.freeze((["syntax", "computedValues", "shapedHitTesting"] as const)
     .filter((name) => !requirements[name].supported));
 }
 
@@ -132,21 +132,21 @@ function qualification(
   const tiers = Object.freeze({
     syntaxQualified: requirements.syntax.supported,
     computedValuesQualified: requirements.syntax.supported && requirements.computedValues.supported,
-    basicPaintQualified: requirements.syntax.supported
+    observableShapeQualified: requirements.syntax.supported
       && requirements.computedValues.supported
-      && requirements.shapedBehavior.supported,
+      && requirements.shapedHitTesting.supported,
     semanticClippingQualified: false,
     animationQualified: false,
     fullNativeQualified: false,
   });
-  const qualified = tiers.basicPaintQualified;
+  const qualified = tiers.observableShapeQualified;
   return Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
     capabilities: Object.freeze({
       syntax: observedCapability(requirements.syntax),
       computedValues: observedCapability(requirements.computedValues),
-      shapedHitTesting: observedCapability(requirements.shapedBehavior),
+      shapedHitTesting: observedCapability(requirements.shapedHitTesting),
       outerPaint: "unobserved",
       innerBorderContour: "unobserved",
       backgroundClip: "unobserved",
@@ -159,7 +159,7 @@ function qualification(
     tiers,
     unresolved,
     reason: qualified
-      ? "Native corner-shape syntax, computed values, and observable basic shaped behavior passed."
+      ? "Native corner-shape syntax and computed values passed; shaped hit testing passed as the conservative observable native-selection proxy. Paint subfeatures remain unobserved."
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
@@ -222,7 +222,7 @@ function computedRequirement(
   );
 }
 
-function behaviorRequirement(
+function shapedHitTestRequirement(
   document: Document,
   element: HTMLElement,
 ): Readonly<CornerfillNativeRequirement> {
@@ -295,7 +295,7 @@ export function qualifyNativeCornerShape(
     const result = qualification({
       syntax,
       computedValues: requirement(false, { observable: false }),
-      shapedBehavior: requirement(false, { observable: false }),
+      shapedHitTesting: requirement(false, { observable: false }),
     });
     CACHE.set(document, result);
     return result;
@@ -318,20 +318,20 @@ export function qualifyNativeCornerShape(
     result = qualification({
       syntax,
       computedValues: computedRequirement(probeDocument, element),
-      shapedBehavior: behaviorRequirement(probeDocument, element),
+      shapedHitTesting: shapedHitTestRequirement(probeDocument, element),
     });
   } catch (error) {
     result = qualification({
       syntax,
       computedValues: requirement(false, { observable: false }),
-      shapedBehavior: requirement(false, { observable: false }),
+      shapedHitTesting: requirement(false, { observable: false }),
     }, error);
   } finally {
     element?.remove();
     frame?.remove();
   }
   const observable = result.requirements.computedValues.observable !== false
-    && result.requirements.shapedBehavior.observable !== false;
+    && result.requirements.shapedHitTesting.observable !== false;
   if (observable) CACHE.set(document, result);
   return result;
 }

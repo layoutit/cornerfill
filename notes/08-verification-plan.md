@@ -24,11 +24,11 @@ Keep these levels separate in reports:
 
 Do not collapse these into a single `supported: true` result.
 
-The current `controller.capabilities.paint` booleans report that a code path
-accepts/implements a grammar subset; they do not mean native-differential `PASS`.
-Qualification remains the separate oracle state. Until the public schema carries
-that distinction directly, documentation and `handle.explain()` must not cite a
-paint boolean as parity evidence.
+The current `controller.capabilities.implementedPaintPaths` booleans report only
+that a code path accepts/implements a grammar subset. Input boundaries live in
+`paintInputConstraints`; neither object means native-differential `PASS`.
+Qualification remains the separate oracle state, and documentation plus
+`handle.explain()` must not cite an implementation boolean as parity evidence.
 
 ## Reference identity
 

@@ -48,10 +48,10 @@ test("syntax support alone cannot qualify native corner-shape", () => {
   assert.equal(result.capabilities.syntax, "supported");
   assert.equal(result.capabilities.computedValues, "unsupported");
   assert.equal(result.capabilities.outerPaint, "unobserved");
-  assert.deepEqual(result.unresolved, ["computedValues", "shapedBehavior"]);
+  assert.deepEqual(result.unresolved, ["computedValues", "shapedHitTesting"]);
 });
 
-test("unobservable shaped behavior cannot qualify native delegation", () => {
+test("unobservable shaped hit testing cannot qualify native delegation", () => {
   let attempts = 0;
   const isolatedDocument = (size) => {
     let probe = null;
@@ -108,11 +108,11 @@ test("unobservable shaped behavior cannot qualify native delegation", () => {
   const unobservable = qualifyNativeCornerShape(document);
   assert.equal(unobservable.qualified, false);
   assert.equal(unobservable.tiers.computedValuesQualified, true);
-  assert.equal(unobservable.tiers.basicPaintQualified, false);
+  assert.equal(unobservable.tiers.observableShapeQualified, false);
   assert.equal(unobservable.capabilities.shapedHitTesting, "unobserved");
   const qualified = qualifyNativeCornerShape(document);
   assert.equal(qualified.qualified, true);
-  assert.equal(qualified.tiers.basicPaintQualified, true);
+  assert.equal(qualified.tiers.observableShapeQualified, true);
   assert.equal(qualified.capabilities.innerBorderContour, "unobserved");
   assert.equal(attempts, 2);
 });
@@ -170,7 +170,7 @@ test("native computed-value qualification falls back to the host document when i
   assert.equal(frameRemoved, true);
 });
 
-test("observable shaped behavior failure prevents native qualification", () => {
+test("observable shaped hit-testing failure prevents native qualification", () => {
   const values = ["superellipse(0)", "superellipse(-1)", "superellipse(1)", "superellipse(-infinity)"];
   const longhands = [
     "corner-top-left-shape",
@@ -213,6 +213,6 @@ test("observable shaped behavior failure prevents native qualification", () => {
   };
   const result = qualifyNativeCornerShape(document);
   assert.equal(result.qualified, false);
-  assert.deepEqual(result.unresolved, ["shapedBehavior"]);
+  assert.deepEqual(result.unresolved, ["shapedHitTesting"]);
   assert.equal(result.capabilities.shapedHitTesting, "unsupported");
 });

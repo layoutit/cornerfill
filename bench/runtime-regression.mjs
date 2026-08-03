@@ -327,11 +327,38 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
     }
     await waitFor(() => auto.explain(byId) === null, "state selector teardown");
     const noise = document.createElement("div");
-    const refreshesBeforeNoise = auto.explain().automatic.counters.handleRefreshes;
+    const countersBeforeNoise = auto.explain().automatic.counters;
     document.body.append(noise);
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    assert(auto.explain().automatic.counters.handleRefreshes === refreshesBeforeNoise, "unrelated DOM mutation refreshed a handle");
+    let countersAfterNoise = auto.explain().automatic.counters;
+    assert(countersAfterNoise.candidatePasses === countersBeforeNoise.candidatePasses, "unrelated DOM insertion ran selector reconciliation");
+    assert(countersAfterNoise.attachmentPasses === countersBeforeNoise.attachmentPasses, "unrelated DOM insertion ran attachment reconciliation");
     noise.remove();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    countersAfterNoise = auto.explain().automatic.counters;
+    assert(countersAfterNoise.candidatePasses === countersBeforeNoise.candidatePasses, "unrelated DOM removal ran selector reconciliation");
+    assert(countersAfterNoise.attachmentPasses === countersBeforeNoise.attachmentPasses, "unrelated DOM removal ran attachment reconciliation");
+    const insertedCandidate = document.createElement("div");
+    insertedCandidate.className = "cornerfill-auto-dynamic";
+    document.body.append(insertedCandidate);
+    await waitFor(() => auto.explain(insertedCandidate)?.status === "active", "matching subtree insertion");
+    insertedCandidate.remove();
+    await waitFor(() => auto.explain(insertedCandidate) === null, "matching subtree removal");
+    const structuralRule = cssomStyle.sheet.insertRule(
+      ".cornerfill-auto-structural:empty{width:12px;height:10px;corner-shape:bevel;border-radius:5px;background:red}",
+    );
+    const structural = document.createElement("div");
+    structural.className = "cornerfill-auto-structural";
+    document.body.append(structural);
+    await waitFor(() => auto.explain(structural)?.status === "active", "structural selector insertion");
+    const structuralChild = document.createElement("span");
+    structural.append(structuralChild);
+    await waitFor(() => auto.explain(structural) === null, "structural selector invalidation");
+    structuralChild.remove();
+    await waitFor(() => auto.explain(structural)?.status === "active", "structural selector recovery");
+    structural.remove();
+    await waitFor(() => auto.explain(structural) === null, "structural selector removal");
+    cssomStyle.sheet.deleteRule(structuralRule);
     const transformOnlyElements = [element, dynamic, inline, focus, paintFocus, fontFocus, partial];
     const transformPaints = new Map(transformOnlyElements.map((candidate) => (
       [candidate, auto.explain(candidate).counters.paints]
@@ -588,6 +615,11 @@ await test("failed CSSOM retries release the original broker subscription", asyn
 await test("explicit paint rejects invalid CSS colors before taking ownership", async () => {
   const element = host();
   const controller = installCornerfill(options());
+  assert(controller.capabilities.implementedPaintPaths.cssLinearGradient === true, "implemented gradient path was not reported");
+  assert(controller.capabilities.paintInputConstraints.cssGradientColorParity === false, "gradient color parity was overstated");
+  assert(controller.capabilities.paintInputConstraints.rasterUrls === "same-origin-or-cors", "raster URL CORS boundary was omitted");
+  assert(controller.capabilities.limitations.gradientColorParity.supported === false, "gradient parity limitation was omitted");
+  assert(controller.capabilities.limitations.crossOriginNoCorsRaster.supported === false, "cross-origin raster limitation was omitted");
   let error = null;
   try {
     controller.attach(element, {
@@ -1683,8 +1715,15 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(layerNormal).counters.paints === paintsBeforeRepair, "ownership repair repainted pixels");
     assert(auto.explain().runtime.counters.ownershipRepairs === repairsBefore + 1, "ownership repair was not counted exactly once");
 
+    document.head.append(complexSupports);
+    await auto.refresh();
+    assert(auto.explain(complex)?.status === "active", "selector() support condition was mistaken for a corner-shape feature query");
+    assert(
+      !auto.explain().errors.some(({ message }) => /complex corner-shape support condition/u.test(message)),
+      "selector() support condition produced a false corner-shape diagnostic",
+    );
+
     document.head.append(
-      complexSupports,
       splitSupports,
       customSupports,
       negativeCustomSupports,
@@ -1695,10 +1734,8 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(conditionalCrossSource) === null, "unsafe conditional source leaked through an inline shape source");
     assert(auto.explain(supportsCustom) === null, "support-condition custom property split semantics were admitted");
     assert(auto.explain(supportsNegativeCustom) === null, "negative support custom property leaked from the authored sheet");
-    assert(auto.explain(complex) === null, "complex support condition was partially owned");
     assert(auto.explain(split) === null, "split-semantics support rule was partially owned");
     const conditionalMessages = auto.explain().errors.map(({ message }) => message).join("\n");
-    assert(/complex corner-shape support condition/u.test(conditionalMessages), "complex supports refusal was not reported");
     assert(/also declares: background/u.test(conditionalMessages), "split-semantics support rule was not refused explicitly");
     assert(/also declares: --cornerfill-test-shape/u.test(conditionalMessages), "support custom-property split was not refused explicitly");
     assert(/container-query paint dependencies/u.test(conditionalMessages), "container-query paint dependency was not refused explicitly");

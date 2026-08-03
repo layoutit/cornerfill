@@ -1,7 +1,7 @@
 {
   "name": "cornerfill",
   "version": "0.0.1",
-  "description": "Experimental paint-only CSS corner-shape polyfill for Safari and Firefox",
+  "description": "Experimental paint-only CSS corner-shape fallback for WebKit and Gecko",
   "license": "MIT",
   "type": "module",
   "sideEffects": [

@@ -262,7 +262,7 @@ export interface CornerfillAutoExplanation {
     }>;
   }> | undefined;
   readonly decision: Readonly<{
-    reason: "fallback-forced" | "native-requirements-satisfied" | "native-requirements-unresolved";
+    reason: "fallback-forced" | "native-observable-proxy-satisfied" | "native-requirements-unresolved";
     selected: "fallback" | "native";
     unresolvedNativeRequirements: readonly string[];
   }>;
@@ -498,12 +498,23 @@ function stylesheetElementIsEligible(owner: StylesheetOwner): boolean {
   return !owner.relList.contains("alternate");
 }
 
-function authoredShapeInlineElements(root: AutoRoot): Element[] {
-  return [...root.querySelectorAll("[style]")].filter((element) => (
-    cssDeclarations(element.getAttribute("style")).some(({ property }) => (
-      Object.hasOwn(SHAPE_PROPERTIES, property)
-    ))
+function hasAuthoredInlineShape(element: Element): boolean {
+  if (!element.hasAttribute("style")) return false;
+  return cssDeclarations(element.getAttribute("style")).some(({ property }) => (
+    Object.hasOwn(SHAPE_PROPERTIES, property)
   ));
+}
+
+function authoredShapeInlineElements(root: AutoRoot): Element[] {
+  return [...root.querySelectorAll("[style]")].filter(hasAuthoredInlineShape);
+}
+
+const ROOT_SENSITIVE_CHILD_LIST_SELECTOR = /(?:[+~]|:(?:empty|first-(?:child|of-type)|focus-within|has|host-context|last-(?:child|of-type)|nth-(?:last-)?(?:child|col|of-type)|only-(?:child|of-type)|scope)\b)/iu;
+
+function selectorRequiresRootChildListReconciliation(selector: string): boolean {
+  return selector.includes("\\")
+    || selector.includes("||")
+    || ROOT_SENSITIVE_CHILD_LIST_SELECTOR.test(selector);
 }
 
 function stylesheetMedia(owner: StylesheetOwner): string {
@@ -2126,12 +2137,46 @@ class CornerfillAutoController {
     });
   }
 
+  _stylesheetSelectors(): Set<string> {
+    const selectors = new Set<string>();
+    for (const record of this._styleRecords()) {
+      for (const selector of record.selectors) selectors.add(selector);
+    }
+    return selectors;
+  }
+
+  _trackedSubtree(root: Element): boolean {
+    const tracked = (element: Element): boolean => (
+      this.candidates.has(element)
+      || (element instanceof this.document.defaultView.HTMLElement
+        && (this.inline.has(element) || this.handles.has(element)))
+    );
+    if (tracked(root)) return true;
+    for (const element of root.querySelectorAll("*")) if (tracked(element)) return true;
+    return false;
+  }
+
+  _addedSubtreeMayContainCandidate(root: Element, selectors: ReadonlySet<string>): boolean {
+    if (hasAuthoredInlineShape(root)
+      || [...root.querySelectorAll("[style]")].some(hasAuthoredInlineShape)) return true;
+    if (selectors.size === 0) return false;
+    const selectorList = [...selectors].join(",");
+    try {
+      return root.matches(selectorList) || Boolean(root.querySelector(selectorList));
+    } catch {
+      return true;
+    }
+  }
+
   _handleMutations(records: readonly MutationRecord[]): void {
     if (records.some((record) => record.type === "childList")) {
       this._refreshRegisteredRootConnections();
     }
     let sources = false;
-    let relevant = false;
+    let candidates = false;
+    let attachments = false;
+    let selectors: Set<string> | null = null;
+    let rootSensitiveSelectors: boolean | null = null;
     const placementTargets = new Set<Element>();
     for (const record of records) {
       if (record.type === "attributes") {
@@ -2143,17 +2188,17 @@ class CornerfillAutoController {
         const target = record.target as Element;
         if (target.localName === "style" || target.localName === "link") {
           sources = true;
-          relevant = true;
+          candidates = true;
           continue;
         }
         if (record.attributeName !== "style") {
-          relevant = true;
+          candidates = true;
           continue;
         }
         const currentStyle = target.getAttribute("style");
         if (automaticStyleMutationSignature(record.oldValue)
           !== automaticStyleMutationSignature(currentStyle)) {
-          relevant = true;
+          candidates = true;
           continue;
         }
         if (automaticStyleMutationSignature(record.oldValue, false)
@@ -2165,44 +2210,65 @@ class CornerfillAutoController {
       if (record.type === "characterData") {
         if (record.target.parentElement?.localName === "style") {
           sources = true;
-          relevant = true;
+          candidates = true;
           continue;
         }
-        relevant ||= this.observationState.characterData;
+        candidates ||= this.observationState.characterData;
         continue;
       }
       const mutationTarget = record.target as Element;
       if (mutationTarget.localName === "style") {
         sources = true;
-        relevant = true;
+        candidates = true;
         continue;
       }
       const nodes = [...record.addedNodes, ...record.removedNodes];
       const elements = nodes.filter((node): node is Element => (
         node.nodeType === this.document.defaultView.Node.ELEMENT_NODE
       ));
-      if (elements.some((node) => (
+      const sourceNodes = elements.some((node) => (
         /^(?:style|link)$/u.test(node.localName)
         || Boolean(node.querySelector("style,link[rel~=stylesheet]"))
-      ))) sources = true;
-      relevant ||= elements.length > 0 || (this.observationState.characterData && nodes.length > 0);
+      ));
+      if (sourceNodes) {
+        sources = true;
+        candidates = true;
+        continue;
+      }
+      if (elements.length === 0) {
+        candidates ||= this.observationState.characterData && nodes.length > 0;
+        continue;
+      }
+      selectors ??= this._stylesheetSelectors();
+      rootSensitiveSelectors ??= this.observationState.conservative
+        || [...selectors].some(selectorRequiresRootChildListReconciliation);
+      const added = [...record.addedNodes].filter((node): node is Element => (
+        node.nodeType === this.document.defaultView.Node.ELEMENT_NODE
+      ));
+      const removed = [...record.removedNodes].filter((node): node is Element => (
+        node.nodeType === this.document.defaultView.Node.ELEMENT_NODE
+      ));
+      candidates ||= rootSensitiveSelectors
+        || added.some((element) => this._addedSubtreeMayContainCandidate(element, selectors!))
+        || removed.some((element) => this._trackedSubtree(element));
+      attachments ||= !candidates && this.candidates.has(mutationTarget);
     }
-    if (!relevant && placementTargets.size > 0) {
-      candidates: for (const candidate of this.candidates) {
+    if (!candidates && placementTargets.size > 0) {
+      candidateSearch: for (const candidate of this.candidates) {
         if (!(candidate instanceof this.document.defaultView.HTMLElement)
           || this.handles.has(candidate)) continue;
         let ancestor: Element | null = candidate;
         while (ancestor) {
           if (placementTargets.has(ancestor)) {
-            relevant = true;
-            break candidates;
+            candidates = true;
+            break candidateSearch;
           }
           ancestor = ancestor.parentElement;
         }
       }
     }
-    if (!relevant) return;
-    this._queueRefresh({ sources, candidates: true, attachments: true });
+    if (!candidates && !attachments) return;
+    this._queueRefresh({ sources, candidates, attachments: true });
   }
 
   _refreshRegisteredRootConnections(): void {
@@ -2473,7 +2539,7 @@ class CornerfillAutoController {
       decision: Object.freeze({
         selected: this.native ? "native" : "fallback",
         reason: this.native
-          ? "native-requirements-satisfied"
+          ? "native-observable-proxy-satisfied"
           : this.nativeQualification.qualified
             ? "fallback-forced"
             : "native-requirements-unresolved",

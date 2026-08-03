@@ -762,6 +762,14 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
     supported: false,
     reason: "Repeating gradient functions, interpolation hints/spaces, and out-of-range or non-zero length stops are outside the supported gradient grammar.",
   }),
+  gradientColorParity: Object.freeze({
+    supported: false,
+    reason: "Canvas gradients do not reproduce default CSS gradient color interpolation; the implemented gradient path remains UNQUALIFIED.",
+  }),
+  crossOriginNoCorsRaster: Object.freeze({
+    supported: false,
+    reason: "Raster URLs must be same-origin or CORS-enabled; native CSS cross-origin no-CORS image loading is not preserved.",
+  }),
   rasterRepeatOriginParity: Object.freeze({
     supported: false,
     reason: "Repeat/origin geometry is implemented, but native CSS and Canvas raster sampling differ; focused native parity remains UNQUALIFIED.",
@@ -1519,7 +1527,7 @@ export function detectCornerfillCapabilities(
     schema: "cornerfill-capabilities@2",
     native,
     surfaces,
-    paint: Object.freeze({
+    implementedPaintPaths: Object.freeze({
       solidColor: true,
       oneNoRepeatRaster: true,
       oneRasterBackground: true,
@@ -1538,6 +1546,11 @@ export function detectCornerfillCapabilities(
       zeroBlurInsetShadowRing: true,
       containedSolidOutline: true,
       transformCompositorOwned: true,
+    }),
+    paintInputConstraints: Object.freeze({
+      animatedImageTiming: false,
+      cssGradientColorParity: false,
+      rasterUrls: "same-origin-or-cors",
     }),
     fallbackSemantics: Object.freeze({
       hostBackgroundAndBorderPaint: true,

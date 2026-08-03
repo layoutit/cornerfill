@@ -629,10 +629,9 @@ function rulesMayAffectOwnedPaint(rules: CSSRuleList | readonly CSSRule[]): bool
   return false;
 }
 
-function carrierSupportsHeader(header: string): string {
-  if (!/^@supports\b/iu.test(header) || !/\bcorner-[\w-]*shape\b/iu.test(header)) return header;
+function shapeSupportReplacements(header: string): readonly Readonly<TextReplacement>[] {
+  if (!/^@supports\b/iu.test(header)) return Object.freeze([]);
   const replacements: TextReplacement[] = [];
-  let recognized = 0;
   for (let start = header.indexOf("("); start >= 0; start = header.indexOf("(", start + 1)) {
     const end = matchingParenthesis(header, start);
     if (end < 0) break;
@@ -649,13 +648,14 @@ function carrierSupportsHeader(header: string): string {
         ? `--cornerfill-supports-${property}:${value}`
         : "display:__cornerfill_invalid__",
     }));
-    recognized += 1;
     start = end;
   }
-  const occurrences = header.match(/\bcorner-(?:[\w-]*-)?shape\b/giu)?.length ?? 0;
-  if (recognized !== occurrences) {
-    throw ownershipBlockingSyntaxError(`Automatic CSS cannot preserve complex corner-shape support condition: ${header}`);
-  }
+  return Object.freeze(replacements);
+}
+
+function carrierSupportsHeader(header: string): string {
+  const replacements = shapeSupportReplacements(header);
+  if (replacements.length === 0) return header;
   let output = "";
   let cursor = 0;
   for (const replacement of replacements) {
@@ -707,8 +707,7 @@ function serializeCarrierRules(
     if (typeof rule.selectorText === "string" && (rule.cssRules?.length ?? 0) > 0) {
       throw new SyntaxError(`Automatic CSS cannot preserve nested selector rule: ${rule.selectorText}`);
     }
-    const shapeSupports = /^@supports\b/iu.test(header)
-      && /\bcorner-[\w-]*shape\b/iu.test(header);
+    const shapeSupports = shapeSupportReplacements(header).length > 0;
     const observesOwnedSubtree = Boolean(rule.cssRules && rulesMayAffectOwnedPaint(rule.cssRules));
     if (/^@container\b/iu.test(header) && observesOwnedSubtree) {
       throw ownershipBlockingSyntaxError(`Automatic CSS cannot observe container-query paint dependencies: ${header}`);
