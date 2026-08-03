@@ -23,16 +23,14 @@ export async function attachProductionCandidate(element, oracleCase) {
   });
   const handle = oracleCase.id === "mario-texel-face"
     ? controller.attachPrepared(element, {
-      mode: "paint",
       size: oracleCase.size,
       borderRadius: oracleCase.radiusCss,
       cornerShape: oracleCase.shapeCss,
       paint: Object.freeze({ ...oracleCase.paint, opaque: true }),
       border: oracleCase.border ?? null,
-      visibility: true,
+      visible: true,
     })
     : controller.attach(element, {
-      mode: "paint",
       paint: oracleCase.paint,
       border: oracleCase.border ?? null,
     });

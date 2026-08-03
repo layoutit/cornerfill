@@ -17,14 +17,10 @@ interface NativeControllerOptions {
 }
 
 interface NativeAutoController extends CornerfillAutoControllerHandle {
-  readonly ready: Promise<Readonly<CornerfillAutoExplanation>>;
   _removeScope(shadowRoot: ShadowRoot, scope: NativeAutoController): void;
-  destroy(): void;
-  explain(element?: HTMLElement | null): Readonly<CornerfillAutoExplanation> | null;
-  refresh(): Promise<Readonly<CornerfillAutoExplanation>>;
-  refreshAdoptedStyleSheet(sheet: CSSStyleSheet, source: string): Promise<Readonly<CornerfillAutoExplanation>>;
+  explain(): Readonly<CornerfillAutoExplanation>;
+  explain(element: HTMLElement): null;
   registerRoot(shadowRoot: ShadowRoot, options?: Readonly<RegisterRootOptions>): NativeAutoController;
-  unregisterRoot(shadowRoot: ShadowRoot): boolean;
 }
 
 function nativeController(
@@ -37,7 +33,9 @@ function nativeController(
 ): NativeAutoController {
   let destroyed = false;
   const scopes = new Map<ShadowRoot, NativeAutoController>();
-  const explain = (element: HTMLElement | null = null): Readonly<CornerfillAutoExplanation> | null => {
+  function explain(): Readonly<CornerfillAutoExplanation>;
+  function explain(element: HTMLElement): null;
+  function explain(element: HTMLElement | null = null): Readonly<CornerfillAutoExplanation> | null {
     if (element) return null;
     return Object.freeze({
       schema: "cornerfill-auto@1",
@@ -61,7 +59,7 @@ function nativeController(
       oracleQualification: CORNERFILL_ORACLE_QUALIFICATION,
       runtime: null,
     });
-  };
+  }
   const initialExplanation = explain();
   if (!initialExplanation) throw new Error("native Cornerfill explanation is unavailable");
   const controller: NativeAutoController = {

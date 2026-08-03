@@ -164,7 +164,7 @@ export const oracleCases = Object.freeze([
     shapeCss: "squircle bevel scoop notch",
     shapeParameters: shapes(2, 0, -1, Number.NEGATIVE_INFINITY),
     border: Object.freeze({
-      widths: Object.freeze([8, 16, 22, 5]),
+      width: Object.freeze([8, 16, 22, 5]),
       color: "#f4efdf",
     }),
     paint: solid("#473bbf"),

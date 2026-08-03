@@ -123,11 +123,10 @@ Attach once:
 
 ```ts
 const handle = cornerfill.attachPrepared(leaf, {
-  mode: "paint",
   geometry: preparedBevelTriangle,
   size: preparedCanonicalSize,
   paint: preparedOpaqueAtlasPaint,
-  visibility: preparedInitialVisibility,
+  visible: preparedInitialVisibility,
 });
 ```
 
