@@ -27,7 +27,7 @@ import type {
   NativeDeclarationRecord,
   RadiusSource,
 } from "./style.mjs";
-import type { CornerShapeSource } from "./values.mjs";
+import type { CornerShapeSource, CornerWritingOptions } from "./values.mjs";
 
 export interface HostComposition {
   readonly filter: "browser-compositor";
@@ -160,6 +160,7 @@ export interface PreparedEntry<Explanation> extends FallbackEntryBase<Explanatio
   shadowSource: Readonly<InsetShadowPaintState> | null;
   shapeSource: CornerShapeSource | undefined;
   surfaceDeferred: boolean;
+  writingFlow: Required<CornerWritingOptions> | null;
 }
 
 export type FallbackEntry<Explanation> = DynamicEntry<Explanation> | PreparedEntry<Explanation>;
@@ -306,6 +307,7 @@ export function createPreparedEntry<Explanation>(
     shadowSource: null,
     shapeSource: seed.shapeSource,
     surfaceDeferred: false,
+    writingFlow: null,
   };
 }
 

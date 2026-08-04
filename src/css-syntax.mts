@@ -34,6 +34,15 @@ export interface CssFunctionToken {
   readonly start: number;
 }
 
+const CSS_WIDE_KEYWORDS = new Set([
+  "inherit",
+  "initial",
+  "revert",
+  "revert-layer",
+  "revert-rule",
+  "unset",
+]);
+
 export function cssEscapeEnd(source: string, start: number): number {
   if (source[start] !== "\\") return -1;
   const first = source[start + 1];
@@ -119,8 +128,10 @@ export function cssIdentifierAt(
   return consumeCssIdentifier(source, start);
 }
 
-export function cssFunctions(source: string): readonly Readonly<CssFunctionToken>[] {
-  const functions: Readonly<CssFunctionToken>[] = [];
+function visitCssIdentifiers(
+  source: string,
+  visit: (identifier: Readonly<CssIdentifierParse>) => void,
+): void {
   let quote: "\"" | "'" | null = null;
   let comment = false;
   for (let index = 0; index < source.length;) {
@@ -156,13 +167,27 @@ export function cssFunctions(source: string): readonly Readonly<CssFunctionToken
       index += 1;
       continue;
     }
-    if (source[identifier.end] === "(") functions.push(Object.freeze({
+    visit(identifier);
+    index = identifier.end;
+  }
+}
+
+export function cssIdentifiers(source: string): readonly Readonly<CssIdentifierParse>[] {
+  const identifiers: Readonly<CssIdentifierParse>[] = [];
+  visitCssIdentifiers(source, (identifier) => identifiers.push(identifier));
+  return Object.freeze(identifiers);
+}
+
+export function cssFunctions(source: string): readonly Readonly<CssFunctionToken>[] {
+  const functions: Readonly<CssFunctionToken>[] = [];
+  visitCssIdentifiers(source, (identifier) => {
+    if (source[identifier.end] !== "(") return;
+    functions.push(Object.freeze({
       start: identifier.start,
       open: identifier.end,
       name: identifier.value.toLowerCase(),
     }));
-    index = identifier.end;
-  }
+  });
   return Object.freeze(functions);
 }
 
@@ -185,6 +210,11 @@ export function wholeCssIdentifier(source: string): Readonly<CssIdentifierParse>
   const start = skipCssTrivia(source, 0);
   const identifier = consumeCssIdentifier(source, start);
   return identifier && skipCssTrivia(source, identifier.end) === source.length ? identifier : null;
+}
+
+export function cssWideKeyword(source: string): string | null {
+  const keyword = wholeCssIdentifier(source)?.value.toLowerCase() ?? null;
+  return keyword && CSS_WIDE_KEYWORDS.has(keyword) ? keyword : null;
 }
 
 export function validCssLayerName(source: string): boolean {

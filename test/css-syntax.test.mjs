@@ -4,6 +4,7 @@ import {
   canonicalizeCornerShapeDeclarations,
   carrierSupportsCondition,
   leadingImportStatements,
+  ownershipBlockingError,
   parseImportStatement,
   selectorObservation,
   supportsConditionTestsShape,
@@ -122,6 +123,48 @@ test("import URLs require browser-valid string or url tokens", () => {
     "@import /ghost.css;",
     '@import url ("ghost.css");',
     '@import url/**/("ghost.css");',
+    '@import url(/* comment */ "ghost.css");',
     '@import "ghost.css" supports (display:grid);',
   ]) assert.throws(() => parseImportStatement(source, "https://example.test/root.css"), SyntaxError);
+});
+
+test("import parsing accepts CSS trivia around URL tokens", () => {
+  for (const source of [
+    '@import/**/"./child.css";',
+    '@import /* before string */ "./child.css";',
+    '@import /* before function */ url("./child.css");',
+  ]) {
+    assert.equal(
+      parseImportStatement(source, "https://example.test/root.css").url,
+      "https://example.test/child.css",
+      source,
+    );
+  }
+});
+
+test("anonymous import layers remain ownership-blocking before media conditions", () => {
+  assert.throws(
+    () => parseImportStatement(
+      '@import "./child.css" layer (min-width: 1px);',
+      "https://example.test/root.css",
+    ),
+    (error) => ownershipBlockingError(error)
+      && /anonymous @import layer/u.test(error.message),
+  );
+});
+
+test("escaped all resets and support keywords use decoded CSS tokens", () => {
+  const reset = canonicalizeCornerShapeDeclarations(
+    String.raw`.face{corner-shape:bevel;all:u\6eset}`,
+  );
+  assert.match(reset, /--cornerfill-auto-physical-shape:__cornerfill_unset__/u);
+
+  const substitution = canonicalizeCornerShapeDeclarations(
+    String.raw`.face{corner-shape:bevel;all:v\61r(--reset)}`,
+  );
+  assert.match(substitution, /--cornerfill-auto-all-pending:1/u);
+
+  const revertRule = carrierSupportsCondition(String.raw`(corner-shape: r\65vert-rule)`);
+  assert.match(revertRule, /\(all:/u);
+  assert(revertRule.includes(String.raw`r\65vert-rule`));
 });

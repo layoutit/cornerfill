@@ -75,6 +75,7 @@ Unsupported syntax is reported or left native rather than approximated.
 - Outer shadows and outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented. Conflicting `!important` paint declarations are rejected.
 - A contained painted outline requires an empty, paint-owned host. Any open shadow root counts as foreground content because later shadow-tree mutations cannot safely preserve that contract.
 - Cross-origin raster images without CORS are unsupported even when native CSS could display them.
+- Explicit colors that depend on `attr()` are rejected because detached color probes cannot preserve host-attribute evaluation.
 - Default fallback budgets are 512 automatic entries (2,048 through the explicit runtime), `2048²` pixels per surface, and `4096²` pixels each for total live surfaces and decoded images per controller. Explicit runtime options can change these limits.
 - Linked and imported CSS source is recovered through a separate `fetch()`, so CSP must permit it through `connect-src`. A blocked or unreadable source fails automatic ownership closed for its root; dynamically varying responses require exact source handoff.
 - CSS animations and transitions of shape or paint inputs do not reproduce native timing.

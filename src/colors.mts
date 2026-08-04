@@ -2,6 +2,8 @@ import { nextDocumentId } from "./identity.mjs";
 import {
   cssFunctions,
   cssIdentifierAt,
+  cssIdentifiers,
+  cssWideKeyword,
   skipCssTrivia,
   wholeCssIdentifier,
 } from "./css-syntax.mjs";
@@ -51,7 +53,7 @@ interface PropertyDefinition {
 }
 
 const COLOR_CACHE_ENTRIES = 256;
-const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "revert", "revert-layer", "unset"]);
+const ABSOLUTE_COLOR_FUNCTIONS = new Set(["rgb", "rgba", "hsl", "hsla"]);
 const probeRoots = new WeakMap<Node, ColorProbeRootState>();
 const typedColorProperties = new WeakMap<Document, TypedColorProperties>();
 
@@ -78,12 +80,22 @@ function customPropertyReferences(source: string, output: Set<string>): void {
   }
 }
 
+function hostAttributeDependentColor(source: string): boolean {
+  return cssFunctions(source).some(({ name }) => name === "attr");
+}
+
 export function captureElementColorContext(
   computed: CSSStyleDeclaration,
   values: Iterable<string> = [],
 ): Readonly<ElementColorContext> {
   const pending = new Set<string>();
-  for (const value of values) customPropertyReferences(String(value), pending);
+  for (const value of values) {
+    const source = String(value);
+    if (hostAttributeDependentColor(source)) {
+      throw new TypeError("explicit attr() colors require host-attribute resolution");
+    }
+    customPropertyReferences(source, pending);
+  }
   const customProperties: Readonly<{
     readonly name: string;
     readonly priority: string;
@@ -97,6 +109,9 @@ export function captureElementColorContext(
     if (captured.has(name)) continue;
     captured.add(name);
     const value = computed.getPropertyValue(name);
+    if (hostAttributeDependentColor(value)) {
+      throw new TypeError("explicit attr() colors require host-attribute resolution");
+    }
     customProperties.push(Object.freeze({
       name,
       priority: computed.getPropertyPriority(name),
@@ -181,9 +196,14 @@ function absoluteColor(color: string): string | null {
   const identifier = wholeCssIdentifier(color)?.value.toLowerCase();
   if (identifier) return identifier === "transparent" ? color : null;
   if (/^#[0-9a-f]{3,8}$/iu.test(color)) return color;
-  if (/^(?:rgba?|hsla?)\(/iu.test(color)
-    && !/(?:\bcurrentcolor\b|\bfrom\b|(?:attr|env|var)\s*\()/iu.test(color)) return color;
-  return null;
+  const functions = cssFunctions(color);
+  const outer = functions[0];
+  if (!outer || outer.start !== skipCssTrivia(color, 0)
+    || !ABSOLUTE_COLOR_FUNCTIONS.has(outer.name)) return null;
+  if (functions.some(({ name }) => name === "attr" || name === "env" || name === "var")) return null;
+  const identifiers = cssIdentifiers(color).map(({ value }) => value.toLowerCase());
+  if (identifiers.includes("currentcolor") || identifiers.includes("from")) return null;
+  return color;
 }
 
 function cacheResolvedColor(state: ColorProbeRootState, key: string, value: string): void {
@@ -231,8 +251,10 @@ export function withElementColorResolver<T>(
   const resolve: ContextualColorResolver = (value, label) => {
     const color = String(value).trim();
     if (!color) throw new SyntaxError(`${label} must be a valid CSS color`);
-    const keyword = wholeCssIdentifier(color)?.value.toLowerCase();
-    if (keyword && CSS_WIDE_KEYWORDS.has(keyword)) throw new SyntaxError(`invalid ${label}: ${value}`);
+    if (cssWideKeyword(color)) throw new SyntaxError(`invalid ${label}: ${value}`);
+    if (hostAttributeDependentColor(color)) {
+      throw new TypeError("explicit attr() colors require host-attribute resolution");
+    }
     const cached = cache.get(color);
     if (cached) return cached;
     if (!view.CSS.supports("color", color)) throw new SyntaxError(`invalid ${label}: ${value}`);

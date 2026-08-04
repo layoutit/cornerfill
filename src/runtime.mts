@@ -536,6 +536,7 @@ interface PreparedLayoutSnapshot {
   readonly shadow: Readonly<InsetShadowPaintState> | null;
   readonly shadowSource: Readonly<InsetShadowPaintState> | null;
   readonly width: number;
+  readonly writingFlow: Required<CornerWritingOptions>;
 }
 
 function applyPreparedLayoutSnapshot(
@@ -560,9 +561,20 @@ function applyPreparedLayoutSnapshot(
   entry.outlineSource = snapshot.outlineSource;
   entry.radiusSource = snapshot.borderRadius;
   entry.shapeSource = snapshot.cornerShape;
+  entry.writingFlow = snapshot.writingFlow;
   entry.positionX = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[0] : 0;
   entry.positionY = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[1] : 0;
   entry.paintProgram = snapshot.program;
+}
+
+function sameWritingFlow(
+  first: Readonly<Required<CornerWritingOptions>> | null,
+  second: Readonly<Required<CornerWritingOptions>>,
+): boolean {
+  return Boolean(first
+    && first.writingMode === second.writingMode
+    && first.direction === second.direction
+    && first.textOrientation === second.textOrientation);
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -608,6 +620,10 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
   gradientColorParity: Object.freeze({
     supported: false,
     reason: "Canvas gradients do not reproduce default CSS gradient color interpolation; the implemented gradient path remains UNQUALIFIED.",
+  }),
+  attributeDependentColors: Object.freeze({
+    supported: false,
+    reason: "Explicit attr() colors are rejected because a detached color probe cannot preserve host-attribute evaluation.",
   }),
   crossOriginNoCorsRaster: Object.freeze({
     supported: false,
@@ -1483,6 +1499,7 @@ export function detectCornerfillCapabilities(
     }),
     paintInputConstraints: Object.freeze({
       animatedImageTiming: false,
+      attributeDependentColors: false,
       cssGradientColorParity: false,
       rasterUrls: "same-origin-or-cors",
     }),
@@ -2980,6 +2997,7 @@ class CornerfillController {
     initial = false,
   ): Promise<Readonly<PreparedLayoutSnapshot>> {
     const computed = this.view.getComputedStyle(entry.element);
+    const writingFlow = flowFromComputed(computed);
     const composition = inspectFallbackHost(entry.element, computed);
     const size = config.size ?? [entry.width, entry.height];
     if (!Array.isArray(size) || size.length !== 2
@@ -3001,8 +3019,8 @@ class CornerfillController {
           width,
           height,
           dpr,
-          resolveRadiusSource(borderRadius, width, height),
-          resolveCornerShape(cornerShape),
+          resolveRadiusSource(borderRadius, width, height, writingFlow),
+          resolveCornerShape(cornerShape, writingFlow),
         ).geometry;
       }
     }
@@ -3080,6 +3098,7 @@ class CornerfillController {
         borderRadius,
         cornerShape,
         program,
+        writingFlow,
       });
     } catch (error) {
       paintLeases.rollback();
@@ -3150,6 +3169,7 @@ class CornerfillController {
       shadowSource: entry.shadowSource,
       shadow: entry.shadow,
       width: entry.width,
+      writingFlow: entry.writingFlow,
     });
     try {
       applyPreparedLayoutSnapshot(entry, snapshot);
@@ -3243,8 +3263,10 @@ class CornerfillController {
   ): Promise<CornerfillEntryExplanation> {
     return this._queuePreparedLayout(entry, async () => {
       this._assertEntryCurrent(entry);
-      const resolved = resolveCornerShape(cornerShape);
-      if (entry.geometry?.shapeParameters.every((value, index) => Object.is(value, resolved[index]))) {
+      const writingFlow = flowFromComputed(this.view.getComputedStyle(entry.element));
+      const resolved = resolveCornerShape(cornerShape, writingFlow);
+      if (sameWritingFlow(entry.writingFlow, writingFlow)
+        && entry.geometry?.shapeParameters.every((value, index) => Object.is(value, resolved[index]))) {
         entry.shapeSource = cornerShape;
         return entryExplanation(entry);
       }

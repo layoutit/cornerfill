@@ -7,6 +7,7 @@ import {
   cssFunctions,
   cssEscapeEnd,
   cssIdentifierAt,
+  cssWideKeyword,
   decodeCssEscapes,
   scanCssSyntax,
   skipCssTrivia,
@@ -299,6 +300,7 @@ function potentiallyValidUnsupportedShape(value: string): boolean {
 function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): string {
   const { value, priority } = declarationValue(rawValue);
   const decodedValue = decodeCssEscapes(value);
+  const cssWide = cssWideKeyword(value);
   const longhands: readonly Exclude<ShapeProperty, "corner-shape">[] = property === "corner-shape"
     ? PHYSICAL_SHAPE_PROPERTIES
     : [property as Exclude<ShapeProperty, "corner-shape">];
@@ -306,11 +308,11 @@ function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): str
     ? AUTO_PHYSICAL_SHAPE
     : AUTO_LOGICAL_SHAPE;
   const state = shapeDeclarationState(priority);
-  if (/^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(decodedValue)) {
-    return `${shapeCssWideDeclaration(property, decodedValue, priority, longhands, marker)}${state}`;
+  if (cssWide) {
+    return `${shapeCssWideDeclaration(property, cssWide, priority, longhands, marker)}${state}`;
   }
   try {
-    if (/\b(?:env|var)\s*\(/iu.test(decodedValue)) {
+    if (cssFunctions(value).some(({ name }) => name === "env" || name === "var")) {
       const carrier = SHAPE_PROPERTIES[property];
       return `${carrier}:${value}${priority};${shapeStatusDeclarations(longhands, "ok", priority)}${marker}:1${priority};${state}`;
     }
@@ -332,10 +334,11 @@ function shapeCarrierDeclaration(property: ShapeProperty, rawValue: string): str
 
 function allCarrierDeclaration(rawDeclaration: string, rawValue: string): string | null {
   const { value, priority } = declarationValue(rawValue);
-  const cssWide = /^(?:inherit|initial|revert|revert-layer|revert-rule|unset)$/iu.test(value);
-  if (!cssWide && !/\b(?:env|var)\s*\(/iu.test(value)) return null;
+  const cssWide = cssWideKeyword(value);
+  const substitution = cssFunctions(value).some(({ name }) => name === "env" || name === "var");
+  if (!cssWide && !substitution) return null;
   if (cssWide) {
-    const carrierValue = /^(?:initial|unset)$/iu.test(value) ? AUTO_UNSET : value;
+    const carrierValue = cssWide === "initial" || cssWide === "unset" ? AUTO_UNSET : cssWide;
     return `${rawDeclaration};${ALL_RESET_CARRIERS.map((carrier) => (
       `${carrier}:${carrierValue}${priority};`
     )).join("")}`;
@@ -491,13 +494,8 @@ function supportDeclaration(
   return property && value ? Object.freeze({ property, value }) : null;
 }
 
-const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "revert", "revert-layer", "unset"]);
-
 function supportsShapeValue(property: string, value: string): boolean {
-  const keyword = wholeCssIdentifier(value)?.value.toLowerCase();
-  if (keyword && CSS_WIDE_KEYWORDS.has(keyword)) {
-    return true;
-  }
+  if (cssWideKeyword(value)) return true;
   if (cssFunctions(value).some(({ name }) => name === "env" || name === "var")) return true;
   try {
     if (property === "corner-shape") parseCornerShape(value);
@@ -575,12 +573,15 @@ function analyzeSupportsCondition(source: string): Readonly<{
       if (!isShapeProperty(declaration.property)) return;
       testsShape = true;
       const { property, value } = declaration;
+      const cssWide = cssWideKeyword(value);
       replacements.push(Object.freeze({
         start: node.open + 1,
         end: node.close,
-        value: supportsShapeValue(property, value)
-          ? `--cornerfill-supports-${property}:${value}`
-          : "display:__cornerfill_invalid__",
+        value: cssWide === "revert-rule"
+          ? `all:${value}`
+          : supportsShapeValue(property, value)
+            ? `--cornerfill-supports-${property}:${value}`
+            : "display:__cornerfill_invalid__",
       }));
       return;
     }
@@ -1107,13 +1108,13 @@ function importString(value: string): Readonly<{ end: number; value: string }> |
 }
 
 function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
-  const trimmed = value.trim();
-  const quoted = importString(trimmed);
+  const source = value.slice(skipCssTrivia(value, 0)).trimEnd();
+  const quoted = importString(source);
   if (quoted) return Object.freeze({
-    rest: trimmed.slice(skipCssTrivia(trimmed, quoted.end)).trim(),
+    rest: source.slice(skipCssTrivia(source, quoted.end)).trim(),
     url: quoted.value,
   });
-  const urlFunction = consumeImportFunction(trimmed, "url");
+  const urlFunction = consumeImportFunction(source, "url");
   if (!urlFunction) {
     throw new SyntaxError("Automatic CSS supports quoted or url() @import URLs");
   }
@@ -1170,9 +1171,6 @@ export function parseImportStatement(statement: string, baseUrl: string): Readon
   if (layerIdentifier?.value.toLowerCase() === "layer") {
     const layerFunction = consumeImportFunction(rest, "layer");
     if (!layerFunction) {
-      if (rest[skipCssTrivia(rest, layerIdentifier.end)] === "(") {
-        throw new SyntaxError("Automatic CSS found an invalid @import layer() function");
-      }
       throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous @import layer");
     }
     if (!validCssLayerName(layerFunction.value)) {

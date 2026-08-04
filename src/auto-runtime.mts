@@ -253,6 +253,26 @@ interface AutomaticHandleRegistry {
   readonly scopes: Set<CornerfillAutoController>;
 }
 
+function automaticScopeAffectsElement(
+  scope: CornerfillAutoController,
+  element: HTMLElement,
+): boolean {
+  return scope.root === element.getRootNode()
+    || (scope.root !== scope.document && (scope.root as ShadowRoot).host === element);
+}
+
+function automaticOwnershipBlocker(
+  registry: Readonly<AutomaticHandleRegistry>,
+  element: HTMLElement,
+): CornerfillAutoController | null {
+  for (const scope of registry.scopes) {
+    if (!scope.destroyed
+      && scope.ownershipBlocked
+      && automaticScopeAffectsElement(scope, element)) return scope;
+  }
+  return null;
+}
+
 interface AutomaticObservationRuntime {
   configurationKey: string | null;
   readonly eventListeners: EventListenerRecord[];
@@ -2942,6 +2962,12 @@ class CornerfillAutoController {
     this._configureObservation();
   }
 
+  _vetoAutomaticHandles(): void {
+    for (const [element, record] of this.handleRegistry.handles) {
+      if (automaticScopeAffectsElement(this, element)) this._disposeAutomaticHandle(element, record);
+    }
+  }
+
   _reconcileCandidates(): boolean {
     if (this.destroyed) return false;
     this.automaticCounters.candidatePasses += 1;
@@ -2958,6 +2984,7 @@ class CornerfillAutoController {
       this.ownershipBlocked = true;
       this.attachmentState.candidateProvenance.clear();
       this.attachmentState.candidates = new Set();
+      this._vetoAutomaticHandles();
       return true;
     }
     const stylesheetCandidates = this._stylesheetCandidates();
@@ -2965,6 +2992,7 @@ class CornerfillAutoController {
       this.ownershipBlocked = true;
       this.attachmentState.candidateProvenance.clear();
       this.attachmentState.candidates = new Set();
+      this._vetoAutomaticHandles();
       return true;
     }
     this.ownershipBlocked = false;
@@ -3038,6 +3066,10 @@ class CornerfillAutoController {
     record: SharedAutomaticHandle,
     inspection: Readonly<CornerfillAuthoredStyleInspection>,
   ): Promise<void> | null {
+    if (automaticOwnershipBlocker(this.handleRegistry, element)) {
+      this._disposeAutomaticHandle(element, record);
+      return null;
+    }
     const signature = automaticComputedSignature(inspection);
     if (record.signature === signature) {
       if (record.pending) return record.pending;
@@ -3061,10 +3093,14 @@ class CornerfillAutoController {
     element: HTMLElement,
     inspection: Readonly<CornerfillAuthoredStyleInspection>,
   ): Promise<void> | null {
+    const existing = this.handleRegistry.handles.get(element);
+    if (automaticOwnershipBlocker(this.handleRegistry, element)) {
+      if (existing) this._disposeAutomaticHandle(element, existing);
+      return null;
+    }
     const claimants = [...this.handleRegistry.scopes].filter((scope) => (
       !scope.destroyed && scope.attachmentState.candidates.has(element)
     ));
-    const existing = this.handleRegistry.handles.get(element);
     if (existing) {
       for (const claimant of claimants) {
         existing.claimants.add(claimant);
@@ -3098,6 +3134,10 @@ class CornerfillAutoController {
     record: SharedAutomaticHandle,
   ): Promise<void> | null {
     if (this.handleRegistry.handles.get(element) !== record) return null;
+    if (automaticOwnershipBlocker(this.handleRegistry, element)) {
+      this._disposeAutomaticHandle(element, record);
+      return null;
+    }
     if (!element.isConnected) {
       this._clearAutomaticHandleErrors(element, record);
       this._disposeAutomaticHandle(element, record);
@@ -3561,11 +3601,19 @@ class CornerfillAutoController {
           this.refreshState.attachmentRequested = false;
           this.refreshState.retryFailedRequested = false;
           const hadHostSelectors = shouldReconcile && this._hasOwnHostSelectors();
+          const wasOwnershipBlocked = this.ownershipBlocked;
           if (shouldDiscover) await this._discoverSources(shouldRetryFailed);
           if (this.destroyed) break;
           const candidatesChanged = shouldReconcile && this._reconcileCandidates();
           if (this.destroyed) break;
           if (shouldRefresh) await this._refreshAttachments();
+          const ownershipChanged = shouldReconcile
+            && wasOwnershipBlocked !== this.ownershipBlocked;
+          if (ownershipChanged) {
+            for (const scope of this.handleRegistry.scopes) {
+              if (scope !== this && !scope.destroyed) scope._queueRefresh({ attachments: true });
+            }
+          }
           if (candidatesChanged && this.parentAuto && !this.parentAuto.destroyed
             && (hadHostSelectors || this._hasOwnHostSelectors())) {
             await this.parentAuto._requestRefresh({ attachments: true });

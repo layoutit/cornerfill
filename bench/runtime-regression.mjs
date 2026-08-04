@@ -986,10 +986,20 @@ await test("explicit flow and contextual colors resolve against the Cornerfill h
   });
   const preparedElement = host();
   preparedElement.style.color = "rgb(128, 0, 128)";
+  preparedElement.style.writingMode = "vertical-rl";
+  preparedElement.style.direction = "rtl";
+  preparedElement.style.textOrientation = "mixed";
+  const preparedShape = {
+    shorthand: "round",
+    logical: { "start-start": "bevel" },
+  };
   const preparedHandle = controller.attachPrepared(preparedElement, {
     size: [10, 10],
-    borderRadius: "5px",
-    cornerShape: "bevel",
+    borderRadius: {
+      shorthand: "0",
+      logical: { "start-start": "5px" },
+    },
+    cornerShape: preparedShape,
     paint: { kind: "solid", color: "currentColor" },
   });
   try {
@@ -1002,6 +1012,12 @@ await test("explicit flow and contextual colors resolve against the Cornerfill h
     assert(/rgb\(0,\s*128,\s*0\)/u.test(computedPaint.color), "computed background currentColor used the Canvas context");
     assert(/rgb\(0,\s*128,\s*0\)/u.test(computedPaint.stops[0][1]), "computed gradient currentColor used the Canvas context");
     assert(/rgb\(128,\s*0,\s*128\)/u.test(preparedHandle.explain().paint.layer.color), "prepared currentColor did not resolve against the host");
+    equal(preparedHandle.explain().geometry.shapeParameters, [1, 1, 0, 1], "prepared logical shape ignored vertical RTL flow");
+    equal(
+      preparedHandle.explain().geometry.radii,
+      [{ rx: 0, ry: 0 }, { rx: 0, ry: 0 }, { rx: 5, ry: 5 }, { rx: 0, ry: 0 }],
+      "prepared logical radius ignored vertical RTL flow",
+    );
     element.style.color = "rgb(0, 0, 255)";
     await waitFor(
       () => /rgb\(0,\s*0,\s*255\)/u.test(controller.entryByElement.get(element).paintSource.color),
@@ -1010,6 +1026,14 @@ await test("explicit flow and contextual colors resolve against the Cornerfill h
     preparedElement.style.color = "rgb(255, 165, 0)";
     await preparedHandle.resize();
     assert(/rgb\(255,\s*165,\s*0\)/u.test(preparedHandle.explain().paint.layer.color), "prepared currentColor source was lost after attachment");
+    preparedElement.style.writingMode = "horizontal-tb";
+    await preparedHandle.resize({ cornerShape: preparedShape });
+    equal(preparedHandle.explain().geometry.shapeParameters, [1, 0, 1, 1], "prepared shape update ignored changed host flow");
+    equal(
+      preparedHandle.explain().geometry.radii,
+      [{ rx: 0, ry: 0 }, { rx: 5, ry: 5 }, { rx: 0, ry: 0 }, { rx: 0, ry: 0 }],
+      "prepared shape update retained radii from the old host flow",
+    );
     const paints = handle.explain().counters.paints;
     element.style.textOrientation = "mixed";
     await waitFor(
@@ -1128,6 +1152,7 @@ await test("explicit paint rejects invalid CSS colors before taking ownership", 
   element.style.setProperty("--cornerfill-invalid-color", "20px");
   const controller = installCornerfill(options());
   assert(controller.capabilities.implementedPaintPaths.cssLinearGradient === true, "implemented gradient path was not reported");
+  assert(controller.capabilities.paintInputConstraints.attributeDependentColors === false, "attr() color limitation was not reported");
   assert(controller.capabilities.paintInputConstraints.cssGradientColorParity === false, "gradient color parity was overstated");
   assert(controller.capabilities.paintInputConstraints.rasterUrls === "same-origin-or-cors", "raster URL CORS boundary was omitted");
   assert(controller.capabilities.limitations.gradientColorParity.supported === false, "gradient parity limitation was omitted");
@@ -1152,6 +1177,47 @@ await test("explicit paint rejects invalid CSS colors before taking ownership", 
     }
     assert(error instanceof SyntaxError, `invalid explicit color was accepted: ${color}`);
   }
+  element.setAttribute("data-cornerfill-accent", "#ff0000");
+  element.style.setProperty(
+    "--cornerfill-attribute-color",
+    "attr(data-cornerfill-accent type(<color>), #0000ff)",
+  );
+  for (const color of ["attr(data-cornerfill-accent type(<color>), #0000ff)"]) {
+    let error = null;
+    let rejected = null;
+    try {
+      rejected = controller.attach(element, {
+        borderRadius: "5px",
+        cornerShape: "bevel",
+        paint: { kind: "solid", color },
+      });
+      await rejected.ready;
+    } catch (caught) {
+      error = caught;
+    } finally {
+      rejected?.dispose();
+    }
+    assert(error instanceof TypeError && /attr\(\).*host-attribute/u.test(error.message), `attribute-dependent explicit color was accepted: ${color}`);
+  }
+  let indirectHandle = null;
+  let indirectError = null;
+  try {
+    indirectHandle = controller.attach(element, {
+      borderRadius: "5px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: "var(--cornerfill-attribute-color)" },
+    });
+    await indirectHandle.ready;
+    assert(
+      /rgb\(255,\s*0,\s*0\)|#ff0000|red/u.test(indirectHandle.explain().paint.layer.color),
+      `indirect attr() color used the wrong host state: ${indirectHandle.explain().paint.layer.color}`,
+    );
+  } catch (caught) {
+    indirectError = caught;
+  } finally {
+    indirectHandle?.dispose();
+  }
+  assert(!indirectError || indirectError instanceof TypeError, `indirect attr() color failed unsafely: ${indirectError}`);
   assert(controller.stats().entries === 0, "invalid explicit color created a runtime entry");
   assert(!element.hasAttribute("data-cornerfill-owned"), "invalid explicit color took element ownership");
   controller.destroy();
@@ -1160,7 +1226,9 @@ await test("explicit paint rejects invalid CSS colors before taking ownership", 
 
 await test("absolute colors bypass contextual DOM probes", async () => {
   const absolute = host();
+  const escapedContextual = host();
   const contextual = host();
+  escapedContextual.style.setProperty("--cornerfill-red-channel", "12");
   contextual.style.color = "rgb(0, 0, 255)";
   const observedRecords = [];
   const observer = new MutationObserver((records) => observedRecords.push(...records));
@@ -1179,9 +1247,21 @@ await test("absolute colors bypass contextual DOM probes", async () => {
     cornerShape: "bevel",
     paint: { kind: "solid", color: "rgb(12 34 56)" },
   });
+  let escapedHandle = null;
   try {
     await absoluteHandle.ready;
     assert(!probeMutated(), "absolute color created a contextual DOM probe");
+    escapedHandle = controller.attach(escapedContextual, {
+      borderRadius: "5px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: String.raw`rgb(v\61r(--cornerfill-red-channel) 34 56)` },
+    });
+    await escapedHandle.ready;
+    assert(probeMutated(), "escaped var() color bypassed the contextual validity probe");
+    assert(
+      /rgb\(12,\s*34,\s*56\)/u.test(escapedHandle.explain().paint.layer.color),
+      `escaped var() color did not resolve against the host: ${escapedHandle.explain().paint.layer.color}`,
+    );
     const contextualHandle = controller.attach(contextual, {
       borderRadius: "5px",
       cornerShape: "bevel",
@@ -1195,9 +1275,11 @@ await test("absolute colors bypass contextual DOM probes", async () => {
     }
   } finally {
     observer.disconnect();
+    escapedHandle?.dispose();
     absoluteHandle.dispose();
     controller.destroy();
     absolute.remove();
+    escapedContextual.remove();
     contextual.remove();
   }
 });
@@ -1936,7 +2018,7 @@ await test("automatic imports decode escaped control identifiers", async () => {
   const style = document.createElement("style");
   style.textContent = String.raw`
     @l\61yer cornerfill-escaped;
-    @im\70ort "/bench/imports/escaped-control-child.css"
+    @im\70ort/**/ /* before URL */ url("/bench/imports/escaped-control-child.css")
       l\61yer(cornerfill-escaped)
       s\75pports(\63orner-shape: bevel);
     .cornerfill-escaped-import-local { corner-shape: bevel }
@@ -2588,6 +2670,7 @@ await test("document and shadow scopes share one host attachment across cascade 
   document.body.append(shell);
   const auto = installCornerfillAuto(options({ autoObserve: true }));
   let scope = null;
+  let documentBlocker = null;
   try {
     await auto.ready;
     equal(auto.explain(shell)?.geometry.shapeParameters, [0, 0, 0, 0], "document scope did not attach the host");
@@ -2600,6 +2683,39 @@ await test("document and shadow scopes share one host attachment across cascade 
     equal(scope.explain(shell)?.geometry.shapeParameters, [-1, -1, -1, -1], "shadow scope did not refresh the shared host");
     equal(auto.explain(shell)?.geometry.shapeParameters, [-1, -1, -1, -1], "document scope retained stale host paint");
     assert(auto.controller.stats().entries === 1, "scope overlap created duplicate runtime entries");
+
+    style.textContent = `
+      :host{corner-shape:scoop!important}
+      @layer{.cornerfill-never-matches{corner-shape:notch}}
+    `;
+    await scope.refresh();
+    assert(scope.explain().automatic.ownership === "blocked-root", "blocked shadow scope did not report unknown ownership");
+    assert(scope.explain(shell) === null && auto.explain(shell) === null, "blocked shadow scope retained another scope's shared host paint");
+    assert(auto.controller.stats().entries === 0, "blocked shadow scope retained a shared runtime entry");
+
+    style.textContent = ":host{corner-shape:scoop!important}";
+    await scope.refresh();
+    await waitFor(
+      () => scope.explain(shell)?.geometry.shapeParameters.every((value) => value === -1)
+        && auto.explain(shell)?.geometry.shapeParameters.every((value) => value === -1),
+      "shared host recovery after shadow ownership veto",
+    );
+
+    documentBlocker = document.createElement("style");
+    documentBlocker.textContent = "@layer{.cornerfill-never-matches{corner-shape:notch}}";
+    document.head.append(documentBlocker);
+    await auto.refresh();
+    assert(auto.explain().automatic.ownership === "blocked-root", "blocked document scope did not report unknown ownership");
+    assert(scope.explain(shell) === null && auto.explain(shell) === null, "blocked document scope retained the shadow scope's shared host paint");
+    assert(auto.controller.stats().entries === 0, "blocked document scope retained a shared runtime entry");
+    documentBlocker.remove();
+    documentBlocker = null;
+    await auto.refresh();
+    await waitFor(
+      () => scope.explain(shell)?.geometry.shapeParameters.every((value) => value === -1)
+        && auto.explain(shell)?.geometry.shapeParameters.every((value) => value === -1),
+      "shared host recovery after document ownership veto",
+    );
 
     style.textContent = ":host{corner-shape:round!important}";
     await waitFor(
@@ -2624,6 +2740,7 @@ await test("document and shadow scopes share one host attachment across cascade 
     );
     assert(auto.controller.stats().entries === 1, "shadow teardown disposed the remaining document claim");
   } finally {
+    documentBlocker?.remove();
     scope?.destroy();
     auto.destroy();
     shell.remove();
@@ -2766,14 +2883,15 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     }
     @supports not (corner-shape: bevel) { .cornerfill-supports-negative { corner-shape: bevel } }
     @supports not (corner-shape: unknown-shape) { .cornerfill-supports-invalid-negative { corner-shape: bevel } }
+    @supports (corner-shape: r\\65vert-rule) { .cornerfill-supports-revert-rule { corner-shape: bevel } }
     .cornerfill-mixed { corner-top-left-shape: bevel; corner-start-start-shape: scoop }
     .cornerfill-all-base { corner-shape: bevel }
     .cornerfill-all-base.cornerfill-all-reset { all: unset; display: block }
     .cornerfill-all-before { all: unset; corner-shape: bevel; display: block }
-    .cornerfill-all-after { corner-shape: bevel; all: unset; display: block }
+    .cornerfill-all-after { corner-shape: bevel; all: u\\6eset; display: block }
     .cornerfill-all-important { corner-shape: bevel !important; all: unset !important; display: block !important }
     .cornerfill-all-var { --cornerfill-all-value: unset; corner-shape: bevel; all: var(--cornerfill-all-value); display: block }
-    .cornerfill-all-var-fallback { corner-shape: bevel; all: var(--cornerfill-missing-all, unset); display: block }
+    .cornerfill-all-var-fallback { corner-shape: bevel; all: v\\61r(--cornerfill-missing-all, unset); display: block }
     .cornerfill-all-var-important { --cornerfill-all-important-value: unset; corner-shape: bevel !important; all: var(--cornerfill-all-important-value) !important; display: block !important }
     .cornerfill-env { corner-shape: env(cornerfill-test-shape, bevel) }
     .cornerfill-all-env { corner-shape: bevel; all: env(cornerfill-missing-all, unset); display: block }
@@ -2857,6 +2975,8 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   supportsNegative.className = "cornerfill-supports-negative";
   const supportsInvalidNegative = host();
   supportsInvalidNegative.className = "cornerfill-supports-invalid-negative";
+  const supportsRevertRule = host();
+  supportsRevertRule.className = "cornerfill-supports-revert-rule";
   const conditionalCrossSource = host();
   conditionalCrossSource.setAttribute(
     "style",
@@ -2999,6 +3119,10 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(supportsPositive)?.status === "active", "positive corner-shape support condition stayed false");
     assert(auto.explain(supportsNegative) === null, "negative corner-shape support condition stayed true");
     assert(auto.explain(supportsInvalidNegative)?.status === "active", "invalid negative support condition stayed false");
+    assert(
+      Boolean(auto.explain(supportsRevertRule)) === CSS.supports("all", "revert-rule"),
+      "revert-rule shape support did not follow the engine's cascade support",
+    );
     assert(auto.explain(conditionalCrossSource)?.status === "active", "cross-source inline shape did not attach before a conditional refusal");
     assert(auto.explain(mixed) === null, "mixed physical/logical declarations were partially owned");
     assert(auto.explain(anonymous) === null, "unmatched anonymous-layer fixture was owned");
@@ -3010,11 +3134,11 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(allReset) === null, "all: unset retained an earlier shape carrier");
     assert(auto.explain(allBefore), "shape after all: unset did not attach");
     equal(auto.explain(allBefore).geometry.shapeParameters, [0, 0, 0, 0], "shape after all: unset did not win");
-    assert(auto.explain(allAfter) === null, "all: unset after shape did not reset the carrier");
+    assert(auto.explain(allAfter) === null, "escaped all: unset after shape did not reset the carrier");
     assert(auto.explain(allLayer) === null, "all: unset did not reset a shape from an earlier layer");
     assert(auto.explain(allImportant) === null, "important all: unset did not reset an important shape");
     assert(auto.explain(allVar) === null, "all: var() did not transport its resolved carrier reset");
-    assert(auto.explain(allVarFallback) === null, "all: var() fallback did not reset shape carriers");
+    assert(auto.explain(allVarFallback) === null, "escaped all: var() fallback did not reset shape carriers");
     assert(auto.explain(allVarImportant) === null, "important all: var() did not reset important shape carriers");
     equal(auto.explain(envShape).geometry.shapeParameters, [0, 0, 0, 0], "env() fallback shape disappeared");
     assert(auto.explain(allEnv) === null, "all: env() fallback did not reset shape carriers");
@@ -3104,6 +3228,7 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     for (const element of [
       layerNormal, layerImportant, varParent, varFallback, varConflict, logical, media, mediaDuplicate,
       supportsPositive, supportsCustom, supportsNegativeCustom, supportsNegative, supportsInvalidNegative,
+      supportsRevertRule,
       conditionalCrossSource, mixed,
       anonymous, nesting, nested, nestedMedia, complex, split, inert, alternateElement,
       allReset, allBefore, allAfter, allLayer, allImportant, allVar, allVarFallback,
@@ -3143,7 +3268,7 @@ await test("unpreservable cascade and namespace contexts fail ownership closed",
       "cannot preserve at-rule context: @scope",
     );
     await expectBlocked(
-      '@import "data:text/css,.cornerfill-import-layer%7Bcorner-shape:scoop%7D" layer;',
+      '@import "data:text/css,.cornerfill-import-layer%7Bcorner-shape:scoop%7D" layer (min-width:1px);',
       "cannot preserve an anonymous @import layer",
     );
     await expectBlocked(
