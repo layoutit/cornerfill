@@ -5,6 +5,8 @@ import {
   carrierSupportsCondition,
   leadingImportStatements,
   parseImportStatement,
+  selectorObservation,
+  supportsConditionTestsShape,
 } from "../dist/carriers.mjs";
 import { cssDeclarationSignature, cssDeclarations } from "../dist/css-syntax.mjs";
 
@@ -63,11 +65,9 @@ test("stylesheet canonicalization preserves custom-property block values", () =>
   assert.match(transformed, /--cornerfill-corner-top-left-shape:notch/u);
 });
 
-test("stylesheet scanning rejects an unterminated import", () => {
-  assert.throws(
-    () => leadingImportStatements('@import url("theme.css")'),
-    /malformed top-level @import/u,
-  );
+test("stylesheet scanning leaves an unterminated import to browser error recovery", () => {
+  const source = '@import url("theme.css")';
+  assert.deepEqual(leadingImportStatements(source), { imports: [], local: source });
 });
 
 test("import control grammar decodes escaped CSS identifiers", () => {
@@ -91,4 +91,37 @@ test("import control grammar decodes escaped CSS identifiers", () => {
     carrierSupportsCondition(imported.supports),
     /--cornerfill-supports-corner-shape:bevel/u,
   );
+});
+
+test("nested support conditions share one decoded shape analysis", () => {
+  const nested = String.raw`n\6ft ((\63orner-shape: v\61r(--shape)))`;
+  assert(supportsConditionTestsShape(nested));
+  assert(supportsConditionTestsShape(String.raw`\63orner-shape: bevel`));
+  assert.match(carrierSupportsCondition(nested), /--cornerfill-supports-corner-shape/u);
+  assert(!supportsConditionTestsShape('selector([data-token="corner-shape"])'));
+});
+
+test("selector observation ignores selector text inside comments and attribute values", () => {
+  assert.deepEqual(selectorObservation([
+    '.face/* :visited .ghost */[data-token=":checked .fake #fake"]:is(:hover)',
+  ]), {
+    attributes: ["class", "data-token"],
+    characterData: false,
+    conservative: false,
+    events: ["pointerout", "pointerover"],
+    unobservableStates: [],
+  });
+});
+
+test("import URLs require browser-valid string or url tokens", () => {
+  assert.equal(
+    parseImportStatement("@import url(theme.css);", "https://example.test/root.css").url,
+    "https://example.test/theme.css",
+  );
+  for (const source of [
+    "@import /ghost.css;",
+    '@import url ("ghost.css");',
+    '@import url/**/("ghost.css");',
+    '@import "ghost.css" supports (display:grid);',
+  ]) assert.throws(() => parseImportStatement(source, "https://example.test/root.css"), SyntaxError);
 });

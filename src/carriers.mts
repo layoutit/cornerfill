@@ -4,6 +4,8 @@ import {
   serializeShapeParameter,
 } from "./values.mjs";
 import {
+  cssFunctions,
+  cssEscapeEnd,
   cssIdentifierAt,
   decodeCssEscapes,
   scanCssSyntax,
@@ -43,6 +45,7 @@ export interface CarrierCompilation {
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
   readonly parsedRuleCount?: number | undefined;
+  readonly selectorOccurrences?: readonly string[] | undefined;
   readonly selectorRecords: readonly Readonly<SelectorRecord>[];
   readonly selectors: readonly string[];
   readonly sources?: readonly string[] | undefined;
@@ -488,9 +491,14 @@ function supportDeclaration(
   return property && value ? Object.freeze({ property, value }) : null;
 }
 
+const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "revert", "revert-layer", "unset"]);
+
 function supportsShapeValue(property: string, value: string): boolean {
-  if (/^(?:inherit|initial|revert|revert-layer|unset)$/iu.test(value)
-    || /\b(?:env|var)\s*\(/iu.test(value)) return true;
+  const keyword = wholeCssIdentifier(value)?.value.toLowerCase();
+  if (keyword && CSS_WIDE_KEYWORDS.has(keyword)) {
+    return true;
+  }
+  if (cssFunctions(value).some(({ name }) => name === "env" || name === "var")) return true;
   try {
     if (property === "corner-shape") parseCornerShape(value);
     else parseCornerShapeValue(value);
@@ -528,27 +536,69 @@ function rulesMayAffectOwnedPaint(rules: CSSRuleList | readonly CSSRule[]): bool
   return false;
 }
 
-function shapeSupportReplacements(header: string): readonly Readonly<TextReplacement>[] {
-  if (atKeyword(header)?.name !== "supports") return Object.freeze([]);
+interface SupportsParenthesis {
+  close: number;
+  readonly children: SupportsParenthesis[];
+  readonly open: number;
+}
+
+function supportsParentheses(source: string): readonly Readonly<SupportsParenthesis>[] {
+  const roots: SupportsParenthesis[] = [];
+  const stack: SupportsParenthesis[] = [];
+  scanCssSyntax(source, 0, (index, character) => {
+    if (character === "(") {
+      const node: SupportsParenthesis = { open: index, close: -1, children: [] };
+      const parent = stack[stack.length - 1];
+      if (parent) parent.children.push(node);
+      else roots.push(node);
+      stack.push(node);
+    } else if (character === ")") {
+      const node = stack.pop();
+      if (node) node.close = index;
+    }
+  });
+  return Object.freeze(roots);
+}
+
+function analyzeSupportsCondition(source: string): Readonly<{
+  replacements: readonly Readonly<TextReplacement>[];
+  testsShape: boolean;
+}> {
+  const functionOpenings = new Set(cssFunctions(source).map(({ open }) => open));
   const replacements: TextReplacement[] = [];
-  for (let start = header.indexOf("("); start >= 0; start = header.indexOf("(", start + 1)) {
-    const end = matchingParenthesis(header, start);
-    if (end < 0) break;
-    const inner = header.slice(start + 1, end);
+  let testsShape = false;
+  const visit = (node: Readonly<SupportsParenthesis>) => {
+    if (node.close < 0) return;
+    const inner = source.slice(node.open + 1, node.close);
     const declaration = supportDeclaration(inner);
-    if (!declaration || !isShapeProperty(declaration.property)) continue;
-    const { property, value } = declaration;
-    const supported = supportsShapeValue(property, value);
-    replacements.push(Object.freeze({
-      start: start + 1,
-      end,
-      value: supported
-        ? `--cornerfill-supports-${property}:${value}`
-        : "display:__cornerfill_invalid__",
-    }));
-    start = end;
-  }
-  return Object.freeze(replacements);
+    if (declaration) {
+      if (!isShapeProperty(declaration.property)) return;
+      testsShape = true;
+      const { property, value } = declaration;
+      replacements.push(Object.freeze({
+        start: node.open + 1,
+        end: node.close,
+        value: supportsShapeValue(property, value)
+          ? `--cornerfill-supports-${property}:${value}`
+          : "display:__cornerfill_invalid__",
+      }));
+      return;
+    }
+    if (functionOpenings.has(node.open)) return;
+    for (const child of node.children) visit(child);
+  };
+  for (const root of supportsParentheses(source)) visit(root);
+  return Object.freeze({ replacements: Object.freeze(replacements), testsShape });
+}
+
+function shapeSupportReplacements(header: string): readonly Readonly<TextReplacement>[] {
+  return atKeyword(header)?.name === "supports"
+    ? analyzeSupportsCondition(header).replacements
+    : Object.freeze([]);
+}
+
+export function supportsConditionTestsShape(condition: string): boolean {
+  return analyzeSupportsCondition(normalizeSupportsCondition(condition)).testsShape;
 }
 
 function carrierSupportsHeader(header: string): string {
@@ -564,9 +614,15 @@ function carrierSupportsHeader(header: string): string {
   return output + header.slice(cursor);
 }
 
-export function carrierSupportsCondition(condition: string): string {
+export function normalizeSupportsCondition(condition: string): string {
   const source = String(condition).trim();
-  const normalized = /^(?:\(|not\b)/iu.test(source) ? source : `(${source})`;
+  const start = skipCssTrivia(source, 0);
+  const leading = cssIdentifierAt(source, start)?.value.toLowerCase();
+  return source[start] === "(" || leading === "not" ? source : `(${source})`;
+}
+
+export function carrierSupportsCondition(condition: string): string {
+  const normalized = normalizeSupportsCondition(condition);
   return carrierSupportsHeader(`@supports ${normalized}`).slice("@supports ".length);
 }
 
@@ -654,6 +710,7 @@ function transformSelectorHeaders(
 function serializeCarrierRules(
   rules: CSSRuleList | readonly CSSRule[],
   selectors: Set<string>,
+  selectorOccurrences: string[],
   selectorRecords: Readonly<SelectorRecord>[],
   sourceIdentity: string,
   mediaQueries: Set<string>,
@@ -727,6 +784,7 @@ function serializeCarrierRules(
       ? serializeCarrierRules(
         rule.cssRules,
         selectors,
+        selectorOccurrences,
         selectorRecords,
         sourceIdentity,
         mediaQueries,
@@ -754,6 +812,7 @@ function serializeCarrierRules(
       }
       if (declarations.shape) {
         selectors.add(parentSelector);
+        selectorOccurrences.push(parentSelector);
         selectorRecords.push(Object.freeze({
           source: sourceIdentity,
           selector: parentSelector,
@@ -776,6 +835,7 @@ function serializeCarrierRules(
       if (!declarations.css && !nested) continue;
       if (declarations.shape) {
         selectors.add(selector);
+        selectorOccurrences.push(selector);
         selectorRecords.push(Object.freeze({
           source: sourceIdentity,
           selector,
@@ -827,31 +887,36 @@ const STATIC_SELECTOR_PSEUDOS = new Set<string>([
   "only-of-type", "root", "scope", "where",
 ]);
 
-function selectorForObservation(selector: string): string {
-  return selector.replaceAll(
-    /\\(?:[0-9a-f]{1,6}(?:\r\n|[\t\n\f\r ])?|(?:\r\n|[\n\f\r])|[\s\S])/giu,
-    (escape) => {
-      const decoded = decodeCssEscapes(escape);
-      return /^[-_a-z0-9]$/iu.test(decoded) ? decoded : "_";
-    },
-  );
-}
-
 export function selectorObservation(selectors: Iterable<string>): Readonly<SelectorObservation> {
   const attributes = new Set<string>();
   const events = new Set<string>();
   const unobservableStates = new Set<string>();
   let characterData = false;
   let conservative = false;
-  for (const rawSelector of selectors) {
-    const selector = selectorForObservation(rawSelector);
-    if (/(?:^|[^\w-])\.[_a-z-]/iu.test(selector)) attributes.add("class");
-    if (/(?:^|[^\w-])#[_a-z-]/iu.test(selector)) attributes.add("id");
-    const attributeMatches = [...selector.matchAll(/\[\s*([_a-z][\w-]*)/giu)];
-    for (const match of attributeMatches) attributes.add(match[1]!.toLowerCase());
-    if ((selector.match(/\[/gu)?.length ?? 0) !== attributeMatches.length) conservative = true;
-    for (const match of selector.matchAll(/(?:^|[^:]):([a-z-]+)/giu)) {
-      const pseudo = match[1]!.toLowerCase();
+  for (const selector of selectors) {
+    scanCssSyntax(selector, 0, (index, character, _parentheses, brackets) => {
+      if (brackets !== 0) return;
+      if (character === ".") {
+        attributes.add("class");
+        return;
+      }
+      if (character === "#") {
+        attributes.add("id");
+        return;
+      }
+      if (character === "[") {
+        const name = cssIdentifierAt(selector, skipCssTrivia(selector, index + 1));
+        if (name) attributes.add(name.value.toLowerCase());
+        else conservative = true;
+        return;
+      }
+      if (character !== ":" || selector[index - 1] === ":" || selector[index + 1] === ":") return;
+      const name = cssIdentifierAt(selector, index + 1);
+      if (!name) {
+        conservative = true;
+        return;
+      }
+      const pseudo = name.value.toLowerCase();
       const stateEvents = SELECTOR_STATE_EVENTS[pseudo];
       if (stateEvents) {
         for (const event of stateEvents) events.add(event);
@@ -860,20 +925,20 @@ export function selectorObservation(selectors: Iterable<string>): Readonly<Selec
         }
         if (["modal", "open"].includes(pseudo)) attributes.add("open");
         if (pseudo === "popover-open") attributes.add("popover");
-        continue;
+        return;
       }
       if (pseudo === "dir") {
         attributes.add("dir");
-        continue;
+        return;
       }
       if (pseudo === "lang") {
         attributes.add("lang");
-        continue;
+        return;
       }
       if (pseudo === "empty") characterData = true;
       else if (["any-link", "link"].includes(pseudo)) attributes.add("href");
       else if (!STATIC_SELECTOR_PSEUDOS.has(pseudo)) unobservableStates.add(pseudo);
-    }
+    });
   }
   return Object.freeze({
     attributes: Object.freeze([...attributes].sort()),
@@ -925,12 +990,14 @@ export function parseCarrierSheet(
   }
   try {
     const selectors = new Set<string>();
+    const selectorOccurrences: string[] = [];
     const observationSelectors = new Set<string>();
     const selectorRecords: Readonly<SelectorRecord>[] = [];
     const mediaQueries = new Set<string>();
     const css = serializeCarrierRules(
       sheet?.cssRules ?? [],
       selectors,
+      selectorOccurrences,
       selectorRecords,
       sourceIdentity,
       mediaQueries,
@@ -949,6 +1016,7 @@ export function parseCarrierSheet(
     return Object.freeze({
       css,
       selectors: selectorList,
+      selectorOccurrences: Object.freeze(selectorOccurrences),
       selectorRecords: Object.freeze(selectorRecords),
       observation,
       mediaQueries: Object.freeze([...mediaQueries].filter(Boolean).sort()),
@@ -983,7 +1051,7 @@ export function leadingImportStatements(
     const keyword = atKeyword(source, start);
     if (keyword?.name === "import") {
       const end = cssStatementEnd(source, keyword.end);
-      if (end < 0) throw new SyntaxError("Automatic CSS found a malformed top-level @import rule");
+      if (end < 0) break;
       imports.push(Object.freeze({ start, end: end + 1, prelude: source.slice(start, end + 1) }));
       cursor = end + 1;
       continue;
@@ -1009,27 +1077,70 @@ export function leadingImportStatements(
   return Object.freeze({ imports: Object.freeze(imports), local });
 }
 
+function importString(value: string): Readonly<{ end: number; value: string }> | null {
+  const quote = value[0];
+  if (quote !== "\"" && quote !== "'") return null;
+  for (let index = 1; index < value.length;) {
+    const character = value[index]!;
+    if (character === quote) return Object.freeze({
+      end: index + 1,
+      value: decodeCssEscapes(value.slice(1, index)),
+    });
+    if (/[\n\f\r]/u.test(character)) {
+      throw new SyntaxError("Automatic CSS found an invalid @import string");
+    }
+    if (character !== "\\") {
+      index += 1;
+      continue;
+    }
+    const next = value[index + 1];
+    if (!next) throw new SyntaxError("Automatic CSS found an unterminated @import string");
+    if (next === "\r" && value[index + 2] === "\n") index += 3;
+    else if (/[\n\f\r]/u.test(next)) index += 2;
+    else {
+      const end = cssEscapeEnd(value, index);
+      if (end < 0) throw new SyntaxError("Automatic CSS found an invalid @import string escape");
+      index = end;
+    }
+  }
+  throw new SyntaxError("Automatic CSS found an unterminated @import string");
+}
+
 function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
   const trimmed = value.trim();
-  const quoted = /^(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')/u.exec(trimmed);
+  const quoted = importString(trimmed);
   if (quoted) return Object.freeze({
-    rest: trimmed.slice(skipCssTrivia(trimmed, quoted[0].length)).trim(),
-    url: decodeCssEscapes(quoted[1] ?? quoted[2] ?? ""),
+    rest: trimmed.slice(skipCssTrivia(trimmed, quoted.end)).trim(),
+    url: quoted.value,
   });
   const urlFunction = consumeImportFunction(trimmed, "url");
   if (!urlFunction) {
-    const unquoted = /^((?:\\[\s\S]|[^\s"'()])+)/u.exec(trimmed);
-    if (unquoted) return Object.freeze({
-      rest: trimmed.slice(skipCssTrivia(trimmed, unquoted[0].length)).trim(),
-      url: decodeCssEscapes(unquoted[1] ?? ""),
-    });
     throw new SyntaxError("Automatic CSS supports quoted or url() @import URLs");
   }
-  const nested: Readonly<ImportUrlParse> = unquoteImportUrl(urlFunction.value);
-  if (nested.rest) throw new SyntaxError("Automatic CSS found an invalid @import url()");
+  const contents = urlFunction.value.trim();
+  const nested = importString(contents);
+  if (nested && skipCssTrivia(contents, nested.end) !== contents.length) {
+    throw new SyntaxError("Automatic CSS found an invalid @import url()");
+  }
+  if (!nested) {
+    for (let index = 0; index < contents.length;) {
+      const character = contents[index]!;
+      if (character === "\\") {
+        const end = cssEscapeEnd(contents, index);
+        if (end < 0) throw new SyntaxError("Automatic CSS found an invalid @import url()");
+        index = end;
+        continue;
+      }
+      const code = character.codePointAt(0) ?? 0;
+      if (/[\t\n\f\r "'()]/u.test(character) || code < 0x20 || code === 0x7f) {
+        throw new SyntaxError("Automatic CSS found an invalid @import url()");
+      }
+      index += 1;
+    }
+  }
   return Object.freeze({
     rest: urlFunction.rest,
-    url: nested.url,
+    url: nested?.value ?? decodeCssEscapes(contents),
   });
 }
 
@@ -1037,7 +1148,7 @@ function consumeImportFunction(value: string, name: string): Readonly<ImportFunc
   const identifierStart = skipCssTrivia(value, 0);
   const identifier = cssIdentifierAt(value, identifierStart);
   if (identifier?.value.toLowerCase() !== name) return null;
-  const start = skipCssTrivia(value, identifier.end);
+  const start = identifier.end;
   if (value[start] !== "(") return null;
   const end = matchingParenthesis(value, start);
   if (end < 0) throw new SyntaxError(`Automatic CSS found an unterminated @import ${name}()`);
@@ -1059,6 +1170,9 @@ export function parseImportStatement(statement: string, baseUrl: string): Readon
   if (layerIdentifier?.value.toLowerCase() === "layer") {
     const layerFunction = consumeImportFunction(rest, "layer");
     if (!layerFunction) {
+      if (rest[skipCssTrivia(rest, layerIdentifier.end)] === "(") {
+        throw new SyntaxError("Automatic CSS found an invalid @import layer() function");
+      }
       throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous @import layer");
     }
     if (!validCssLayerName(layerFunction.value)) {
@@ -1068,6 +1182,10 @@ export function parseImportStatement(statement: string, baseUrl: string): Readon
     rest = layerFunction.rest;
   }
   const supportsFunction = consumeImportFunction(rest, "supports");
+  const supportsIdentifier = cssIdentifierAt(rest, skipCssTrivia(rest, 0));
+  if (!supportsFunction && supportsIdentifier?.value.toLowerCase() === "supports") {
+    throw new SyntaxError("Automatic CSS found an invalid @import supports() function");
+  }
   if (supportsFunction) {
     supports = supportsFunction.value;
     rest = supportsFunction.rest;

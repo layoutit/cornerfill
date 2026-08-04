@@ -125,6 +125,21 @@ async function startServer() {
       response.end(".cornerfill-escaped-import{corner-shape:scoop}");
       return;
     }
+    if (url.pathname === "/bench/imports/nested-support-child.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-nested-support-import{corner-shape:scoop}");
+      return;
+    }
+    if (url.pathname === "/bench/imports/escaped-strict-child.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-escaped-strict-import{corner-shape:bevel;display:none}");
+      return;
+    }
+    if (url.pathname === "/cornerfill-invalid-bare.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end("");
+      return;
+    }
     const path = resolve(PROJECT_ROOT, decodeURIComponent(url.pathname.slice(1)));
     if (!within(PROJECT_ROOT, path) || !existsSync(path) || !statSync(path).isFile()) {
       response.writeHead(404);

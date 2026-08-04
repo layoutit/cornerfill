@@ -28,6 +28,12 @@ export interface CssIdentifierParse {
   readonly value: string;
 }
 
+export interface CssFunctionToken {
+  readonly name: string;
+  readonly open: number;
+  readonly start: number;
+}
+
 export function cssEscapeEnd(source: string, start: number): number {
   if (source[start] !== "\\") return -1;
   const first = source[start + 1];
@@ -111,6 +117,53 @@ export function cssIdentifierAt(
   start: number,
 ): Readonly<CssIdentifierParse> | null {
   return consumeCssIdentifier(source, start);
+}
+
+export function cssFunctions(source: string): readonly Readonly<CssFunctionToken>[] {
+  const functions: Readonly<CssFunctionToken>[] = [];
+  let quote: "\"" | "'" | null = null;
+  let comment = false;
+  for (let index = 0; index < source.length;) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (comment) {
+      if (character === "*" && next === "/") {
+        comment = false;
+        index += 2;
+      } else index += 1;
+      continue;
+    }
+    if (quote) {
+      if (character === "\\") index = Math.max(index + 1, cssEscapeEnd(source, index));
+      else {
+        if (character === quote) quote = null;
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      comment = true;
+      index += 2;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    const identifier = cssIdentifierAt(source, index);
+    if (!identifier) {
+      index += 1;
+      continue;
+    }
+    if (source[identifier.end] === "(") functions.push(Object.freeze({
+      start: identifier.start,
+      open: identifier.end,
+      name: identifier.value.toLowerCase(),
+    }));
+    index = identifier.end;
+  }
+  return Object.freeze(functions);
 }
 
 export function skipCssTrivia(source: string, start: number): number {

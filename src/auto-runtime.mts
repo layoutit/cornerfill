@@ -41,12 +41,14 @@ import {
   leadingImportStatements,
   mergeSelectorObservation,
   mutateStylesheetModel,
+  normalizeSupportsCondition,
   ownershipBlockingError,
   ownershipBlockingRangeError,
   ownershipBlockingSyntaxError,
   parseCarrierSheet,
   parseImportStatement,
   selectorObservation,
+  supportsConditionTestsShape,
   wrapImportedCarrierCss,
 } from "./carriers.mjs";
 import type {
@@ -235,9 +237,20 @@ interface MediaListenerRecord {
 interface AutomaticAttachmentState {
   candidateProvenance: Map<Element, Readonly<SelectorRecord>[]>;
   candidates: Set<Element>;
-  readonly handleSignatures: Map<HTMLElement, string>;
   readonly handles: Map<HTMLElement, Readonly<CornerfillHandle>>;
   readonly inline: Map<HTMLElement, Readonly<InlineRecord>>;
+}
+
+interface SharedAutomaticHandle {
+  readonly claimants: Set<CornerfillAutoController>;
+  readonly handle: Readonly<CornerfillHandle>;
+  pending: Promise<void> | null;
+  signature: string;
+}
+
+interface AutomaticHandleRegistry {
+  readonly handles: Map<HTMLElement, SharedAutomaticHandle>;
+  readonly scopes: Set<CornerfillAutoController>;
 }
 
 interface AutomaticObservationRuntime {
@@ -310,6 +323,7 @@ export interface CornerfillAutoOptions extends CornerfillInstallOptions {
 
 interface InternalCornerfillAutoOptions extends CornerfillAutoOptions {
   readonly controller?: CornerfillControllerHandle | undefined;
+  readonly handleRegistry?: AutomaticHandleRegistry | undefined;
   readonly parentAuto?: CornerfillAutoController | null | undefined;
 }
 
@@ -665,10 +679,14 @@ function compiledSelectorCount(records: readonly Readonly<SelectorRecord>[]): nu
   return records.reduce((count, { selector }) => count + selectorComponentCount(selector), 0);
 }
 
+function selectorOccurrenceCount(selectors: readonly string[]): number {
+  return selectors.reduce((count, selector) => count + selectorComponentCount(selector), 0);
+}
+
 function compilationSelectorCount(compiled: Readonly<CarrierCompilation>): number {
-  return compiled.selectorRecords.length > 0
-    ? compiledSelectorCount(compiled.selectorRecords)
-    : compiled.selectors.reduce((count, selector) => count + selectorComponentCount(selector), 0);
+  if (compiled.selectorOccurrences) return selectorOccurrenceCount(compiled.selectorOccurrences);
+  if (compiled.selectorRecords.length > 0) return compiledSelectorCount(compiled.selectorRecords);
+  return selectorOccurrenceCount(compiled.selectors);
 }
 
 function normalizedCarrier(source: string): string {
@@ -801,10 +819,7 @@ function authoredImportConditionMatches(
   imported: Readonly<ParsedImport>,
 ): boolean {
   if (imported.supports) {
-    const condition = /^(?:\(|not\b)/iu.test(imported.supports)
-      ? imported.supports
-      : `(${imported.supports})`;
-    if (!view.CSS.supports(condition)) return false;
+    if (!view.CSS.supports(normalizeSupportsCondition(imported.supports))) return false;
   }
   return !imported.media || view.matchMedia(imported.media).matches;
 }
@@ -1082,6 +1097,7 @@ function runtimeOptions(
     controller: _controller,
     autoObserve: _autoObserve,
     adoptedStyleSheets: _adoptedStyleSheets,
+    handleRegistry: _handleRegistry,
     parentAuto: _parentAuto,
     onError: _onError,
     stylesheetTimeoutMs: _stylesheetTimeoutMs,
@@ -1110,6 +1126,7 @@ class CornerfillAutoController {
   declare readonly discoveredNonce: string | null;
   declare readonly explicitNonce: string | null;
   declare readonly includeAdoptedStyleSheets: boolean;
+  declare readonly handleRegistry: AutomaticHandleRegistry;
   declare readonly maxCompiledSelectors: number;
   declare readonly maxImportCount: number;
   declare readonly maxImportDepth: number;
@@ -1196,6 +1213,7 @@ class CornerfillAutoController {
     this.autoObserve = options.autoObserve ?? options.observe !== false;
     this.includeAdoptedStyleSheets = includeAdoptedStyleSheets;
     this.parentAuto = options.parentAuto ?? null;
+    this.handleRegistry = options.handleRegistry ?? { handles: new Map(), scopes: new Set() };
     this.onError = typeof options.onError === "function" ? options.onError : null;
     this.sourceState = {
       adoptedIds: new WeakMap(),
@@ -1218,10 +1236,10 @@ class CornerfillAutoController {
     this.attachmentState = {
       candidateProvenance: new Map(),
       candidates: new Set(),
-      handleSignatures: new Map(),
       handles: new Map(),
       inline: new Map(),
     };
+    this.handleRegistry.scopes.add(this);
     this.diagnosticsByOwner = new Map();
     this.observation = {
       configurationKey: null,
@@ -1485,10 +1503,7 @@ class CornerfillAutoController {
       if (root.host.getAttribute(attribute) !== value) root.host.setAttribute(attribute, value);
       this.hostContextOwnedValue = value;
     } else {
-      if (this.hostContextOwnedValue !== null
-        && root.host.getAttribute(attribute) === this.hostContextOwnedValue) {
-        root.host.removeAttribute(attribute);
-      }
+      if (root.host.hasAttribute(attribute)) root.host.removeAttribute(attribute);
       this.hostContextOwnedValue = null;
     }
   }
@@ -1848,20 +1863,21 @@ class CornerfillAutoController {
     }
     request.provenance.add(identity);
     const split = leadingImportStatements(source.text);
-    const parsedImports = split.imports.map((statement) => {
+    const parsedImports = split.imports.flatMap((statement) => {
       let imported: Readonly<ParsedImport>;
       try {
         imported = parseImportStatement(statement.prelude, source.baseUrl);
       } catch (error) {
+        if (!ownershipBlockingError(error)) return [];
         throw annotateDiagnostic(error, { source: identity, declaration: statement.prelude });
       }
-      return Object.freeze({
+      return [Object.freeze({
         active: !imported.supports || this.document.defaultView.CSS.supports(
           carrierSupportsCondition(imported.supports),
         ),
         imported,
         statement,
-      });
+      })];
     });
     request.imports += parsedImports.filter(({ active }) => active).length;
     if (request.imports > this.maxImportCount) {
@@ -1892,7 +1908,7 @@ class CornerfillAutoController {
       }
       request.provenance.add(imported.url);
       const importedStrictShapeSupports = strictShapeSupports || Boolean(
-        imported.supports && /\bcorner-(?:[\w-]*-)?shape\b/iu.test(imported.supports),
+        imported.supports && supportsConditionTestsShape(imported.supports),
       );
       const importCacheKey = `${imported.url}\n${importedStrictShapeSupports ? "strict" : "normal"}`;
       let compiledPromise = request.importCache.get(importCacheKey);
@@ -1971,11 +1987,14 @@ class CornerfillAutoController {
     const parts: CarrierCompilation[] = importedParts.map(({ part }) => part);
     parts.push(local);
     const selectors = Object.freeze([...new Set(parts.flatMap((part) => part.selectors))]);
+    const selectorOccurrences = Object.freeze(parts.flatMap((part) => (
+      part.selectorOccurrences ?? part.selectorRecords.map(({ selector }) => selector)
+    )));
     const selectorRecords = Object.freeze([...new Map(parts
       .flatMap((part) => part.selectorRecords)
       .map((record) => [`${record.source}\n${record.selector}\n${record.declaration ?? ""}`, record]))
       .values()]);
-    if (compiledSelectorCount(selectorRecords) > this.maxCompiledSelectors) {
+    if (selectorOccurrenceCount(selectorOccurrences) > this.maxCompiledSelectors) {
       throw ownershipBlockingRangeError(
         `${identity} exceeds the maximum compiled selector count of ${this.maxCompiledSelectors}`,
       );
@@ -1985,6 +2004,7 @@ class CornerfillAutoController {
     return Object.freeze({
       css: parts.map((part) => part.css).join(""),
       selectors,
+      selectorOccurrences,
       selectorRecords,
       observation: mergeSelectorObservation(parts.map((part) => part.observation)),
       mediaQueries: Object.freeze([...new Set(parts.flatMap((part) => part.mediaQueries))].sort()),
@@ -2058,14 +2078,15 @@ class CornerfillAutoController {
     failedStylesheets: ReadonlySet<string>,
     watch = this._watchBrowserStylesheet(owner),
   ): Promise<boolean> {
-    const imports = leadingImportStatements(source).imports.filter(({ prelude }) => (
-      authoredImportConditionMatches(
-        this.document.defaultView,
-        parseImportStatement(
-          prelude,
-          (isStylesheetLink(owner) ? owner.href : owner.baseURI) || this.document.baseURI,
-        ),
-      )
+    const importBase = (isStylesheetLink(owner) ? owner.href : owner.baseURI) || this.document.baseURI;
+    const imports = leadingImportStatements(source).imports.flatMap(({ prelude }) => {
+      try {
+        return [parseImportStatement(prelude, importBase)];
+      } catch {
+        return [];
+      }
+    }).filter((imported) => (
+      authoredImportConditionMatches(this.document.defaultView, imported)
     )).length;
     const sourceHasContent = source.trim().length > 0;
     if (!isStylesheetLink(owner) && imports === 0) {
@@ -2397,7 +2418,7 @@ class CornerfillAutoController {
         this.hostContextAttribute ? (selector) => this._rewriteHostContextSelector(selector) : null,
         this.hostContextAttribute ? (selector) => this._restoreHostContextSelector(selector) : null,
       );
-      if (compiledSelectorCount(compiled.selectorRecords) > this.maxCompiledSelectors) {
+      if (compilationSelectorCount(compiled) > this.maxCompiledSelectors) {
         throw ownershipBlockingRangeError(
           `${identity} exceeds the maximum compiled selector count of ${this.maxCompiledSelectors}`,
         );
@@ -2520,6 +2541,11 @@ class CornerfillAutoController {
             this.hostContextAttribute ? (selector) => this._rewriteHostContextSelector(selector) : null,
             this.hostContextAttribute ? (selector) => this._restoreHostContextSelector(selector) : null,
           );
+          if (compilationSelectorCount(compiled) > this.maxCompiledSelectors) {
+            throw ownershipBlockingRangeError(
+              `${this._ownerIdentity(owner)} exceeds the maximum compiled selector count of ${this.maxCompiledSelectors}`,
+            );
+          }
           this.automaticCounters.sourceCompiles += 1;
           this._writeStylesheetRecord(owner, compiled, { cssomHook: hook });
           this._configureObservation();
@@ -2964,12 +2990,154 @@ class CornerfillAutoController {
     return changed;
   }
 
+  _disposeAutomaticHandle(
+    element: HTMLElement,
+    record: SharedAutomaticHandle,
+    error: unknown = null,
+  ): void {
+    if (this.handleRegistry.handles.get(element) !== record) return;
+    this.handleRegistry.handles.delete(element);
+    for (const claimant of record.claimants) {
+      claimant.attachmentState.handles.delete(element);
+      if (error !== null && !claimant.destroyed) claimant._recordElementError(error, element);
+    }
+    record.claimants.clear();
+    record.handle.dispose();
+    this.automaticCounters.handleDetaches += 1;
+  }
+
+  _clearAutomaticHandleErrors(element: HTMLElement, record: SharedAutomaticHandle): void {
+    for (const claimant of record.claimants) {
+      if (!claimant.destroyed) claimant._clearErrors(element);
+    }
+  }
+
+  _releaseAutomaticClaim(element: HTMLElement): SharedAutomaticHandle | null {
+    this.attachmentState.handles.delete(element);
+    const record = this.handleRegistry.handles.get(element);
+    if (!record || !record.claimants.delete(this)) return null;
+    if (record.claimants.size > 0) return record;
+    this._disposeAutomaticHandle(element, record);
+    return null;
+  }
+
+  _trackAutomaticPending(
+    record: SharedAutomaticHandle,
+    pending: Promise<void>,
+  ): Promise<void> {
+    record.pending = pending;
+    const settle = () => {
+      if (record.pending === pending) record.pending = null;
+    };
+    void pending.then(settle, settle);
+    return pending;
+  }
+
+  _refreshAutomaticHandle(
+    element: HTMLElement,
+    record: SharedAutomaticHandle,
+    inspection: Readonly<CornerfillAuthoredStyleInspection>,
+  ): Promise<void> | null {
+    const signature = automaticComputedSignature(inspection);
+    if (record.signature === signature) {
+      if (record.pending) return record.pending;
+      try {
+        record.handle.verify();
+      } catch (error) {
+        this._disposeAutomaticHandle(element, record, error);
+      }
+      return null;
+    }
+    record.signature = signature;
+    this.automaticCounters.handleRefreshes += 1;
+    const pending = record.handle.refresh().then(
+      () => undefined,
+      (error) => this._disposeAutomaticHandle(element, record, error),
+    );
+    return this._trackAutomaticPending(record, pending);
+  }
+
+  _claimAutomaticHandle(
+    element: HTMLElement,
+    inspection: Readonly<CornerfillAuthoredStyleInspection>,
+  ): Promise<void> | null {
+    const claimants = [...this.handleRegistry.scopes].filter((scope) => (
+      !scope.destroyed && scope.attachmentState.candidates.has(element)
+    ));
+    const existing = this.handleRegistry.handles.get(element);
+    if (existing) {
+      for (const claimant of claimants) {
+        existing.claimants.add(claimant);
+        claimant.attachmentState.handles.set(element, existing.handle);
+        claimant._clearErrors(element);
+      }
+      return this._refreshAutomaticHandle(element, existing, inspection);
+    }
+    const handle = this.controller.attach(element);
+    const record: SharedAutomaticHandle = {
+      claimants: new Set(claimants),
+      handle,
+      pending: null,
+      signature: automaticComputedSignature(inspection),
+    };
+    this.handleRegistry.handles.set(element, record);
+    for (const claimant of claimants) {
+      claimant.attachmentState.handles.set(element, handle);
+      claimant._clearErrors(element);
+    }
+    this.automaticCounters.handleAttaches += 1;
+    const pending = handle.ready.then(
+      () => undefined,
+      (error) => this._disposeAutomaticHandle(element, record, error),
+    );
+    return this._trackAutomaticPending(record, pending);
+  }
+
+  _refreshRemainingAutomaticHandle(
+    element: HTMLElement,
+    record: SharedAutomaticHandle,
+  ): Promise<void> | null {
+    if (this.handleRegistry.handles.get(element) !== record) return null;
+    if (!element.isConnected) {
+      this._clearAutomaticHandleErrors(element, record);
+      this._disposeAutomaticHandle(element, record);
+      return null;
+    }
+    try {
+      const inspection = this.controller.inspectAuthoredStyle(
+        element,
+        AUTOMATIC_SIGNATURE_PROPERTIES,
+      );
+      const problem = carrierProblem(inspection);
+      if (problem) {
+        this._disposeAutomaticHandle(element, record, new TypeError(problem));
+        return null;
+      }
+      if (!hasShapeCarrier(inspection) || !inspection.requiresFallback) {
+        this._clearAutomaticHandleErrors(element, record);
+        this._disposeAutomaticHandle(element, record);
+        return null;
+      }
+      for (const claimant of record.claimants) claimant._clearErrors(element);
+      return this._refreshAutomaticHandle(element, record, inspection);
+    } catch (error) {
+      if (this.handleRegistry.handles.get(element) !== record) throw error;
+      this._disposeAutomaticHandle(element, record, error);
+      return null;
+    }
+  }
+
   async _refreshAttachments(): Promise<void> {
     if (this.native || this.destroyed) return;
     this.automaticCounters.attachmentPasses += 1;
     const candidates = this.attachmentState.candidates;
     const ready: Promise<unknown>[] = [];
     for (const [element, handle] of [...this.attachmentState.handles]) {
+      const record = this.handleRegistry.handles.get(element);
+      if (!record || record.handle !== handle || !record.claimants.has(this)) {
+        this.attachmentState.handles.delete(element);
+        continue;
+      }
       let failure: unknown = null;
       if (candidates.has(element) && element.isConnected) {
         this.automaticCounters.computedChecks += 1;
@@ -2982,26 +3150,8 @@ class CornerfillAutoController {
           if (problem) failure = new TypeError(problem);
           else if (hasShapeCarrier(inspection) && inspection.requiresFallback) {
             this._clearErrors(element);
-            const signature = automaticComputedSignature(inspection);
-            if (this.attachmentState.handleSignatures.get(element) === signature) {
-              try {
-                handle.verify();
-              } catch (error) {
-                this._recordElementError(error, element);
-                handle.dispose();
-                this.attachmentState.handles.delete(element);
-                this.attachmentState.handleSignatures.delete(element);
-              }
-              continue;
-            }
-            this.attachmentState.handleSignatures.set(element, signature);
-            this.automaticCounters.handleRefreshes += 1;
-            ready.push(handle.refresh().catch((error) => {
-              this._recordElementError(error, element);
-              handle.dispose();
-              this.attachmentState.handles.delete(element);
-              this.attachmentState.handleSignatures.delete(element);
-            }));
+            const pending = this._refreshAutomaticHandle(element, record, inspection);
+            if (pending) ready.push(pending);
             continue;
           }
         } catch (error) {
@@ -3010,13 +3160,19 @@ class CornerfillAutoController {
       }
       if (failure) this._recordElementError(failure, element);
       else this._clearErrors(element);
-      handle.dispose();
-      this.automaticCounters.handleDetaches += 1;
-      this.attachmentState.handles.delete(element);
-      this.attachmentState.handleSignatures.delete(element);
+      const remaining = this._releaseAutomaticClaim(element);
+      const pending = remaining && this._refreshRemainingAutomaticHandle(element, remaining);
+      if (pending) ready.push(pending);
     }
     for (const element of candidates) {
       if (!(element instanceof this.document.defaultView.HTMLElement) || !element.isConnected) {
+        if (element instanceof this.document.defaultView.HTMLElement) {
+          const existing = this.handleRegistry.handles.get(element);
+          if (existing) {
+            this._clearAutomaticHandleErrors(element, existing);
+            this._disposeAutomaticHandle(element, existing);
+          }
+        }
         this._clearErrors(element);
         continue;
       }
@@ -3029,21 +3185,23 @@ class CornerfillAutoController {
         );
         const problem = carrierProblem(inspection);
         if (problem) {
-          this._recordElementError(new TypeError(problem), element);
+          const error = new TypeError(problem);
+          this._recordElementError(error, element);
+          const existing = this.handleRegistry.handles.get(element);
+          if (existing) this._disposeAutomaticHandle(element, existing, error);
           continue;
         }
         this._clearErrors(element);
-        if (!hasShapeCarrier(inspection) || !inspection.requiresFallback) continue;
-        const handle = this.controller.attach(element);
-        this.automaticCounters.handleAttaches += 1;
-        this.attachmentState.handles.set(element, handle);
-        this.attachmentState.handleSignatures.set(element, automaticComputedSignature(inspection));
-        ready.push(handle.ready.catch((error) => {
-          this._recordElementError(error, element);
-          handle.dispose();
-          this.attachmentState.handles.delete(element);
-          this.attachmentState.handleSignatures.delete(element);
-        }));
+        if (!hasShapeCarrier(inspection) || !inspection.requiresFallback) {
+          const existing = this.handleRegistry.handles.get(element);
+          if (existing) {
+            this._clearAutomaticHandleErrors(element, existing);
+            this._disposeAutomaticHandle(element, existing);
+          }
+          continue;
+        }
+        const pending = this._claimAutomaticHandle(element, inspection);
+        if (pending) ready.push(pending);
       } catch (error) {
         this._recordElementError(error, element);
       }
@@ -3101,6 +3259,7 @@ class CornerfillAutoController {
       ...merged,
       attributes: Object.freeze([...new Set([
         ...merged.attributes,
+        ...(this.hostContextAttribute ? [this.hostContextAttribute] : []),
         "class",
         "dir",
         "id",
@@ -3182,9 +3341,22 @@ class CornerfillAutoController {
     for (const owner of owners) this._invalidateStylesheetSource(owner);
   }
 
+  _expectedHostMarkerMutation(record: MutationRecord): boolean {
+    const root = this.root;
+    if (record.type === "attributes"
+      && this.hostContextAttribute
+      && root instanceof this.document.defaultView.ShadowRoot
+      && record.target === root.host
+      && record.attributeName === this.hostContextAttribute) {
+      return root.host.getAttribute(this.hostContextAttribute) === this.hostContextOwnedValue;
+    }
+    return [...this.scopes.values()].some((scope) => scope._expectedHostMarkerMutation(record));
+  }
+
   _planMutations(records: readonly MutationRecord[]): Readonly<AutomaticMutationPlan> {
-    this._invalidateStylesheetSourceMutations(records);
-    const plan = planAutomaticMutations(records, {
+    const externalRecords = records.filter((record) => !this._expectedHostMarkerMutation(record));
+    this._invalidateStylesheetSourceMutations(externalRecords);
+    const plan = planAutomaticMutations(externalRecords, {
       candidates: this.attachmentState.candidates,
       characterData: this.observation.state.characterData,
       conservative: this.observation.state.conservative,
@@ -3195,7 +3367,7 @@ class CornerfillAutoController {
       rawStyleSelector: this._hasRawStyleSelector(),
       selectors: () => this._stylesheetSelectors(),
     });
-    const inheritedDirectionChanged = records.some((record) => (
+    const inheritedDirectionChanged = externalRecords.some((record) => (
       record.type === "attributes" && record.attributeName === "dir"
     ));
     if (plan.childListChanged || inheritedDirectionChanged || plan.baseChanged) {
@@ -3388,11 +3560,16 @@ class CornerfillAutoController {
           this.refreshState.candidateRequested = false;
           this.refreshState.attachmentRequested = false;
           this.refreshState.retryFailedRequested = false;
+          const hadHostSelectors = shouldReconcile && this._hasOwnHostSelectors();
           if (shouldDiscover) await this._discoverSources(shouldRetryFailed);
           if (this.destroyed) break;
-          if (shouldReconcile) this._reconcileCandidates();
+          const candidatesChanged = shouldReconcile && this._reconcileCandidates();
           if (this.destroyed) break;
           if (shouldRefresh) await this._refreshAttachments();
+          if (candidatesChanged && this.parentAuto && !this.parentAuto.destroyed
+            && (hadHostSelectors || this._hasOwnHostSelectors())) {
+            await this.parentAuto._requestRefresh({ attachments: true });
+          }
         }
         return this.explain();
       })();
@@ -3478,6 +3655,7 @@ class CornerfillAutoController {
       document: this.document,
       root,
       controller: this.controller,
+      handleRegistry: this.handleRegistry,
       parentAuto: this,
       nativeQualification: this.nativeQualification,
       nonce: options.nonce ?? this.explicitNonce ?? undefined,
@@ -3508,7 +3686,7 @@ class CornerfillAutoController {
   explain(
     element: HTMLElement | null = null,
   ): Readonly<CornerfillAutoExplanation> | Readonly<CornerfillEntryExplanation> | null {
-    if (element) return this.attachmentState.handles.get(element)?.explain() ?? this.controller.explain(element);
+    if (element) return this.attachmentState.handles.get(element)?.explain() ?? null;
     return Object.freeze({
       schema: "cornerfill-auto@1",
       mode: this.native ? "native" : "fallback",
@@ -3557,6 +3735,7 @@ class CornerfillAutoController {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.handleRegistry.scopes.delete(this);
     const errors: unknown[] = [];
     const attempt = (operation: () => void) => {
       try { operation(); } catch (error) { errors.push(error); }
@@ -3577,9 +3756,6 @@ class CornerfillAutoController {
     attempt(() => this.observation.observer?.disconnect());
     this.observation.observer = null;
     attempt(() => this._removeObservationListeners());
-    for (const handle of this.attachmentState.handles.values()) attempt(() => handle.dispose());
-    this.attachmentState.handles.clear();
-    this.attachmentState.handleSignatures.clear();
     this.attachmentState.candidates.clear();
     this.attachmentState.candidateProvenance.clear();
     for (const { companion, cssomHook } of this.sourceState.stylesheets.values()) {
@@ -3598,6 +3774,15 @@ class CornerfillAutoController {
       attempt(() => this._restoreAuthoredInlineShape(element, record));
     }
     this.attachmentState.inline.clear();
+    for (const element of [...this.attachmentState.handles.keys()]) {
+      attempt(() => {
+        const remaining = this._releaseAutomaticClaim(element);
+        if (!remaining) return;
+        for (const claimant of remaining.claimants) {
+          if (!claimant.destroyed) claimant._queueRefresh({ candidates: true, attachments: true });
+        }
+      });
+    }
     attempt(() => this._releaseCarrierRegistration());
     if (this.refreshState.frame !== null) {
       attempt(() => this.document.defaultView.cancelAnimationFrame(this.refreshState.frame!));
@@ -3619,6 +3804,7 @@ class CornerfillAutoController {
       && this.parentAuto.scopes.get(this.root) === this) {
       this.parentAuto.scopes.delete(this.root);
       this.parentAuto._configureObservation();
+      this.parentAuto._queueRefresh({ candidates: true, attachments: true });
     }
     if (this.ownsController) attempt(() => this.controller.destroy());
     if (errors.length > 0) throw new AggregateError(errors, "Cornerfill automatic teardown failed");

@@ -1,4 +1,5 @@
 import { qualifyNativeCornerShape } from "../dist/native.mjs";
+import { COLOR_PROBE_ATTRIBUTE } from "../dist/colors.mjs";
 
 const backend = new URL(location.href).searchParams.get("backend") ?? "static-data-url";
 const results = [];
@@ -937,10 +938,12 @@ await test("automatic teardown releases every resource after one disposer fails"
   const auto = installCornerfillAuto(options({ autoObserve: false }));
   await auto.ready;
   const firstHandle = auto.attachmentState.handles.get(first);
+  const firstRecord = auto.handleRegistry.handles.get(first);
   assert(firstHandle && auto.attachmentState.handles.has(second), "teardown fixture did not attach both elements");
-  auto.attachmentState.handles.set(first, {
+  assert(firstRecord, "teardown fixture did not register the shared automatic handle");
+  firstRecord.handle = {
     dispose() { throw new Error("injected automatic disposer failure"); },
-  });
+  };
   let error = null;
   try { auto.destroy(); } catch (caught) { error = caught; }
   assert(error instanceof AggregateError, "automatic teardown did not aggregate the injected failure");
@@ -1122,27 +1125,81 @@ await test("automatic signatures include text-orientation", async () => {
 
 await test("explicit paint rejects invalid CSS colors before taking ownership", async () => {
   const element = host();
+  element.style.setProperty("--cornerfill-invalid-color", "20px");
   const controller = installCornerfill(options());
   assert(controller.capabilities.implementedPaintPaths.cssLinearGradient === true, "implemented gradient path was not reported");
   assert(controller.capabilities.paintInputConstraints.cssGradientColorParity === false, "gradient color parity was overstated");
   assert(controller.capabilities.paintInputConstraints.rasterUrls === "same-origin-or-cors", "raster URL CORS boundary was omitted");
   assert(controller.capabilities.limitations.gradientColorParity.supported === false, "gradient parity limitation was omitted");
   assert(controller.capabilities.limitations.crossOriginNoCorsRaster.supported === false, "cross-origin raster limitation was omitted");
-  let error = null;
-  try {
-    controller.attach(element, {
-      borderRadius: "5px",
-      cornerShape: "bevel",
-      paint: { kind: "solid", color: "definitely-not-a-color" },
-    });
-  } catch (caught) {
-    error = caught;
+  for (const color of [
+    "definitely-not-a-color",
+    "var(--cornerfill-missing-color)",
+    "var(--cornerfill-invalid-color)",
+    "inherit",
+    "unset",
+    "revert",
+  ]) {
+    let error = null;
+    try {
+      controller.attach(element, {
+        borderRadius: "5px",
+        cornerShape: "bevel",
+        paint: { kind: "solid", color },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert(error instanceof SyntaxError, `invalid explicit color was accepted: ${color}`);
   }
-  assert(error instanceof SyntaxError, "invalid explicit color was accepted");
   assert(controller.stats().entries === 0, "invalid explicit color created a runtime entry");
   assert(!element.hasAttribute("data-cornerfill-owned"), "invalid explicit color took element ownership");
   controller.destroy();
   element.remove();
+});
+
+await test("absolute colors bypass contextual DOM probes", async () => {
+  const absolute = host();
+  const contextual = host();
+  contextual.style.color = "rgb(0, 0, 255)";
+  const observedRecords = [];
+  const observer = new MutationObserver((records) => observedRecords.push(...records));
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  const probeMutated = () => {
+    const records = [...observedRecords.splice(0), ...observer.takeRecords()];
+    return records.some((record) => (
+      [...record.addedNodes, ...record.removedNodes].some((node) => (
+        node instanceof Element && node.hasAttribute(COLOR_PROBE_ATTRIBUTE)
+      ))
+    ));
+  };
+  const controller = installCornerfill(options());
+  const absoluteHandle = controller.attach(absolute, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "rgb(12 34 56)" },
+  });
+  try {
+    await absoluteHandle.ready;
+    assert(!probeMutated(), "absolute color created a contextual DOM probe");
+    const contextualHandle = controller.attach(contextual, {
+      borderRadius: "5px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: "currentColor" },
+    });
+    try {
+      await contextualHandle.ready;
+      assert(probeMutated(), "contextual color did not use the validity probe");
+    } finally {
+      contextualHandle.dispose();
+    }
+  } finally {
+    observer.disconnect();
+    absoluteHandle.dispose();
+    controller.destroy();
+    absolute.remove();
+    contextual.remove();
+  }
 });
 
 await test("automatic state observation refuses shaped backdrop-filter paint", async () => {
@@ -1155,6 +1212,7 @@ await test("automatic state observation refuses shaped backdrop-filter paint", a
   const element = host();
   element.className = "cornerfill-auto-backdrop";
   element.tabIndex = 0;
+  element.style.outline = "none";
   const auto = installCornerfillAuto(options({ autoObserve: true, onError() {} }));
   try {
     await auto.ready;
@@ -1646,6 +1704,11 @@ await test("automatic source budgets fail ownership closed", async () => {
     "maximum compiled selector count of 1",
   );
   await run(
+    ".cornerfill-source-budget{corner-shape:bevel}.cornerfill-source-budget{corner-shape:bevel}",
+    { maxCompiledSelectors: 1 },
+    "maximum compiled selector count of 1",
+  );
+  await run(
     ".unused-selector,.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}",
     { maxCompiledSelectors: 1 },
     "maximum compiled selector count of 1",
@@ -1901,6 +1964,74 @@ await test("automatic imports decode escaped control identifiers", async () => {
     style.remove();
     imported.remove();
     local.remove();
+  }
+});
+
+await test("nested shape supports activate imports and escaped conditions keep strict semantics", async () => {
+  const nestedStyle = document.createElement("style");
+  nestedStyle.textContent = `
+    @import "/bench/imports/nested-support-child.css" supports(((corner-shape: bevel)));
+  `;
+  document.head.append(nestedStyle);
+  const nested = host();
+  nested.className = "cornerfill-nested-support-import";
+  const nestedAuto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await nestedAuto.ready;
+    equal(
+      nestedAuto.explain(nested)?.geometry.shapeParameters,
+      [-1, -1, -1, -1],
+      "nested shape support condition did not activate its import",
+    );
+  } finally {
+    nestedAuto.destroy();
+    nestedStyle.remove();
+    nested.remove();
+  }
+
+  const strictStyle = document.createElement("style");
+  strictStyle.textContent = String.raw`
+    @import "/bench/imports/escaped-strict-child.css" supports(\63orner-shape: bevel);
+  `;
+  document.head.append(strictStyle);
+  const strict = host();
+  strict.className = "cornerfill-escaped-strict-import";
+  const strictAuto = installCornerfillAuto(options({ autoObserve: false, onError() {} }));
+  try {
+    await strictAuto.ready;
+    assert(strictAuto.explain(strict) === null, "escaped shape condition bypassed strict import semantics");
+    assert(
+      strictAuto.explain().errors.some(({ message }) => /also declares?: display/u.test(message)),
+      `escaped strict import was not diagnosed: ${JSON.stringify(strictAuto.explain().errors)}`,
+    );
+  } finally {
+    strictAuto.destroy();
+    strictStyle.remove();
+    strict.remove();
+  }
+});
+
+await test("a browser-invalid bare import does not delay valid local carriers", async () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    @import /cornerfill-invalid-bare.css;
+    .cornerfill-invalid-import-local { corner-shape:bevel }
+  `;
+  document.head.append(style);
+  const element = host();
+  element.className = "cornerfill-invalid-import-local";
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    stylesheetTimeoutMs: 50,
+  }));
+  try {
+    await auto.ready;
+    assert(auto.explain(element)?.status === "active", "invalid import discarded a valid local carrier");
+    assert(auto.explain().errors.length === 0, `invalid import produced diagnostics: ${JSON.stringify(auto.explain().errors)}`);
+  } finally {
+    auto.destroy();
+    style.remove();
+    element.remove();
   }
 });
 
@@ -2363,6 +2494,11 @@ await test("registered shadow scopes discover and observe host selectors", async
       border-radius: 5px;
       background: purple;
     }
+    [data-cornerfill-state-literal=":checked .fake #fake"] {
+      corner-shape: bevel;
+      border-radius: 5px;
+      background: purple;
+    }
   `;
   root.append(style);
   const child = host(root);
@@ -2385,6 +2521,8 @@ await test("registered shadow scopes discover and observe host selectors", async
   malformedContext.className = "cornerfill-shadow-malformed-context";
   const literal = host(root);
   literal.dataset.cornerfillSelectorLiteral = ":host";
+  const stateLiteral = host(root);
+  stateLiteral.dataset.cornerfillStateLiteral = ":checked .fake #fake";
   const nestedShell = host(root);
   const nestedRoot = nestedShell.attachShadow({ mode: "open" });
   const nestedStyle = document.createElement("style");
@@ -2414,7 +2552,17 @@ await test("registered shadow scopes discover and observe host selectors", async
     assert(scope.explain(invalidContext) === null, "invalid complex :host-context() argument became active");
     assert(scope.explain(malformedContext) === null, "malformed :host-context() argument became active");
     equal(scope.explain(literal)?.geometry.shapeParameters, [-1, -1, -1, -1], "host text inside an attribute value was parsed as a pseudo");
+    assert(scope.explain(stateLiteral)?.status === "active", "state text inside an attribute value blocked selector observation");
     assert(nestedScope.explain(nestedContextual)?.status === "active", "nested :host-context() was not discovered");
+    const marker = [...shell.attributes].find(({ name }) => name.startsWith("data-cornerfill-host-context-"));
+    assert(marker?.value, "shadow host-context marker was not installed");
+    const markerValue = marker.value;
+    shell.removeAttribute(marker.name);
+    await waitFor(
+      () => shell.getAttribute(marker.name) === markerValue,
+      "externally removed host-context marker repair",
+    );
+    assert(scope.explain(contextual)?.status === "active", "marker repair lost the contextual attachment");
     theme.classList.remove("cornerfill-shadow-theme");
     await waitFor(() => scope.explain(contextual) === null, ":host-context() ancestor removal");
     await waitFor(() => nestedScope.explain(nestedContextual) === null, "nested :host-context() ancestor removal");
@@ -2428,6 +2576,57 @@ await test("registered shadow scopes discover and observe host selectors", async
     scope.destroy();
     auto.destroy();
     theme.remove();
+  }
+});
+
+await test("document and shadow scopes share one host attachment across cascade changes", async () => {
+  const shell = document.createElement("x-cornerfill-shared-host");
+  shell.setAttribute(
+    "style",
+    "display:block;width:12px;height:10px;border-radius:5px;background:red;corner-shape:bevel",
+  );
+  document.body.append(shell);
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  let scope = null;
+  try {
+    await auto.ready;
+    equal(auto.explain(shell)?.geometry.shapeParameters, [0, 0, 0, 0], "document scope did not attach the host");
+    const root = shell.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = ":host{corner-shape:scoop!important}";
+    root.append(style);
+    scope = auto.registerRoot(root);
+    await scope.ready;
+    equal(scope.explain(shell)?.geometry.shapeParameters, [-1, -1, -1, -1], "shadow scope did not refresh the shared host");
+    equal(auto.explain(shell)?.geometry.shapeParameters, [-1, -1, -1, -1], "document scope retained stale host paint");
+    assert(auto.controller.stats().entries === 1, "scope overlap created duplicate runtime entries");
+
+    style.textContent = ":host{corner-shape:round!important}";
+    await waitFor(
+      () => scope.explain(shell) === null && auto.explain(shell) === null,
+      "shared host round override detachment",
+    );
+    assert(auto.controller.stats().entries === 0, "round override retained the shared runtime entry");
+
+    style.textContent = ":host{corner-shape:scoop!important}";
+    await waitFor(
+      () => scope.explain(shell)?.geometry.shapeParameters.every((value) => value === -1)
+        && auto.explain(shell)?.geometry.shapeParameters.every((value) => value === -1),
+      "shared host fallback reattachment",
+    );
+    assert(auto.controller.stats().entries === 1, "shared fallback reattached more than one runtime entry");
+
+    scope.destroy();
+    scope = null;
+    await waitFor(
+      () => auto.explain(shell)?.geometry.shapeParameters.every((value) => value === 0),
+      "document host recovery after shadow scope teardown",
+    );
+    assert(auto.controller.stats().entries === 1, "shadow teardown disposed the remaining document claim");
+  } finally {
+    scope?.destroy();
+    auto.destroy();
+    shell.remove();
   }
 });
 

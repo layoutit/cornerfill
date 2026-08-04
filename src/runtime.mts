@@ -1032,6 +1032,37 @@ function resolveLayerColors(
   });
 }
 
+function layerColorInputs(layer: Readonly<NormalizedBackgroundLayer>): readonly string[] {
+  return layer.kind === "linear-gradient"
+    || layer.kind === "radial-gradient"
+    || layer.kind === "conic-gradient"
+    ? layer.stops.map(([, color]) => color)
+    : Object.freeze([]);
+}
+
+function paintColorInputs(paint: Readonly<NormalizedPaintDescriptor>): readonly string[] {
+  return Object.freeze([
+    paint.color,
+    ...(paint.kind === "layers"
+      ? paint.layers.flatMap((layer) => layerColorInputs(layer))
+      : paint.kind === "solid" ? [] : layerColorInputs(paint)),
+  ]);
+}
+
+function ownedColorInputs({
+  borderSource,
+  outlineSource,
+  paintSource,
+  shadowSource,
+}: Readonly<CurrentSources>): readonly string[] {
+  return Object.freeze([
+    ...paintColorInputs(paintSource),
+    ...(borderSource ? [borderSource.color] : []),
+    ...(shadowSource ? [shadowSource.color] : []),
+    ...(outlineSource ? [outlineSource.color] : []),
+  ]);
+}
+
 function resolvePaintColors(
   paint: Readonly<NormalizedPaintDescriptor>,
   resolve: ContextualColorResolver,
@@ -2362,15 +2393,18 @@ class CornerfillController {
     entry: DynamicEntry,
     revision: number | null = null,
   ): Promise<Readonly<DynamicSnapshot>> {
-    const authored = this.ownership.withAuthoredComputedStyle(entry, (computed) => Object.freeze({
-      colorContext: captureElementColorContext(computed),
-      computed: Object.freeze({ visibility: computed.visibility }),
-      composition: inspectFallbackHost(entry.element, computed),
-      size: measureBorderBox(entry.element, computed),
-      sources: currentSources(entry, computed),
-      flow: flowFromComputed(computed),
-      boxMetrics: backgroundBoxMetrics(computed),
-    }));
+    const authored = this.ownership.withAuthoredComputedStyle(entry, (computed) => {
+      const sources = currentSources(entry, computed);
+      return Object.freeze({
+        colorContext: captureElementColorContext(computed, ownedColorInputs(sources)),
+        computed: Object.freeze({ visibility: computed.visibility }),
+        composition: inspectFallbackHost(entry.element, computed),
+        size: measureBorderBox(entry.element, computed),
+        sources,
+        flow: flowFromComputed(computed),
+        boxMetrics: backgroundBoxMetrics(computed),
+      });
+    });
     const sources = withElementColorResolver(
       this.view,
       entry.element,
@@ -2994,7 +3028,12 @@ class CornerfillController {
     const { descriptor, border, shadow, outline } = withElementColorResolver(
       this.view,
       entry.element,
-      captureElementColorContext(computed),
+      captureElementColorContext(computed, [
+        ...paintColorInputs(normalizedDescriptor),
+        ...(normalizedBorder ? [normalizedBorder.color] : []),
+        ...(normalizedShadow ? [normalizedShadow.color] : []),
+        ...(normalizedOutline ? [normalizedOutline.color] : []),
+      ]),
       (resolveColor) => Object.freeze({
         descriptor: resolvePaintColors(normalizedDescriptor, resolveColor),
         border: resolveBorderColor(normalizedBorder, resolveColor),
@@ -3461,7 +3500,12 @@ class CornerfillController {
       || normalizedShadow !== undefined || normalizedOutline !== undefined) {
       const colorContext = this.ownership.withAuthoredComputedStyle(
         entry,
-        (computed) => captureElementColorContext(computed),
+        (computed) => captureElementColorContext(computed, [
+          ...(normalizedPaint ? paintColorInputs(normalizedPaint) : []),
+          ...(normalizedBorder ? [normalizedBorder.color] : []),
+          ...(normalizedShadow ? [normalizedShadow.color] : []),
+          ...(normalizedOutline ? [normalizedOutline.color] : []),
+        ]),
       );
       const resolvedOutline = withElementColorResolver(
         this.view,
@@ -3600,7 +3644,12 @@ class CornerfillController {
       withElementColorResolver(
         this.view,
         element,
-        captureElementColorContext(computed),
+        captureElementColorContext(computed, [
+          ...(config.paint !== undefined ? paintColorInputs(initial.paintSource) : []),
+          ...(config.border !== undefined && initial.borderSource ? [initial.borderSource.color] : []),
+          ...(config.shadow !== undefined && initial.shadowSource ? [initial.shadowSource.color] : []),
+          ...(config.outline !== undefined && initial.outlineSource ? [initial.outlineSource.color] : []),
+        ]),
         (resolveColor) => {
           if (config.paint !== undefined) resolvePaintColors(initial.paintSource, resolveColor);
           if (config.border !== undefined) resolveBorderColor(initial.borderSource, resolveColor);
