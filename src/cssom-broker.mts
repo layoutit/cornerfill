@@ -1,4 +1,4 @@
-export type StylesheetMutation = Readonly<
+type StylesheetMutation = Readonly<
   | { readonly index: number; readonly kind: "delete" }
   | { readonly index: number; readonly kind: "insert"; readonly rule: string }
 >;
@@ -37,8 +37,51 @@ function registry(globalObject: typeof globalThis): BrokerRegistry {
   return record[REGISTRY_KEY]!;
 }
 
-function notify<T>(subscribers: ReadonlySet<(value: T) => void>, value: T): void {
-  for (const subscriber of [...subscribers]) subscriber(value);
+function reportSubscriberError(globalObject: typeof globalThis, error: unknown): void {
+  let reported = error;
+  try {
+    if (typeof globalObject.reportError === "function") {
+      globalObject.reportError(error);
+      return;
+    }
+  } catch (reportingError) {
+    reported = new AggregateError([error, reportingError], "Cornerfill CSSOM observer error reporting failed");
+  }
+  globalObject.queueMicrotask(() => { throw reported; });
+}
+
+function notify<T>(
+  globalObject: typeof globalThis,
+  subscribers: ReadonlySet<(value: T) => void>,
+  value: T,
+): void {
+  let errors: unknown[] | null = null;
+  for (const subscriber of [...subscribers]) {
+    try {
+      subscriber(value);
+    } catch (error) {
+      (errors ??= []).push(error);
+    }
+  }
+  if (errors?.length === 1) reportSubscriberError(globalObject, errors[0]);
+  else if (errors) {
+    reportSubscriberError(globalObject, new AggregateError(errors, "Cornerfill CSSOM observers failed"));
+  }
+}
+
+function subscribeUntilEmpty<T>(
+  subscribers: Set<T>,
+  release: () => void,
+  subscriber: T,
+): () => void {
+  subscribers.add(subscriber);
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    subscribers.delete(subscriber);
+    if (subscribers.size === 0) release();
+  };
 }
 
 function restoreProperty(
@@ -71,12 +114,12 @@ export function observeStylesheetMutations(
     const result = arguments.length < 2
       ? Reflect.apply(originalInsert, this, [rule])
       : Reflect.apply(originalInsert, this, [rule, index]);
-    notify(subscribers, Object.freeze({ kind: "insert", rule: String(rule), index: result }));
+    notify(globalObject, subscribers, Object.freeze({ kind: "insert", rule: String(rule), index: result }));
     return result;
   };
   const wrappedDelete = function cornerfillDeleteRule(this: CSSStyleSheet, index: number): void {
     Reflect.apply(originalDelete, this, [index]);
-    notify(subscribers, Object.freeze({ kind: "delete", index }));
+    notify(globalObject, subscribers, Object.freeze({ kind: "delete", index }));
   };
   try {
     Object.defineProperty(sheet, "insertRule", {
@@ -102,19 +145,9 @@ export function observeStylesheetMutations(
     if (sheet.deleteRule === wrappedDelete) restoreProperty(sheet, "deleteRule", deleteDescriptor);
     subscribers.clear();
   };
-  const subscribe = (next: MutationSubscriber) => {
-    subscribers.add(next);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      subscribers.delete(next);
-      if (subscribers.size === 0) release();
-    };
-  };
-  broker = { release, subscribe };
+  broker = { release, subscribe: (next) => subscribeUntilEmpty(subscribers, release, next) };
   brokers.set(sheet, broker);
-  return subscribe(subscriber);
+  return broker.subscribe(subscriber);
 }
 
 function inheritedDescriptor(target: object, property: PropertyKey): PropertyDescriptor | undefined {
@@ -151,9 +184,7 @@ export function observeDisabledState(
   const setDisabled = (value: unknown) => {
     const before = read();
     write(value);
-    if (!Object.is(before, read())) {
-      for (const next of [...subscribers]) next();
-    }
+    if (!Object.is(before, read())) notify<void>(globalObject, subscribers, undefined);
   };
   try {
     Object.defineProperty(target, "disabled", {
@@ -175,17 +206,7 @@ export function observeDisabledState(
     }
     subscribers.clear();
   };
-  const subscribe = (next: StateSubscriber) => {
-    subscribers.add(next);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      subscribers.delete(next);
-      if (subscribers.size === 0) release();
-    };
-  };
-  broker = { release, subscribe };
+  broker = { release, subscribe: (next) => subscribeUntilEmpty(subscribers, release, next) };
   brokers.set(target, broker);
-  return subscribe(subscriber);
+  return broker.subscribe(subscriber);
 }

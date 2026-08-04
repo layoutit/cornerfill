@@ -607,9 +607,14 @@ export interface ComputedPaintCarriers {
   readonly smoothing?: string | undefined;
 }
 
+export interface ComputedPaintCaptureOptions {
+  readonly rasterIsOpaque?: boolean | undefined;
+}
+
 export function captureComputedPaint(
   computedStyle: Readonly<ComputedPaintStyle>,
   carriers: Readonly<ComputedPaintCarriers> = {},
+  options: Readonly<ComputedPaintCaptureOptions> = {},
 ): NormalizedPaintDescriptor {
   const imageLayers = layerList(carriers.image || computedStyle.backgroundImage, "none");
   const sizes = layerList(carriers.size || computedStyle.backgroundSize, "auto");
@@ -636,14 +641,20 @@ export function captureComputedPaint(
       kind: "image",
       url: parseCssUrl(image),
       imageSmoothing: canvasImageSmoothing(carriers.smoothing || computedStyle.imageRendering),
+      ...(options.rasterIsOpaque === true ? { opaque: true } : {}),
       ...common,
     });
   });
+  let descriptor: NormalizedPaintDescriptor;
   if (layers.length === 1 && layers[0]!.kind === "none") {
-    return Object.freeze({ kind: "solid", color, clip: layers[0]!.clip });
+    descriptor = Object.freeze({ kind: "solid", color, clip: layers[0]!.clip });
+  } else if (layers.length === 1) {
+    descriptor = Object.freeze({ ...layers[0]!, color });
+  } else {
+    descriptor = Object.freeze({ kind: "layers", color, layers: Object.freeze(layers) });
   }
-  if (layers.length === 1) return Object.freeze({ ...layers[0]!, color });
-  return Object.freeze({ kind: "layers", color, layers: Object.freeze(layers) });
+  validateNormalizedBlend(descriptor);
+  return descriptor;
 }
 
 function opaqueBlendColor(input: unknown): boolean {
@@ -668,6 +679,22 @@ function opaqueBlendColor(input: unknown): boolean {
   if (alpha === null) return true;
   if (alpha.endsWith("%")) return Number(alpha.slice(0, -1)) === 100;
   return Number(alpha) === 1;
+}
+
+function validateNormalizedBlend(paint: NormalizedPaintDescriptor): void {
+  if (paint.kind === "solid") return;
+  if (paint.kind === "layers") {
+    if (paint.layers.some(({ blendMode }) => blendMode !== "normal")) {
+      throw new TypeError("multiply requires exactly one raster background image");
+    }
+    return;
+  }
+  if (paint.kind === "image" && paint.blendMode === "multiply" && paint.opaque !== true) {
+    throw new TypeError("multiply requires an explicitly opaque raster image");
+  }
+  if (paint.blendMode === "multiply" && !opaqueBlendColor(paint.color)) {
+    throw new TypeError("multiply requires an opaque rgb() or hex background color");
+  }
 }
 
 export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescriptor {
@@ -695,25 +722,20 @@ export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescrip
       throw new TypeError("only normal background layer blending is supported");
     }
     const layers = paint.layers.map((layer) => normalizeLayer(layer));
-    if (layers.some(({ blendMode }) => blendMode !== "normal")) {
-      throw new TypeError("multiply requires exactly one raster background image");
-    }
-    return Object.freeze({
+    const descriptor = Object.freeze({
       kind: "layers",
       color: String(paint.color ?? "transparent"),
       layers: Object.freeze(layers),
       ...(box ? { box } : {}),
     });
+    validateNormalizedBlend(descriptor);
+    return descriptor;
   }
   const layer = normalizeLayer(paint);
   const color = String(paint.color ?? "transparent");
-  if (layer.kind === "image" && layer.blendMode === "multiply" && layer.opaque !== true) {
-    throw new TypeError("multiply requires an explicitly opaque raster image");
-  }
-  if (layer.blendMode === "multiply" && !opaqueBlendColor(color)) {
-    throw new TypeError("multiply requires an opaque rgb() or hex background color");
-  }
-  return Object.freeze({ ...layer, color });
+  const descriptor = Object.freeze({ ...layer, color });
+  validateNormalizedBlend(descriptor);
+  return descriptor;
 }
 
 function resolveSize(

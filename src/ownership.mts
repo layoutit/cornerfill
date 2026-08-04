@@ -165,6 +165,7 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
   private readonly freeRules = new Map<OwnershipRoot, CSSStyleRule[]>();
   private readonly verificationEntries = new Map<Entry, () => boolean>();
   private verification: Promise<Map<Entry, unknown>> | null = null;
+  private cancelVerification: (() => void) | null = null;
   private nextToken = 0;
   private destroyed = false;
 
@@ -289,8 +290,11 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
   }
 
   remove(entry: Entry): void {
-    this.releaseSurfaceRule(entry);
-    this.surfaces.delete(entry);
+    try {
+      this.releaseSurfaceRule(entry);
+    } finally {
+      this.surfaces.delete(entry);
+    }
   }
 
   isApplied(entry: Entry): boolean {
@@ -371,11 +375,21 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
   }
 
   verifyPrepared(entry: Entry, isCurrent: () => boolean): Promise<void> {
+    if (this.destroyed) return Promise.resolve();
     this.verificationEntries.set(entry, isCurrent);
     if (!this.verification) {
       this.verification = new Promise<Map<Entry, unknown>>((resolve) => {
         const failures = new Map<Entry, unknown>();
         let pending = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
+        let settled = false;
+        let timer = 0;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          this.view.clearTimeout(timer);
+          this.cancelVerification = null;
+          resolve(failures);
+        };
         const drain = () => {
           for (const [candidate, current] of this.verificationEntries) {
             pending.set(candidate, Object.freeze({ attempts: 0, current }));
@@ -383,6 +397,7 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
           this.verificationEntries.clear();
         };
         const verify = () => {
+          if (settled) return;
           drain();
           const retry = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
           for (const [candidate, state] of pending) {
@@ -402,16 +417,13 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
           }
           pending = retry;
           if (pending.size === 0) {
-            resolve(failures);
+            finish();
             return;
           }
-          if (typeof this.view.requestAnimationFrame === "function") {
-            this.view.requestAnimationFrame(verify);
-          } else {
-            this.view.setTimeout(verify, 0);
-          }
+          timer = this.view.setTimeout(verify, 16);
         };
-        this.view.setTimeout(verify, 0);
+        this.cancelVerification = finish;
+        timer = this.view.setTimeout(verify, 0);
       }).finally(() => {
         this.verification = null;
       });
@@ -440,6 +452,7 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     this.surfaces.clear();
     this.surfaceRules.clear();
     this.freeRules.clear();
+    this.cancelVerification?.();
     this.verificationEntries.clear();
   }
 }

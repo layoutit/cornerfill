@@ -3,7 +3,13 @@ import {
   parseCornerShapeValue,
   serializeShapeParameter,
 } from "./values.mjs";
-import { decodeCssEscapes } from "./css-syntax.mjs";
+import {
+  decodeCssEscapes,
+  scanCssSyntax,
+  skipCssTrivia,
+  validCssLayerName,
+  wholeCssIdentifier,
+} from "./css-syntax.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
 type RuntimeDocument = Document & Readonly<{ defaultView: RuntimeWindow }>;
@@ -35,6 +41,7 @@ export interface CarrierCompilation {
   readonly imports?: number | undefined;
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
+  readonly parsedRuleCount?: number | undefined;
   readonly selectorRecords: readonly Readonly<SelectorRecord>[];
   readonly selectors: readonly string[];
   readonly sources?: readonly string[] | undefined;
@@ -190,162 +197,9 @@ function isShapeProperty(value: string): value is ShapeProperty {
   return Object.hasOwn(SHAPE_PROPERTIES, value);
 }
 
-function isCssWhitespaceOrComments(value: string): boolean {
-  return value.replaceAll(/\/\*[\s\S]*?\*\//gu, "").trim() === "";
-}
-
-interface CssIdentifierParse {
-  readonly end: number;
-  readonly start: number;
-  readonly value: string;
-}
-
-function cssEscapeEnd(source: string, start: number): number {
-  if (source[start] !== "\\") return -1;
-  const first = source[start + 1];
-  if (!first || /[\n\f\r]/u.test(first)) return -1;
-  if (!/[0-9a-f]/iu.test(first)) return start + 2;
-  let index = start + 1;
-  let digits = 0;
-  while (digits < 6 && /[0-9a-f]/iu.test(source[index] ?? "")) {
-    index += 1;
-    digits += 1;
-  }
-  if (source[index] === "\r" && source[index + 1] === "\n") return index + 2;
-  if (/[\t\n\f\r ]/u.test(source[index] ?? "")) index += 1;
-  return index;
-}
-
-function cssNameStart(character: string): boolean {
-  const codePoint = character.codePointAt(0);
-  return /[a-z_]/iu.test(character) || (codePoint !== undefined && codePoint >= 0x80);
-}
-
-function cssNameCharacter(character: string): boolean {
-  return cssNameStart(character) || /[\d-]/u.test(character);
-}
-
-function consumeCssIdentifier(source: string, start: number): Readonly<CssIdentifierParse> | null {
-  let index = start;
-  const first = source[index] ?? "";
-  if (first === "-") {
-    index += 1;
-    const next = source[index] ?? "";
-    if (next === "\\") {
-      const end = cssEscapeEnd(source, index);
-      if (end < 0) return null;
-      index = end;
-    } else if (next === "-" || cssNameStart(next)) {
-      index += 1;
-    } else {
-      return null;
-    }
-  } else if (first === "\\") {
-    const end = cssEscapeEnd(source, index);
-    if (end < 0) return null;
-    index = end;
-  } else if (cssNameStart(first)) {
-    index += 1;
-  } else {
-    return null;
-  }
-  while (index < source.length) {
-    const character = source[index]!;
-    if (cssNameCharacter(character)) {
-      index += 1;
-      continue;
-    }
-    if (character !== "\\") break;
-    const end = cssEscapeEnd(source, index);
-    if (end < 0) break;
-    index = end;
-  }
-  return Object.freeze({
-    start,
-    end: index,
-    value: decodeCssEscapes(source.slice(start, index)),
-  });
-}
-
-function wholeCssIdentifier(source: string): Readonly<CssIdentifierParse> | null {
-  const start = skipCssTrivia(source, 0);
-  const identifier = consumeCssIdentifier(source, start);
-  return identifier && isCssWhitespaceOrComments(source.slice(identifier.end)) ? identifier : null;
-}
-
-function validLayerName(source: string): boolean {
-  let cursor = 0;
-  let segments = 0;
-  while (cursor < source.length) {
-    cursor = skipCssTrivia(source, cursor);
-    const identifier = consumeCssIdentifier(source, cursor);
-    if (!identifier) return false;
-    segments += 1;
-    cursor = skipCssTrivia(source, identifier.end);
-    if (cursor >= source.length) return segments > 0;
-    if (source[cursor] !== ".") return false;
-    cursor += 1;
-  }
-  return false;
-}
-
 function namedLayerBlockHeader(header: string): boolean {
   const match = /^@layer\s+([\s\S]+?)\s*$/iu.exec(header);
-  return Boolean(match && validLayerName(match[1]!));
-}
-
-type CssTokenVisitor = (
-  index: number,
-  character: string,
-  parentheses: number,
-  brackets: number,
-) => boolean | void;
-
-function scanCssSyntax(source: string, start: number, visit: CssTokenVisitor): void {
-  let quote: string | null = null;
-  let comment = false;
-  let escaped = false;
-  let parentheses = 0;
-  let brackets = 0;
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index]!;
-    const next = source[index + 1];
-    if (comment) {
-      if (character === "*" && next === "/") {
-        comment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (character === "/" && next === "*") {
-      comment = true;
-      index += 1;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (visit(index, character, parentheses, brackets) === false) return;
-    if (character === "(") parentheses += 1;
-    else if (character === ")") parentheses = Math.max(0, parentheses - 1);
-    else if (character === "[") brackets += 1;
-    else if (character === "]") brackets = Math.max(0, brackets - 1);
-  }
+  return Boolean(match && validCssLayerName(match[1]!));
 }
 
 function declarationEnd(source: string, start: number): number {
@@ -360,8 +214,20 @@ function declarationEnd(source: string, start: number): number {
   return end;
 }
 
+function customPropertyEnd(source: string, start: number): number {
+  let end = source.length;
+  scanCssSyntax(source, start, (index, character, parentheses, brackets, blocks) => {
+    if (parentheses !== 0 || brackets !== 0 || blocks !== 0) return;
+    if (character === ";" || character === "}") {
+      end = index;
+      return false;
+    }
+  });
+  return end;
+}
+
 function declarationValue(raw: string): Readonly<{ priority: string; value: string }> {
-  const normalized = raw.replaceAll(/\/\*[\s\S]*?\*\//gu, " ").trim();
+  const normalized = raw.replaceAll(/\/\*[\s\S]*?(?:\*\/|$)/gu, " ").trim();
   const important = /!\s*important\s*$/iu.test(normalized);
   return Object.freeze({
     value: normalized.replace(/!\s*important\s*$/iu, "").trim(),
@@ -484,8 +350,7 @@ export function canonicalizeCornerShapeDeclarations(
   const replacements: TextReplacement[] = [];
   let statementStart = 0;
   let skipThrough = -1;
-  let blocks = 0;
-  scanCssSyntax(source, 0, (index, character, parentheses, brackets) => {
+  scanCssSyntax(source, 0, (index, character, parentheses, brackets, blocks) => {
     if (index <= skipThrough) return;
     if (parentheses !== 0 || brackets !== 0) return;
     if (character === ":" && (context === "declarations" || blocks > 0)) {
@@ -493,6 +358,10 @@ export function canonicalizeCornerShapeDeclarations(
       const identifier = wholeCssIdentifier(statement);
       if (!identifier) return;
       const property = identifier.value.toLowerCase();
+      if (property.startsWith("--")) {
+        skipThrough = customPropertyEnd(source, index + 1) - 1;
+        return;
+      }
       if (!isShapeProperty(property) && property !== "all") return;
       const end = declarationEnd(source, index + 1);
       if (end < 0) return;
@@ -516,8 +385,6 @@ export function canonicalizeCornerShapeDeclarations(
       skipThrough = end - 1;
       return;
     }
-    if (character === "{") blocks += 1;
-    else if (character === "}") blocks = Math.max(0, blocks - 1);
     if (character === ";" || character === "{" || character === "}") statementStart = index + 1;
   });
 
@@ -896,6 +763,7 @@ export function parseCarrierSheet(
       selectorRecords: Object.freeze(selectorRecords),
       observation,
       mediaQueries: Object.freeze([...mediaQueries].filter(Boolean).sort()),
+      parsedRuleCount: sheet?.cssRules.length ?? 0,
     });
   } finally {
     parserStyle?.remove();
@@ -913,22 +781,6 @@ function cssStatementEnd(source: string, start: number): number {
     if (character === "{") return false;
   });
   return end;
-}
-
-function skipCssTrivia(source: string, start: number): number {
-  let index = start;
-  while (index < source.length) {
-    if (/\s/u.test(source[index]!)) {
-      index += 1;
-      continue;
-    }
-    if (source[index] === "/" && source[index + 1] === "*") {
-      const end = source.indexOf("*/", index + 2);
-      return end < 0 ? source.length : skipCssTrivia(source, end + 2);
-    }
-    break;
-  }
-  return index;
 }
 
 export function leadingImportStatements(
@@ -1019,7 +871,7 @@ export function parseImportStatement(statement: string, baseUrl: string): Readon
   if (/^layer\b/iu.test(rest)) {
     const layerFunction = consumeImportFunction(rest, "layer");
     if (!layerFunction) throw new SyntaxError("Automatic CSS refuses anonymous @import layers");
-    if (!validLayerName(layerFunction.value)) {
+    if (!validCssLayerName(layerFunction.value)) {
       throw new SyntaxError(`Automatic CSS cannot preserve @import layer name: ${layerFunction.value}`);
     }
     layer = layerFunction.value;
@@ -1113,25 +965,56 @@ export function mutateStylesheetModel(
   mutation: Readonly<CssomMutation>,
   nonce: string | null = null,
 ): string {
+  const insertedRule = mutation.kind === "insert"
+    ? canonicalizeCornerShapeDeclarations(mutation.rule)
+    : "";
+  let placeholderIndex = 0;
+  let placeholderPrefix = "cornerfill-cssom-import";
+  while (source.includes(placeholderPrefix) || insertedRule.includes(placeholderPrefix)) {
+    placeholderPrefix += "-x";
+  }
+  const imports = new Map<string, string>();
+  const placeholder = (statement: string) => {
+    const rule = `@layer ${placeholderPrefix}-${placeholderIndex};`;
+    placeholderIndex += 1;
+    imports.set(rule, statement);
+    return rule;
+  };
+  const split = leadingImportStatements(source);
+  let parserSource = source;
+  for (const record of [...split.imports].reverse()) {
+    parserSource = parserSource.slice(0, record.start)
+      + placeholder(record.prelude)
+      + parserSource.slice(record.end);
+  }
+  let parserRule = insertedRule;
+  if (mutation.kind === "insert") {
+    const inserted = leadingImportStatements(insertedRule);
+    if (inserted.imports.length === 1 && inserted.local.trim() === "") {
+      parserRule = placeholder(inserted.imports[0]!.prelude);
+    }
+  }
   let sheet: CSSStyleSheet | null;
   let parserStyle: HTMLStyleElement | null = null;
   try {
     sheet = new document.defaultView.CSSStyleSheet();
-    sheet.replaceSync(source);
+    sheet.replaceSync(parserSource);
   } catch {
     parserStyle = document.createElement("style");
     parserStyle.media = "not all";
     if (nonce) parserStyle.setAttribute("nonce", nonce);
-    parserStyle.textContent = source;
+    parserStyle.textContent = parserSource;
     (document.head ?? document.documentElement).append(parserStyle);
     sheet = parserStyle.sheet;
   }
   try {
     if (!sheet) throw new Error("temporary CSS parser did not expose a stylesheet");
     if (mutation.kind === "insert") {
-      sheet.insertRule(canonicalizeCornerShapeDeclarations(mutation.rule), mutation.index);
+      sheet.insertRule(parserRule, mutation.index);
     } else sheet.deleteRule(mutation.index);
-    return [...(sheet.cssRules ?? [])].map((rule) => rule.cssText).join("\n");
+    return [...(sheet.cssRules ?? [])]
+      .map((rule) => imports.get(rule.cssText) ?? rule.cssText)
+      .join("\n");
   } finally {
     parserStyle?.remove();
   }

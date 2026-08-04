@@ -259,3 +259,23 @@ test("purpose-specific inset contours honor unequal side insets", () => {
   for (let inset = 1; inset <= 16; inset += 1) insetCornerGeometry(roundGeometry, inset);
   assert.notEqual(insetCornerGeometry(roundGeometry, [5, 10, 15, 20]), round);
 });
+
+test("inset scoop follows the enlarged axis-aligned ellipse", () => {
+  const geometry = buildCornerGeometry({
+    width: 230,
+    height: 170,
+    borderRadius: [
+      { rx: 58, ry: 44 },
+      { rx: 34, ry: 58 },
+      { rx: 52, ry: 28 },
+      { rx: 24, ry: 46 },
+    ],
+    cornerShape: [2, 0, -1, 1],
+  });
+  const inset = insetCornerGeometry(geometry, [10, 14, 16, 8]);
+  const curve = inset.contour.filter(([x, y]) => x > 160 && x < 216 && y > 120 && y < 154);
+  assert.ok(curve.length > 2);
+  for (const [x, y] of curve) {
+    close(((x - 230) / 68) ** 2 + ((y - 170) / 42) ** 2, 1, 1e-9);
+  }
+});

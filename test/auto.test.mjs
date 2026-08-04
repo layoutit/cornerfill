@@ -14,10 +14,12 @@ test("automatic readiness performs one candidate pass without a deferred source-
       isConnected,
       localName: "style",
       media: "",
+      parentNode: isConnected ? null : undefined,
       sheet,
       textContent: "",
       getAttribute: (name) => attributes.get(name) ?? null,
-      remove() { this.isConnected = false; },
+      getRootNode() { return this.isConnected ? document : this; },
+      remove() { this.isConnected = false; this.parentNode = null; },
       removeAttribute: (name) => attributes.delete(name),
       setAttribute: (name, value) => attributes.set(name, String(value)),
     };
@@ -26,7 +28,7 @@ test("automatic readiness performs one candidate pass without a deferred source-
   const frames = new Map();
   let nextFrame = 1;
   const head = {
-    append(node) { node.isConnected = true; },
+    append(node) { node.isConnected = true; node.parentNode = this; },
   };
   const view = {
     CSSStyleSheet,

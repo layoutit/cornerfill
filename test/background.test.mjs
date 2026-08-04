@@ -246,7 +246,7 @@ test("linear, radial, and conic layers retain CSS order and per-layer geometry",
     /multiply requires/u,
   );
 
-  const multiply = captureComputedPaint({
+  const multiplyStyle = {
     backgroundImage: "url(tiles.png)",
     backgroundColor: "rgb(40, 80, 120)",
     backgroundSize: "20px 10px",
@@ -256,13 +256,15 @@ test("linear, radial, and conic layers retain CSS order and per-layer geometry",
     backgroundClip: "border-box",
     backgroundBlendMode: "multiply",
     backgroundAttachment: "scroll",
-  });
-  assert.equal(multiply.blendMode, "multiply");
-  assert.equal(normalizePaintDescriptor({ ...multiply, opaque: true }).blendMode, "multiply");
+  };
   assert.throws(
-    () => normalizePaintDescriptor(multiply),
+    () => captureComputedPaint(multiplyStyle),
     /explicitly opaque raster/u,
   );
+  const multiply = captureComputedPaint(multiplyStyle, {}, { rasterIsOpaque: true });
+  assert.equal(multiply.blendMode, "multiply");
+  assert.equal(multiply.opaque, true);
+  assert.equal(normalizePaintDescriptor(multiply).blendMode, "multiply");
   assert.throws(
     () => normalizePaintDescriptor({
       ...multiply,

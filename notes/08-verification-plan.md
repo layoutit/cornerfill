@@ -277,19 +277,34 @@ one dynamic repaint in Playwright's WebKit and Firefox engine builds under
 [evidence record](evidence/README.md). That artifact remains transport evidence,
 not released-Safari or pixel-parity qualification.
 
+Installed Firefox Stable 153.0.1 (build `20260727124451`) was also exercised
+directly through WebDriver BiDi in a fresh isolated profile. Solid bevel,
+round, general superellipse, compound-3D-transform, and real texel-crop cases
+all selected `-moz-element()`. The transform caused zero paints, style and
+resize caused one paint each, the texel update reused its surface and decoded
+image, and every case disposed to zero entries. This qualifies the released
+Firefox fallback transport and lifecycle on that product build, not native
+pixel parity. After compositing the Playwright Firefox RGBA captures over white,
+all five installed-product screenshots matched them at exact zero changed
+pixels; no tolerance was introduced.
+
 The executable oracle now uses the production parser, painter, surfaces,
 scheduler, prepared path, and teardown. Native Chrome A/A calibration is exact;
 native-to-candidate comparisons remain `UNQUALIFIED` because no tolerance is
 approved. Current focused evidence includes:
 
-- `gradient-layers`: 39.4639% changed pixels, demonstrating that the Canvas
-  gradient path is not qualified CSS-default color parity;
-- `raster-repeat-origin`: 4.8750% changed pixels, so the advertised raster
+- `border-shaped-unequal`: 0.579–0.649% changed pixels after correcting the
+  inset-scoop ellipse; the former interior contour error is gone, but the case
+  remains unqualified;
+- `gradient-layers`: 39.649–39.704% changed pixels across the three candidate
+  backends, demonstrating that the Canvas gradient path is not qualified
+  CSS-default color parity;
+- `raster-repeat-origin`: 4.854–4.856% changed pixels, so the advertised raster
   repeat/origin geometry is implemented but native-versus-Canvas resampling
-  remains unqualified; its interior alpha error is zero;
-- `background-blend-multiply`: exact zero changed pixels for one opaque raster
-  over one opaque color, retained as `UNQUALIFIED` because no candidate tolerance
-  has been approved;
+  drift is admitted and remains unqualified; its interior alpha error is zero;
+- `background-blend-multiply`: exact in WebKit and 0.267% changed boundary
+  pixels in Chromium/Firefox for one opaque raster over one opaque color,
+  retained as `UNQUALIFIED` because no candidate tolerance has been approved;
 - contained inset-shadow and outline fixtures, with external outsets explicitly
   unsupported.
 
@@ -297,5 +312,5 @@ The [complete Firefox Mario stress run](evidence/firefox-mario-stress.md)
 executes 1,213 retained leaves over all 820 source ticks in eight fresh sessions,
 with identical workload streams, measured Cornerfill paints, and teardown
 records. It proves workload integration/lifecycle equivalence only. It does not
-approve native visual tolerance, and its roughly 22 source FPS / 67 ms display
+approve native visual tolerance, and its roughly 25 source FPS / 50 ms display
 p95 is not a 30/60 performance claim.

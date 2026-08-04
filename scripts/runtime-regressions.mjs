@@ -87,6 +87,17 @@ function within(root, path) {
 async function startServer() {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/bench/imports/delayed-runtime.css") {
+      const css = url.searchParams.get("css") ?? "";
+      const browserStyleRequest = request.headers["sec-fetch-dest"] === "style"
+        || request.headers["sec-fetch-mode"] === "no-cors";
+      const delay = browserStyleRequest ? Number(url.searchParams.get("delay") ?? 0) : 0;
+      setTimeout(() => {
+        response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+        response.end(css);
+      }, Number.isFinite(delay) && delay > 0 ? delay : 0);
+      return;
+    }
     const path = resolve(PROJECT_ROOT, decodeURIComponent(url.pathname.slice(1)));
     if (!within(PROJECT_ROOT, path) || !existsSync(path) || !statSync(path).isFile()) {
       response.writeHead(404);

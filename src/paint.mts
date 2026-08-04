@@ -13,6 +13,9 @@ import type {
 import type { Four } from "./values.mjs";
 
 const CORNERFILL_PAINTER_SCHEMA = "cornerfill-production-painter@1";
+const INTERIOR_TOPOLOGY_PROBE_RATIO = 1e-5;
+const ZERO_INSETS = Object.freeze([0, 0, 0, 0]) as Four<number>;
+const validatedOuterTopologies = new WeakSet<CornerGeometry>();
 
 const ZERO_ALPHA = String.raw`(?:0+(?:\.0*)?|\.0+)(?:e[+-]?\d+)?%?`;
 const ZERO_SLASH_ALPHA = new RegExp(`/\\s*${ZERO_ALPHA}\\s*\\)$`, "iu");
@@ -299,10 +302,13 @@ function appendClosedPoints(
 
 function clearSurface(context: CanvasRenderingContext2D, width: number, height: number, dpr: number): void {
   context.save();
-  context.setTransform(1, 0, 0, 1, 0, 0);
-  context.globalCompositeOperation = "source-over";
-  context.clearRect(0, 0, Math.ceil(width * dpr), Math.ceil(height * dpr));
-  context.restore();
+  try {
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.globalCompositeOperation = "source-over";
+    context.clearRect(0, 0, Math.ceil(width * dpr), Math.ceil(height * dpr));
+  } finally {
+    context.restore();
+  }
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.globalCompositeOperation = "source-over";
 }
@@ -531,18 +537,21 @@ function paintRadialGradientTile(
   const effectiveRadiusX = radiusX === 0 ? 1e-4 : radiusX;
   const effectiveRadiusY = radiusY === 0 ? 1e-4 : radiusY;
   context.save();
-  context.translate(centerX, centerY);
-  context.scale(1, effectiveRadiusY / effectiveRadiusX);
-  const gradient = context.createRadialGradient(0, 0, 0, 0, 0, effectiveRadiusX);
-  addGradientStops(gradient, paint.stops);
-  context.fillStyle = gradient;
-  context.fillRect(
-    x - centerX,
-    (y - centerY) * effectiveRadiusX / effectiveRadiusY,
-    width,
-    height * effectiveRadiusX / effectiveRadiusY,
-  );
-  context.restore();
+  try {
+    context.translate(centerX, centerY);
+    context.scale(1, effectiveRadiusY / effectiveRadiusX);
+    const gradient = context.createRadialGradient(0, 0, 0, 0, 0, effectiveRadiusX);
+    addGradientStops(gradient, paint.stops);
+    context.fillStyle = gradient;
+    context.fillRect(
+      x - centerX,
+      (y - centerY) * effectiveRadiusX / effectiveRadiusY,
+      width,
+      height * effectiveRadiusX / effectiveRadiusY,
+    );
+  } finally {
+    context.restore();
+  }
 }
 
 function paintConicGradientTile(
@@ -733,13 +742,12 @@ export function drawPreparedOpaqueImage(
   positionY: number,
 ): void {
   validatePreparedOpaqueImagePosition(program, positionX, positionY);
-  const rect = preparedImageRect(program, positionX, positionY);
   context.drawImage(
     program.image,
-    rect.sourceX,
-    rect.sourceY,
-    rect.sourceWidth,
-    rect.sourceHeight,
+    positionX === 0 ? 0 : -positionX * program.sourceScaleX,
+    positionY === 0 ? 0 : -positionY * program.sourceScaleY,
+    program.sourceWidth,
+    program.sourceHeight,
     0,
     0,
     program.width,
@@ -790,16 +798,19 @@ export function repaintOpaqueCornerfill(context: CanvasRenderingContext2D, {
   if (border || shadow || outline
     || !isPreparedOpaqueImageEligible(paint, geometry.width, geometry.height)) return null;
   context.save();
-  context.setTransform(dpr, 0, 0, dpr, 0, 0);
-  context.globalCompositeOperation = "source-in";
-  const layer = paintOwnedLayer(context, paint, geometry.width, geometry.height);
-  context.restore();
-  return Object.freeze({
-    painter: CORNERFILL_PAINTER_SCHEMA,
-    layer,
-    border: null,
-    update: "opaque-source-in",
-  });
+  try {
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.globalCompositeOperation = "source-in";
+    const layer = paintOwnedLayer(context, paint, geometry.width, geometry.height);
+    return Object.freeze({
+      painter: CORNERFILL_PAINTER_SCHEMA,
+      layer,
+      border: null,
+      update: "opaque-source-in",
+    });
+  } finally {
+    context.restore();
+  }
 }
 
 function subtractCarveOuts(
@@ -807,13 +818,16 @@ function subtractCarveOuts(
   carveOuts: readonly (readonly Point[])[],
 ): void {
   context.save();
-  context.globalCompositeOperation = "destination-out";
-  context.fillStyle = "#000";
-  for (const carveOut of carveOuts) {
-    traceClosedPoints(context, carveOut);
-    context.fill();
+  try {
+    context.globalCompositeOperation = "destination-out";
+    context.fillStyle = "#000";
+    for (const carveOut of carveOuts) {
+      traceClosedPoints(context, carveOut);
+      context.fill();
+    }
+  } finally {
+    context.restore();
   }
-  context.restore();
 }
 
 function supportedBorder(
@@ -837,7 +851,17 @@ function supportedBorder(
 }
 
 function contourAtInsets(geometry: CornerGeometry, insets: Four<number>): readonly Point[] {
-  if (insets.every((value) => value === 0)) return geometry.contour;
+  if (insets.every((value) => value === 0)) {
+    if (!Object.isFrozen(geometry) || !validatedOuterTopologies.has(geometry)) {
+      // Reject contours that only avoid an interior crossing at their exact outer boundary.
+      const interiorProbe = Math.min(geometry.width, geometry.height) * INTERIOR_TOPOLOGY_PROBE_RATIO;
+      if (interiorProbe > 0) {
+        insetCornerGeometry(geometry, [interiorProbe, interiorProbe, interiorProbe, interiorProbe]);
+      }
+      if (Object.isFrozen(geometry)) validatedOuterTopologies.add(geometry);
+    }
+    return geometry.contour;
+  }
   const inset = insetCornerGeometry(geometry, insets);
   if (inset.contour.length < 2 || inset.targetRect.width <= 0 || inset.targetRect.height <= 0) return [];
   return inset.contour;
@@ -851,12 +875,15 @@ function paintContourRing(
 ): boolean {
   if (outerContour.length < 2) return false;
   context.save();
-  context.beginPath();
-  appendClosedPoints(context, outerContour);
-  if (innerContour.length > 1) appendClosedPoints(context, innerContour);
-  context.fillStyle = color;
-  context.fill("evenodd");
-  context.restore();
+  try {
+    context.beginPath();
+    appendClosedPoints(context, outerContour);
+    if (innerContour.length > 1) appendClosedPoints(context, innerContour);
+    context.fillStyle = color;
+    context.fill("evenodd");
+  } finally {
+    context.restore();
+  }
   return true;
 }
 
@@ -958,6 +985,7 @@ export function validateCornerfillTopology({
   outline = null,
 }: Readonly<CornerfillPaintOptions>): void {
   if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
+  contourAtInsets(geometry, ZERO_INSETS);
   const ownedBorder = supportedBorder(border);
   if (ownedBorder) contourAtInsets(geometry, ownedBorder.widths);
   if (paint.kind === "layers") {
@@ -996,12 +1024,14 @@ function paintBackground(
     clipArea: Readonly<BackgroundArea> | null | undefined,
   ): ClippedOwnedLayerPaintResult => {
     context.save();
-    const visible = clipToBackgroundArea(context, geometry, clipArea);
-    const result = visible
-      ? paintOwnedLayer(context, layer, geometry.width, geometry.height)
-      : Object.freeze({ kind: layer.kind, emptyClip: true });
-    context.restore();
-    return result;
+    try {
+      const visible = clipToBackgroundArea(context, geometry, clipArea);
+      return visible
+        ? paintOwnedLayer(context, layer, geometry.width, geometry.height)
+        : Object.freeze({ kind: layer.kind, emptyClip: true });
+    } finally {
+      context.restore();
+    }
   };
   const transparent = (color: string | undefined): boolean => !color
     || isFullyTransparentCssColor(color);

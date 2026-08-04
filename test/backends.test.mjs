@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSurface, getSurfaceResourceStats } from "../dist/backends.mjs";
 
-function webkitDocument() {
+function webkitDocument({ releaseClearThrows = false } = {}) {
   const contexts = new Map();
   const calls = [];
+  const state = { restores: 0, saves: 0 };
   return {
     calls,
+    state,
     defaultView: {
       devicePixelRatio: 1,
       CSS: { supports: () => false },
@@ -15,10 +17,14 @@ function webkitDocument() {
       calls.push({ id, width, height });
       const context = {
         canvas: { width, height },
-        save() {},
-        restore() {},
+        save() { state.saves += 1; },
+        restore() { state.restores += 1; },
         setTransform() {},
-        clearRect() {},
+        clearRect() {
+          if (releaseClearThrows && width === 1 && height === 1) {
+            throw new Error("injected WebKit release clear failure");
+          }
+        },
       };
       contexts.set(id, context);
       return context;
@@ -60,6 +66,29 @@ test("disposed WebKit named canvas identifiers are reused per document and prefi
     backingWidth: 20,
     backingHeight: 5,
   });
+  second.dispose();
+});
+
+test("failed WebKit release restores Canvas state before pooling its identifier", () => {
+  const document = webkitDocument({ releaseClearThrows: true });
+  const first = createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 10,
+    cssHeight: 10,
+    idPrefix: "failed-release-proof",
+  });
+  const id = first.id;
+  first.dispose();
+  assert.equal(document.state.saves, 1);
+  assert.equal(document.state.restores, 1);
+  assert.equal(getSurfaceResourceStats(document).webkit.shrinkFailures, 1);
+  const second = createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 5,
+    cssHeight: 5,
+    idPrefix: "failed-release-proof",
+  });
+  assert.equal(second.id, id);
   second.dispose();
 });
 

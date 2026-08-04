@@ -5,6 +5,10 @@ import {
   canRefreshDynamicPaint,
   captureBackgroundPosition,
 } from "../dist/style.mjs";
+import {
+  observeDisabledState,
+  observeStylesheetMutations,
+} from "../dist/cssom-broker.mjs";
 
 const qualifiedNative = Object.freeze({ qualified: true });
 
@@ -199,7 +203,7 @@ test("removing observed inline position axes restores the authored computed posi
     },
   };
   const entry = {
-    dynamicBackgroundPositionSpec: parseBackgroundPosition("-64px -48px"),
+    backgroundPositionSpec: parseBackgroundPosition("-64px -48px"),
     element,
     initial: {
       dynamic: { paintPosition: true },
@@ -219,8 +223,8 @@ test("removing observed inline position axes restores the authored computed posi
       attributes.set("data-cornerfill-owned-border", "owner-1");
     }
   }), true);
-  assert.equal(entry.dynamicBackgroundPositionSpec.x.source, "13px");
-  assert.equal(entry.dynamicBackgroundPositionSpec.y.source, "17px");
+  assert.equal(entry.backgroundPositionSpec.x.source, "13px");
+  assert.equal(entry.backgroundPositionSpec.y.source, "17px");
   assert.equal(attributes.get("data-cornerfill-owned"), "owner-1");
   assert.equal(attributes.get("data-cornerfill-owned-border"), "owner-1");
 });
@@ -240,4 +244,54 @@ test("an observed position-only mutation uses the paint-only refresh path", () =
     paintPosition: true,
     reason: "background-position",
   }), false);
+});
+
+test("CSSOM mutation brokers notify every controller before surfacing an error", () => {
+  const sheet = {
+    rules: [],
+    insertRule(rule, index = this.rules.length) {
+      this.rules.splice(index, 0, rule);
+      return index;
+    },
+    deleteRule(index) {
+      this.rules.splice(index, 1);
+    },
+  };
+  const originalInsertRule = sheet.insertRule;
+  const calls = [];
+  const reported = [];
+  const brokerGlobal = { reportError(error) { reported.push(error); } };
+  const releaseFirst = observeStylesheetMutations(brokerGlobal, sheet, () => {
+    calls.push("first");
+    throw undefined;
+  });
+  const releaseSecond = observeStylesheetMutations(brokerGlobal, sheet, () => {
+    calls.push("second");
+  });
+  assert.equal(sheet.insertRule(".fixture{}"), 0);
+  assert.deepEqual(calls, ["first", "second"]);
+  assert.deepEqual(reported, [undefined]);
+  releaseFirst();
+  releaseSecond();
+  assert.equal(sheet.insertRule, originalInsertRule);
+});
+
+test("disabled-state brokers notify every controller before surfacing an error", () => {
+  const target = { disabled: false };
+  const calls = [];
+  const reported = [];
+  const brokerGlobal = { reportError(error) { reported.push(error); } };
+  const releaseFirst = observeDisabledState(brokerGlobal, target, () => {
+    calls.push("first");
+    throw new Error("first controller failed");
+  });
+  const releaseSecond = observeDisabledState(brokerGlobal, target, () => {
+    calls.push("second");
+  });
+  target.disabled = true;
+  assert.equal(target.disabled, true);
+  assert.deepEqual(calls, ["first", "second"]);
+  assert.match(reported[0].message, /first controller failed/u);
+  releaseFirst();
+  releaseSecond();
 });

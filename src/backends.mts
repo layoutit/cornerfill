@@ -298,9 +298,12 @@ function createWebkitSurface(
         const releaseContext = document.getCSSCanvasContext!("2d", id, 1, 1);
         if (releaseContext) {
           releaseContext.save();
-          releaseContext.setTransform(1, 0, 0, 1, 0, 0);
-          releaseContext.clearRect(0, 0, 1, 1);
-          releaseContext.restore();
+          try {
+            releaseContext.setTransform(1, 0, 0, 1, 0, 0);
+            releaseContext.clearRect(0, 0, 1, 1);
+          } finally {
+            releaseContext.restore();
+          }
           shrunk = !releaseContext.canvas
             || (releaseContext.canvas.width === 1 && releaseContext.canvas.height === 1);
         }

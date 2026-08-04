@@ -62,6 +62,7 @@ function parseArguments(argv) {
   const command = argv.shift();
   if (!command || command === "--help" || command === "-h") return { command: "help" };
   if (!new Set(["list", "run"]).has(command)) throw new Error(`unknown command: ${command}`);
+  let casesSpecified = false;
   const values = {
     command,
     browsers: ["chrome"],
@@ -76,6 +77,7 @@ function parseArguments(argv) {
     if (argument.startsWith("--browsers=")) {
       values.browsers = argument.slice("--browsers=".length).split(",").filter(Boolean);
     } else if (argument.startsWith("--cases=")) {
+      casesSpecified = true;
       values.cases = argument.slice("--cases=".length).split(",").filter(Boolean);
     } else if (argument.startsWith("--out=")) {
       values.out = resolve(argument.slice("--out=".length));
@@ -84,6 +86,9 @@ function parseArguments(argv) {
     } else if (argument === "--enforce-candidate") values.enforceCandidate = true;
     else if (argument === "--help" || argument === "-h") return { command: "help" };
     else throw new Error(`unknown option: ${argument}`);
+  }
+  if (!casesSpecified && values.marioTexels) {
+    values.cases = oracleCases.map(({ id }) => id);
   }
   if (values.browsers.length === 0 || new Set(values.browsers).size !== values.browsers.length) {
     throw new Error("browser list must be non-empty and unique");
@@ -549,11 +554,16 @@ async function runOracle(options) {
   if (options.enforceCandidate && candidateReports.length === 0) {
     throw new Error("--enforce-candidate produced no native-to-candidate comparisons");
   }
-  manifest.status = reports.some((report) => report.label.includes("A/A") && report.status !== "PASS")
+  const invalidCalibration = reports.some((report) => (
+    report.label.includes("A/A") && report.status !== "PASS"
+  ));
+  manifest.status = invalidCalibration
     ? "INVALID_CALIBRATION"
     : options.enforceCandidate && candidateReports.some((report) => report.status !== "PASS")
       ? "CANDIDATE_FAILED"
-      : "COMPLETE";
+      : candidateReports.some((report) => report.status === "UNQUALIFIED")
+        ? "CAPTURE_COMPLETE_UNQUALIFIED"
+        : "COMPLETE";
   manifest.completedAt = new Date().toISOString();
   manifest.reports = reports.map((report) => Object.freeze({
     label: report.label,
@@ -564,7 +574,9 @@ async function runOracle(options) {
   writeFileSync(join(runDirectory, "README.md"), runSummary({ runDirectory, manifest, reports }));
   console.log(`oracle run: ${manifest.status}`);
   console.log(`evidence: ${runDirectory}`);
-  if (manifest.status !== "COMPLETE") process.exitCode = 1;
+  if (!new Set(["COMPLETE", "CAPTURE_COMPLETE_UNQUALIFIED"]).has(manifest.status)) {
+    process.exitCode = 1;
+  }
 }
 
 function listCases() {

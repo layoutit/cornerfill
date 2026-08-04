@@ -17,7 +17,7 @@ import type {
 
 type UnknownRecord = Record<string, unknown>;
 type Radius = Readonly<ResolvedCornerRadius>;
-export type PhysicalRadiusValues = NonNullable<BorderRadiusDeclarations["physical"]>;
+type PhysicalRadiusValues = NonNullable<BorderRadiusDeclarations["physical"]>;
 type PhysicalShapeValues = NonNullable<CornerShapeDeclarations["physical"]>;
 export type RadiusSource =
   | string
@@ -26,7 +26,7 @@ export type RadiusSource =
   | Readonly<{ kind: "longhands"; values: Four<string> }>;
 
 interface BackgroundPositionEntry {
-  dynamicBackgroundPositionSpec: BackgroundPositionSpec | null;
+  backgroundPositionSpec: BackgroundPositionSpec | null;
   readonly element: ElementCSSInlineStyle;
   readonly initial: Readonly<{
     readonly dynamic: Readonly<{ paintPosition: boolean }>;
@@ -86,21 +86,21 @@ export const RADIUS_LONGHANDS = Object.freeze([
   "border-bottom-left-radius",
 ]);
 
-export const LOGICAL_RADIUS_LONGHANDS = Object.freeze([
+const LOGICAL_RADIUS_LONGHANDS = Object.freeze([
   "border-start-start-radius",
   "border-start-end-radius",
   "border-end-end-radius",
   "border-end-start-radius",
 ]);
 
-export const PHYSICAL_SHAPE_LONGHANDS = Object.freeze([
+const PHYSICAL_SHAPE_LONGHANDS = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
   "corner-bottom-right-shape",
   "corner-bottom-left-shape",
 ]);
 
-export const LOGICAL_SHAPE_LONGHANDS = Object.freeze([
+const LOGICAL_SHAPE_LONGHANDS = Object.freeze([
   "corner-start-start-shape",
   "corner-start-end-shape",
   "corner-end-end-shape",
@@ -240,6 +240,21 @@ function nativeLonghandProperty(
   throw new TypeError(`invalid ${label}: ${input}`);
 }
 
+function appendNativeLonghandDeclarations(
+  declarations: [string, string][],
+  source: Readonly<Record<string, unknown>>,
+  byCorner: Readonly<Record<string, string>>,
+  validProperties: readonly string[],
+  label: string,
+): void {
+  for (const [corner, value] of Object.entries(source)) {
+    declarations.push([
+      nativeLonghandProperty(corner, byCorner, validProperties, label),
+      String(value),
+    ]);
+  }
+}
+
 function validateNativeDeclarations(
   element: CornerfillElement,
   declarations: readonly (readonly [property: string, value: string])[],
@@ -280,23 +295,21 @@ export function nativeRadiusDeclarations(
     } else {
       declarations.push(["border-radius", String(source.shorthand ?? "0")]);
       const physical = isRecord(source.physical) ? source.physical : {};
-      for (const [corner, value] of Object.entries(physical)) {
-        declarations.push([nativeLonghandProperty(
-          corner,
-          PHYSICAL_RADIUS_PROPERTY_BY_CORNER,
-          RADIUS_LONGHANDS,
-          "physical radius corner",
-        ), String(value)]);
-      }
+      appendNativeLonghandDeclarations(
+        declarations,
+        physical,
+        PHYSICAL_RADIUS_PROPERTY_BY_CORNER,
+        RADIUS_LONGHANDS,
+        "physical radius corner",
+      );
       const logical = isRecord(source.logical) ? source.logical : {};
-      for (const [corner, value] of Object.entries(logical)) {
-        declarations.push([nativeLonghandProperty(
-          corner,
-          LOGICAL_RADIUS_PROPERTY_BY_CORNER,
-          LOGICAL_RADIUS_LONGHANDS,
-          "logical radius corner",
-        ), String(value)]);
-      }
+      appendNativeLonghandDeclarations(
+        declarations,
+        logical,
+        LOGICAL_RADIUS_PROPERTY_BY_CORNER,
+        LOGICAL_RADIUS_LONGHANDS,
+        "logical radius corner",
+      );
     }
   }
   validateNativeDeclarations(element, declarations, "border-radius");
@@ -317,23 +330,21 @@ export function nativeShapeDeclarations(
     if (!isRecord(source)) throw new TypeError("unsupported native corner-shape source");
     declarations.push(["corner-shape", String(source.shorthand ?? "round")]);
     const physical = isRecord(source.physical) ? source.physical : {};
-    for (const [corner, value] of Object.entries(physical)) {
-      declarations.push([nativeLonghandProperty(
-        corner,
-        PHYSICAL_SHAPE_PROPERTY_BY_CORNER,
-        PHYSICAL_SHAPE_LONGHANDS,
-        "physical shape corner",
-      ), String(value)]);
-    }
+    appendNativeLonghandDeclarations(
+      declarations,
+      physical,
+      PHYSICAL_SHAPE_PROPERTY_BY_CORNER,
+      PHYSICAL_SHAPE_LONGHANDS,
+      "physical shape corner",
+    );
     const logical = isRecord(source.logical) ? source.logical : {};
-    for (const [corner, value] of Object.entries(logical)) {
-      declarations.push([nativeLonghandProperty(
-        corner,
-        LOGICAL_SHAPE_PROPERTY_BY_CORNER,
-        LOGICAL_SHAPE_LONGHANDS,
-        "logical shape corner",
-      ), String(value)]);
-    }
+    appendNativeLonghandDeclarations(
+      declarations,
+      logical,
+      LOGICAL_SHAPE_PROPERTY_BY_CORNER,
+      LOGICAL_SHAPE_LONGHANDS,
+      "logical shape corner",
+    );
   }
   validateNativeDeclarations(element, declarations, "corner-shape");
   return Object.freeze(declarations.map((declaration) => Object.freeze(declaration)));
@@ -525,7 +536,7 @@ export function captureBackgroundPosition(
   if (xValue === entry.inlineBackgroundPositionX && yValue === entry.inlineBackgroundPositionY) return false;
   const xChanged = xValue !== entry.inlineBackgroundPositionX;
   const yChanged = yValue !== entry.inlineBackgroundPositionY;
-  const previous = entry.dynamicBackgroundPositionSpec;
+  const previous = entry.backgroundPositionSpec;
   const components = previous?.kind === "components"
     ? previous
     : parseBackgroundPosition("0px 0px") as Extract<BackgroundPositionSpec, { kind: "components" }>;
@@ -548,7 +559,7 @@ export function captureBackgroundPosition(
   entry.inlineBackgroundPositionY = yValue;
   const next = Object.freeze({ kind: "components" as const, x, y });
   const changed = JSON.stringify(next) !== JSON.stringify(previous);
-  entry.dynamicBackgroundPositionSpec = next;
+  entry.backgroundPositionSpec = next;
   return changed;
 }
 
@@ -592,14 +603,12 @@ export function physicalShapeValues(computed: CSSStyleDeclaration): PhysicalShap
 }
 
 interface RadiusCarrierCapture {
-  readonly baseline: PhysicalRadiusValues;
   readonly present: boolean;
   readonly source: RadiusSource;
 }
 
 export function captureRadiusCarriers(
   computed: CSSStyleDeclaration,
-  baselinePhysical: PhysicalRadiusValues | null = null,
 ): Readonly<RadiusCarrierCapture> | null {
   const shorthand = readCarrier(computed, CARRIER.radius);
   const carrierPhysical = readCarrierMap(computed, RADIUS_PHYSICAL_CARRIERS);
@@ -607,11 +616,10 @@ export function captureRadiusCarriers(
   const present = Boolean(shorthand)
     || Object.keys(carrierPhysical).length > 0
     || Object.keys(logical).length > 0;
-  if (!present && !baselinePhysical) return null;
-  const baseline = baselinePhysical ?? physicalRadiusValues(computed);
+  if (!present) return null;
+  const baseline = physicalRadiusValues(computed);
   return Object.freeze({
     present,
-    baseline,
     source: Object.freeze({
       kind: "declarations",
       shorthand: shorthand || "0",
@@ -630,7 +638,6 @@ interface ShapeCarrierBaseline {
 }
 
 interface ShapeCarrierCapture {
-  readonly baseline: Readonly<ShapeCarrierBaseline>;
   readonly present: boolean;
   readonly source: CornerShapeSource;
 }
@@ -661,7 +668,6 @@ export function captureShapeCarriers(
   });
   return Object.freeze({
     present,
-    baseline: capturedBaseline,
     source: Object.freeze({
       kind: "declarations",
       shorthand: shorthand || capturedBaseline.shorthand,

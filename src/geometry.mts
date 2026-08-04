@@ -103,6 +103,10 @@ interface TrimmedCurves {
   readonly previous: Point[];
 }
 
+interface AdjustedCornerVertices extends CornerVertices {
+  readonly scoopRadii?: Point;
+}
+
 type InsetCacheValue = InsetCornerGeometry | typeof UNSUPPORTED_INSET_TOPOLOGY;
 type InsetCache = Map<string, InsetCacheValue>;
 
@@ -205,6 +209,34 @@ function pointLineDistance(point: Point, start: Point, end: Point): number {
   return areaTwice / Math.sqrt(lengthSquared);
 }
 
+function sampleAdaptiveCurve(
+  startParameter: number,
+  start: Point,
+  endParameter: number,
+  end: Point,
+  pointAt: (parameter: number) => Point,
+  tolerance: number,
+  maxDepth: number,
+): Point[] {
+  const points: Point[] = [start];
+  const subdivide = (
+    parameter0: number,
+    point0: Point,
+    parameter1: number,
+    point1: Point,
+    depth: number,
+  ): void => {
+    const parameter = (parameter0 + parameter1) / 2;
+    const midpoint = pointAt(parameter);
+    if (depth < maxDepth && pointLineDistance(midpoint, point0, point1) > tolerance) {
+      subdivide(parameter0, point0, parameter, midpoint, depth + 1);
+      subdivide(parameter, midpoint, parameter1, point1, depth + 1);
+    } else points.push(point1);
+  };
+  subdivide(startParameter, start, endParameter, end, 0);
+  return points;
+}
+
 function adaptiveCanonicalCorner(
   rx: number,
   ry: number,
@@ -214,22 +246,15 @@ function adaptiveCanonicalCorner(
 ): Point[] {
   const start: Point = [rx, 0];
   const end: Point = [0, ry];
-  const points: Point[] = [start];
-  const subdivide = (
-    theta0: number,
-    point0: Point,
-    theta1: number,
-    point1: Point,
-    depth: number,
-  ): void => {
-    const midpointTheta = (theta0 + theta1) / 2;
-    const midpoint = canonicalPoint(rx, ry, s, midpointTheta);
-    if (depth < maxDepth && pointLineDistance(midpoint, point0, point1) > tolerance) {
-      subdivide(theta0, point0, midpointTheta, midpoint, depth + 1);
-      subdivide(midpointTheta, midpoint, theta1, point1, depth + 1);
-    } else points.push(point1);
-  };
-  subdivide(0, start, Math.PI / 2, end, 0);
+  const points = sampleAdaptiveCurve(
+    0,
+    start,
+    Math.PI / 2,
+    end,
+    (theta) => canonicalPoint(rx, ry, s, theta),
+    tolerance,
+    maxDepth,
+  );
   points[0] = [rx, 0];
   points[points.length - 1] = [0, ry];
   return points;
@@ -668,33 +693,6 @@ export function buildCornerGeometry({
   });
 }
 
-export function insetGeometry({
-  width,
-  height,
-  radii,
-  inset,
-}: {
-  width: number;
-  height: number;
-  radii: Four<Radius>;
-  inset: number;
-}): Readonly<Rect & { radii: Four<Radius> }> {
-  finiteNonNegative(inset, "inset");
-  const innerWidth = Math.max(0, width - inset * 2);
-  const innerHeight = Math.max(0, height - inset * 2);
-  const innerRadii = radii.map(({ rx, ry }) => Object.freeze({
-    rx: Math.max(0, rx - inset),
-    ry: Math.max(0, ry - inset),
-  }));
-  return Object.freeze({
-    x: inset,
-    y: inset,
-    width: innerWidth,
-    height: innerHeight,
-    radii: Object.freeze(innerRadii) as Four<Radius>,
-  });
-}
-
 function pointAdd(point: Point, vector: Point): Point {
   return [point[0] + vector[0], point[1] + vector[1]];
 }
@@ -984,7 +982,7 @@ function adjustedScoop(
   index: number,
   startInset: number,
   endInset: number,
-): CornerVertices {
+): AdjustedCornerVertices {
   const verticalInset = startsOnVerticalEdge(index) ? startInset : endInset;
   const horizontalInset = startsOnVerticalEdge(index) ? endInset : startInset;
   const outerRadiusX = Math.abs(corner.center[0] - corner.outer[0]);
@@ -1007,6 +1005,7 @@ function adjustedScoop(
     ...corner,
     start: startsOnVerticalEdge(index) ? side : horizontal,
     end: startsOnVerticalEdge(index) ? horizontal : side,
+    scoopRadii: [radiusX, radiusY],
   };
 }
 
@@ -1050,12 +1049,48 @@ function adjustCornerForInsets(
   shapeParameter: number,
   startInset: number,
   endInset: number,
-): CornerVertices {
+): AdjustedCornerVertices {
+  if (Math.hypot(corner.outer[0] - corner.start[0], corner.outer[1] - corner.start[1]) < 1e-6
+    || Math.hypot(corner.end[0] - corner.outer[0], corner.end[1] - corner.outer[1]) < 1e-6) {
+    return corner;
+  }
   if (startInset === 0 && endInset === 0) return corner;
   if (shapeParameter === 0) return adjustedBevel(corner, startInset, endInset);
   if (shapeParameter === 1) return adjustedRound(corner, index, startInset, endInset);
   if (shapeParameter === -1) return adjustedScoop(corner, index, startInset, endInset);
   return adjustedGeneral(corner, shapeParameter, startInset, endInset);
+}
+
+function sampleAdjustedScoop(
+  corner: AdjustedCornerVertices,
+  radii: Point,
+  tolerance: number,
+  maxDepth: number,
+): Point[] {
+  // Inset scoop endpoints intersect the inset edges rather than the ellipse axes.
+  // Sample the enlarged axis-aligned ellipse directly; the generic basis map would shear it.
+  const [radiusX, radiusY] = radii;
+  const [centerX, centerY] = corner.outer;
+  const angle = ([x, y]: Point): number => Math.atan2(
+    (y - centerY) / radiusY,
+    (x - centerX) / radiusX,
+  );
+  const startAngle = angle(corner.start);
+  let endAngle = angle(corner.end);
+  while (endAngle > startAngle) endAngle -= Math.PI * 2;
+  const pointAt = (theta: number): Point => [
+    centerX + radiusX * Math.cos(theta),
+    centerY + radiusY * Math.sin(theta),
+  ];
+  return sampleAdaptiveCurve(
+    startAngle,
+    corner.start,
+    endAngle,
+    corner.end,
+    pointAt,
+    tolerance,
+    maxDepth,
+  );
 }
 
 function mappedCornerPoint(corner: CornerVertices, shapeParameter: number, theta: number): Point {
@@ -1082,7 +1117,7 @@ function mappedCornerPoint(corner: CornerVertices, shapeParameter: number, theta
 }
 
 function sampleAdjustedCorner(
-  corner: CornerVertices,
+  corner: AdjustedCornerVertices,
   shapeParameter: number,
   tolerance: number,
   maxDepth = 14,
@@ -1090,25 +1125,20 @@ function sampleAdjustedCorner(
   if (shapeParameter === 0) return [corner.start, corner.end];
   if (shapeParameter === Number.POSITIVE_INFINITY) return [corner.start, corner.outer, corner.end];
   if (shapeParameter === Number.NEGATIVE_INFINITY) return [corner.start, corner.center, corner.end];
+  if (shapeParameter === -1 && corner.scoopRadii) {
+    return sampleAdjustedScoop(corner, corner.scoopRadii, tolerance, maxDepth);
+  }
   const start = corner.start;
   const end = corner.end;
-  const points: Point[] = [start];
-  const subdivide = (
-    theta0: number,
-    point0: Point,
-    theta1: number,
-    point1: Point,
-    depth: number,
-  ): void => {
-    const theta = (theta0 + theta1) / 2;
-    const midpoint = mappedCornerPoint(corner, shapeParameter, theta);
-    if (depth < maxDepth && pointLineDistance(midpoint, point0, point1) > tolerance) {
-      subdivide(theta0, point0, theta, midpoint, depth + 1);
-      subdivide(theta, midpoint, theta1, point1, depth + 1);
-    } else points.push(point1);
-  };
-  subdivide(0, start, Math.PI / 2, end, 0);
-  return points;
+  return sampleAdaptiveCurve(
+    0,
+    start,
+    Math.PI / 2,
+    end,
+    (theta) => mappedCornerPoint(corner, shapeParameter, theta),
+    tolerance,
+    maxDepth,
+  );
 }
 
 function normalizeInsets(insets: CornerInsets): Four<number> {

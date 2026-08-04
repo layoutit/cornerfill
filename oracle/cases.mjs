@@ -16,13 +16,6 @@ const blendRaster = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAABkCAYAA
 const gradient = Object.freeze({
   kind: "linear-gradient",
   css: "linear-gradient(135deg, #75f6ff 0%, #2757d7 52%, #172a73 100%)",
-  from: Object.freeze([0, 0]),
-  to: Object.freeze([1, 1]),
-  stops: Object.freeze([
-    Object.freeze([0, "#75f6ff"]),
-    Object.freeze([0.52, "#2757d7"]),
-    Object.freeze([1, "#172a73"]),
-  ]),
 });
 
 export const ORACLE_CASE_SCHEMA = "cornerfill-oracle-case@1";

@@ -75,13 +75,19 @@ Run the portable small integration proof:
 npm run oracle:smoke
 ```
 
-Run the portable Chrome/WebKit/Firefox proof sequentially. It includes a compound 3D transform:
+Run all 17 portable cases through Chrome, WebKit, and Firefox sequentially:
 
 ```bash
 npm run oracle:cross
 ```
 
-Run the real Mario texel-face stress case in all three engines:
+Supplying the external atlas expands that same command to the complete 20-case corpus, including the texel-face, raster repeat/origin, and layered-gradient fixtures:
+
+```bash
+CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp npm run oracle:cross
+```
+
+Run only the real Mario texel-face case in all three engines:
 
 ```bash
 CORNERFILL_MARIO_TEXELS=/absolute/path/to/texels.webp npm run oracle:mario
@@ -105,15 +111,20 @@ The harness refuses to overwrite an existing output directory.
 
 Native A/A calibration is approved at exact zero and must pass. Native-vs-candidate tolerances begin deliberately unapproved in [tolerances.json](tolerances.json). A candidate run therefore produces measurements and heatmaps without being mislabeled as parity.
 
+While candidate tolerances remain unapproved, a successful capture manifest is
+`CAPTURE_COMPLETE_UNQUALIFIED`, not `COMPLETE`. The command still exits zero
+because its evidence is valid; it does not claim candidate parity.
+
 `node scripts/oracle.mjs run --enforce-candidate` enables enforcement. It should remain red until reviewed evidence justifies explicit tolerances and the candidate implementation passes them.
 
 ## Production candidate adapter
 
 [painter.mjs](painter.mjs) is now only the adapter from fixed oracle cases into the production build in [`dist/`](../dist/), generated from [`src/`](../src/). The fixture uses the production parser, geometry/cache, painter, live-surface backend, ownership overrides, invalidation scheduler, and teardown. There is no separate reference-candidate renderer.
 
-`controller.capabilities.paint` booleans mean that a production code path is
-implemented for the admitted grammar. They do not override this chapter's
-qualification states and must not be read as native-differential `PASS`.
+`controller.capabilities.implementedPaintPaths` reports only that a production
+code path exists for the admitted grammar. `paintInputConstraints` reports
+known input boundaries. Neither object overrides this chapter's qualification
+states or constitutes native-differential `PASS`.
 
 For the `bevel` case, every requested browser also executes a post-capture lifecycle proof: a literal `matrix3d()` change must cause zero paints, a carrier style change and a resize must each cause one paint, and disposal must remove the active entry. Failure makes the oracle run fail structurally.
 
@@ -122,7 +133,8 @@ For `mario-texel-face`, a post-capture prepared crop update must repaint the sam
 The `opposite-concave-overlap` fixture now exercises the CSSWG hull scale. Current Chromium's path-intersection result is retained as implementation evidence, so that frame is still deliberately unqualified rather than treated as a tolerance pass. The border fixtures exercise uniform and unequal shaped rings. `inset-shadow-shaped` and `outline-contained-shaped` exercise the two effects that fit entirely inside the live image; the outline fixture is an empty paint-owned host, because a background image cannot reproduce native outline stacking over arbitrary foreground/pseudos. External outsets remain explicitly unsupported.
 
 `raster-repeat-origin` retains spec-resolved repeat/origin geometry while exposing
-the remaining native-versus-Canvas raster sampling difference.
+native-versus-Canvas raster sampling drift. This is an admitted renderer
+difference, not a qualified parity result.
 `background-blend-multiply` is the only blend fixture: one explicitly opaque
 static raster over one opaque color, composited by the production painter with
 Canvas `multiply` and no scratch surface. It does not imply support for general

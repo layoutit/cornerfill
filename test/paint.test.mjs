@@ -187,16 +187,6 @@ function assertUnsupportedInsetPaint({ width, height, borderRadius, cornerShape,
   assert.deepEqual(context.calls, []);
 }
 
-test("crossing all-scoop inset geometry is refused before surface mutation", () => {
-  assertUnsupportedInsetPaint({
-    width: 100,
-    height: 10,
-    borderRadius: "20px / 80px",
-    cornerShape: [-1, -1, -1, -1],
-    widths: [1, 2, 5, 1],
-  });
-});
-
 test("global clipped-contour crossings are refused before surface mutation", () => {
   assertUnsupportedInsetPaint({
     width: 39.105241601622424,
@@ -210,4 +200,20 @@ test("global clipped-contour crossings are refused before surface mutation", () 
     cornerShape: [8, -2, 2, -2],
     widths: [8.34886265579794, 5.063831898145306, 65.41168509124148, 20.733630000645288],
   });
+});
+
+test("zero-inset topology is refused before surface mutation", () => {
+  const geometry = buildCornerGeometry({
+    width: 100,
+    height: 100,
+    borderRadius: "90px",
+    cornerShape: "notch round notch round",
+  });
+  const context = contextRecorder();
+  const paint = () => paintCornerfill(context, {
+    geometry,
+    paint: { kind: "solid", color: "#123456" },
+  });
+  assert.throws(paint, /shaped inset contour self-intersects after clipping and is unsupported/u);
+  assert.deepEqual(context.calls, []);
 });
