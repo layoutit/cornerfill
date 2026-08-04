@@ -76,7 +76,11 @@ test("image cache cancels a pending load when its last lease is released", async
   const lease = cache.acquire("pending.webp");
   const rejected = assert.rejects(lease.promise, /released before decode completed/u);
   lease.release();
-  await rejected;
+  const replacement = cache.acquire("pending.webp");
+  assert.notEqual(replacement.promise, lease.promise);
+  const replacementRejected = assert.rejects(replacement.promise, /released before decode completed/u);
+  replacement.release();
+  await Promise.all([rejected, replacementRejected]);
   assert.equal(cache.stats().entries, 0);
   assert.equal(cache.stats().loading, 0);
 });

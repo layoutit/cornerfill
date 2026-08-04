@@ -768,6 +768,69 @@ await test("authored source replacement invalidates a same-text CSSOM generation
   }
 });
 
+await test("exact source handoff wins over an earlier queued owner mutation", async () => {
+  const source = ".cornerfill-source-queued-before{corner-shape:bevel;border-radius:5px;background:red}";
+  const style = document.createElement("style");
+  style.textContent = source;
+  document.head.append(style);
+  const before = host();
+  before.className = "cornerfill-source-queued-before";
+  const after = host();
+  after.className = "cornerfill-source-queued-after";
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  try {
+    await auto.ready;
+    assert(auto.explain(before)?.status === "active", "queued-source fixture did not attach");
+    style.textContent = source;
+    style.sheet.cssRules[0].selectorText = ".cornerfill-source-queued-after";
+    await auto.replaceStylesheetSource(
+      style,
+      ".cornerfill-source-queued-after{corner-shape:bevel;border-radius:5px;background:red}",
+    );
+    assert(auto.explain(before) === null, "exact source handoff retained the prior selector");
+    assert(auto.explain(after)?.status === "active", "queued owner mutation invalidated the exact source handoff");
+  } finally {
+    auto.destroy();
+    style.remove();
+    before.remove();
+    after.remove();
+  }
+});
+
+await test("a disabled owned CSSStyleSheet accepts exact source for re-enablement", async () => {
+  const style = document.createElement("style");
+  style.textContent = ".cornerfill-disabled-source-before{corner-shape:bevel}";
+  document.head.append(style);
+  const before = host();
+  before.className = "cornerfill-disabled-source-before";
+  const after = host();
+  after.className = "cornerfill-disabled-source-after";
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  try {
+    await auto.ready;
+    assert(auto.explain(before)?.status === "active", "disabled-source fixture did not attach");
+    const sheet = style.sheet;
+    sheet.disabled = true;
+    await waitFor(() => auto.explain(before) === null, "disabled-source fixture teardown");
+    sheet.cssRules[0].selectorText = ".cornerfill-disabled-source-after";
+    await auto.replaceStylesheetSource(
+      sheet,
+      ".cornerfill-disabled-source-after{corner-shape:bevel}",
+    );
+    assert(auto.explain(after) === null, "disabled exact source attached before re-enablement");
+    sheet.disabled = false;
+    await waitFor(
+      () => auto.explain(before) === null && auto.explain(after)?.status === "active",
+      "disabled exact source re-enablement",
+    );
+  } finally {
+    auto.destroy();
+    style.remove();
+    before.remove();
+    after.remove();
+  }
+});
+
 await test("exact linked source handoff expires when the stylesheet URL changes", async () => {
   const link = document.createElement("link");
   link.rel = "stylesheet";
@@ -2064,7 +2127,18 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   const anonymousLayer = document.createElement("style");
   anonymousLayer.textContent = "@layer{.cornerfill-anonymous{corner-shape:bevel}}";
   const nestedStyle = document.createElement("style");
-  nestedStyle.textContent = ".cornerfill-nesting{& .cornerfill-nested{corner-shape:bevel}}";
+  nestedStyle.textContent = `
+    .cornerfill-nesting {
+      corner-shape: bevel;
+      & .cornerfill-nested { corner-shape: scoop }
+      corner-shape: notch;
+      @media (min-width: 1px) {
+        corner-shape: square;
+        & .cornerfill-nested-media { corner-shape: bevel }
+      }
+      corner-shape: superellipse(3);
+    }
+  `;
   const complexSupports = document.createElement("style");
   complexSupports.textContent = "@supports selector([corner-shape]){.cornerfill-complex-supports{corner-shape:bevel}}";
   const splitSupports = document.createElement("style");
@@ -2132,7 +2206,11 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   const anonymous = host();
   anonymous.className = "cornerfill-anonymous";
   const nesting = host();
-  nesting.className = "cornerfill-nested";
+  nesting.className = "cornerfill-nesting";
+  const nested = host(nesting);
+  nested.className = "cornerfill-nested";
+  const nestedMedia = host(nesting);
+  nestedMedia.className = "cornerfill-nested-media";
   const complex = host();
   complex.className = "cornerfill-complex-supports";
   const split = host();
@@ -2262,7 +2340,9 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(auto.explain(conditionalCrossSource)?.status === "active", "cross-source inline shape did not attach before a conditional refusal");
     assert(auto.explain(mixed) === null, "mixed physical/logical declarations were partially owned");
     assert(auto.explain(anonymous) === null, "anonymous layer was partially owned");
-    assert(auto.explain(nesting) === null, "nested selector rule was partially owned");
+    equal(auto.explain(nesting).geometry.shapeParameters, [3, 3, 3, 3], "interleaved nested declarations lost cascade order");
+    equal(auto.explain(nested).geometry.shapeParameters, [-1, -1, -1, -1], "nested selector was not discovered");
+    equal(auto.explain(nestedMedia).geometry.shapeParameters, [0, 0, 0, 0], "nested media selector was not discovered");
     assert(auto.explain(inert) === null, "non-CSS style source was activated");
     assert(auto.explain(alternateElement) === null, "inactive alternate stylesheet was activated");
     assert(auto.explain(allReset) === null, "all: unset retained an earlier shape carrier");
@@ -2290,7 +2370,6 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     assert(/variable corner-shape shorthand combined with longhands/u.test(baseMessages), "variable shorthand conflict was not reported");
     assert(/mixed physical and logical/u.test(baseMessages), "mixed declaration refusal was not reported");
     assert(/anonymous cascade layer/u.test(baseMessages), "anonymous layer refusal was not reported");
-    assert(/nested selector rule/u.test(baseMessages), "nested selector refusal was not reported");
     assert(/cannot safely transport this all: var/u.test(baseMessages), "unsafe all: var() result was not reported");
     const allVarErrors = auto.explain().errors.filter(({ message }) => (
       /cannot safely transport this all: var/u.test(message)
@@ -2353,7 +2432,7 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
       layerNormal, layerImportant, varParent, varFallback, varConflict, logical, media, mediaDuplicate,
       supportsPositive, supportsCustom, supportsNegativeCustom, supportsNegative, supportsInvalidNegative,
       conditionalCrossSource, mixed,
-      anonymous, nesting, complex, split, inert, alternateElement,
+      anonymous, nesting, nested, nestedMedia, complex, split, inert, alternateElement,
       allReset, allBefore, allAfter, allLayer, allImportant, allVar, allVarFallback,
       allVarImportant, envShape, allEnv, allVarLayer,
       validHigh, validBelowInvalidImportant,

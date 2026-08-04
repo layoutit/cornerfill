@@ -6,10 +6,22 @@ import {
   paintDescriptorKey,
   parseBackgroundPosition,
   parseBackgroundRepeat,
+  rasterSourceDimensions,
   resolvePaintForBox,
 } from "../dist/background.mjs";
 
 const image = Object.freeze({ width: 30, height: 15 });
+
+test("raster dimensions match the accepted image, video, canvas, and frame shapes", () => {
+  assert.deepEqual(rasterSourceDimensions({ naturalWidth: 30, naturalHeight: 15 }), [30, 15]);
+  assert.deepEqual(rasterSourceDimensions({ videoWidth: 40, videoHeight: 20 }), [40, 20]);
+  assert.deepEqual(rasterSourceDimensions({ displayWidth: 50, displayHeight: 25 }), [50, 25]);
+  assert.deepEqual(rasterSourceDimensions({ width: 60, height: 30 }), [60, 30]);
+  assert.throws(
+    () => rasterSourceDimensions({ width: { baseVal: { value: 30 } }, height: { baseVal: { value: 15 } } }),
+    /decoded image with intrinsic dimensions/u,
+  );
+});
 
 test("background position resolves edge offsets and keyword order", () => {
   const descriptor = normalizePaintDescriptor({
@@ -41,8 +53,19 @@ test("background position resolves edge offsets and keyword order", () => {
     height: 72,
     insets: [2, 4, 6, 8],
   });
-  assert.deepEqual(resolved.backgroundPosition, [54, 40.4]);
+  assert.deepEqual(resolved.backgroundPosition, [54, 42.4]);
   assert.deepEqual(parseBackgroundPosition("center left"), parseBackgroundPosition("left center"));
+
+  const edgePosition = (backgroundPosition, backgroundSize) => resolvePaintForBox(normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundSize,
+    backgroundPosition,
+    repeat: "no-repeat",
+  }), 100, 80, image).backgroundPosition;
+  assert.deepEqual(edgePosition("right 10% bottom 25%", "100px 80px"), [0, 0]);
+  assert.deepEqual(edgePosition("right 10% bottom 25%", "120px 100px"), [-18, -15]);
+  assert.deepEqual(edgePosition("right -10% bottom -25%", "20px 10px"), [88, 87.5]);
 });
 
 test("repeat, round, and space produce bounded tile plans", () => {

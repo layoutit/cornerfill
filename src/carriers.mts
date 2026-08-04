@@ -533,6 +533,19 @@ function carrierSupportsHeader(header: string): string {
   return output + header.slice(cursor);
 }
 
+function resolvedNestedSelector(selector: string, parent: string): string {
+  let output = "";
+  let cursor = 0;
+  let replaced = false;
+  scanCssSyntax(selector, 0, (index, character) => {
+    if (character !== "&") return;
+    output += `${selector.slice(cursor, index)}:is(${parent})`;
+    cursor = index + 1;
+    replaced = true;
+  });
+  return replaced ? output + selector.slice(cursor) : `:is(${parent}) ${selector}`;
+}
+
 function serializeCarrierRules(
   rules: CSSRuleList | readonly CSSRule[],
   selectors: Set<string>,
@@ -541,6 +554,7 @@ function serializeCarrierRules(
   mediaQueries: Set<string>,
   observationSelectors: Set<string>,
   strictShapeSupports = false,
+  parentSelector: string | null = null,
 ): string {
   let output = "";
   for (const rawRule of rules) {
@@ -565,15 +579,21 @@ function serializeCarrierRules(
       || /^@media\b/iu.test(header)
       || namedLayer
     );
-    if (strictShapeSupports && typeof rule.selectorText !== "string" && !supportedGroupingRule) {
+    const nestedDeclarations = rule.type === 0
+      && typeof rule.selectorText !== "string"
+      && Boolean(rule.style)
+      && !rule.cssRules
+      && header === "";
+    if (strictShapeSupports && typeof rule.selectorText !== "string"
+      && !supportedGroupingRule && !nestedDeclarations) {
       throw ownershipBlockingSyntaxError(
         `Automatic CSS refuses semantic rule inside a corner-shape support condition: ${header}`,
       );
     }
     const declarations = carrierDeclarations(rule.style);
-    if (typeof rule.selectorText === "string" && (rule.cssRules?.length ?? 0) > 0) {
-      throw new SyntaxError(`Automatic CSS cannot preserve nested selector rule: ${rule.selectorText}`);
-    }
+    const selector = typeof rule.selectorText === "string"
+      ? (parentSelector ? resolvedNestedSelector(rule.selectorText, parentSelector) : rule.selectorText)
+      : null;
     const shapeSupports = shapeSupportReplacements(header).length > 0;
     const observesOwnedSubtree = Boolean(rule.cssRules && rulesMayAffectOwnedPaint(rule.cssRules));
     if (/^@container\b/iu.test(header) && observesOwnedSubtree) {
@@ -588,13 +608,38 @@ function serializeCarrierRules(
         mediaQueries,
         observationSelectors,
         strictShapeSupports || shapeSupports,
+        selector ?? parentSelector,
       )
       : "";
     if (/^@media\b/iu.test(header) && observesOwnedSubtree) {
       mediaQueries.add(header.replace(/^@media\b/iu, "").trim());
     }
-    if (typeof rule.selectorText === "string") {
-      if (styleMayAffectOwnedPaint(rule.style)) observationSelectors.add(rule.selectorText);
+    if (nestedDeclarations) {
+      if (!parentSelector) {
+        throw ownershipBlockingSyntaxError("Automatic CSS found nested declarations without a parent selector");
+      }
+      if (styleMayAffectOwnedPaint(rule.style)) observationSelectors.add(parentSelector);
+      if (strictShapeSupports) {
+        const unsupported = unsupportedConditionalDeclarations(rule.style);
+        if (unsupported.length > 0) {
+          throw ownershipBlockingSyntaxError(
+            `Automatic CSS refuses @supports corner-shape declarations because they also declare: ${unsupported.join(", ")}`,
+          );
+        }
+      }
+      if (declarations.shape) {
+        selectors.add(parentSelector);
+        selectorRecords.push(Object.freeze({
+          source: sourceIdentity,
+          selector: parentSelector,
+          declaration: rule.style ? diagnosticShapeDeclarations(rule.style).join("; ") || null : null,
+        }));
+      }
+      output += declarations.css;
+      continue;
+    }
+    if (selector) {
+      if (styleMayAffectOwnedPaint(rule.style)) observationSelectors.add(selector);
       if (strictShapeSupports) {
         const unsupported = unsupportedConditionalDeclarations(rule.style);
         if (unsupported.length > 0) {
@@ -605,10 +650,10 @@ function serializeCarrierRules(
       }
       if (!declarations.css && !nested) continue;
       if (declarations.shape) {
-        selectors.add(rule.selectorText);
+        selectors.add(selector);
         selectorRecords.push(Object.freeze({
           source: sourceIdentity,
-          selector: rule.selectorText,
+          selector,
           declaration: rule.style ? diagnosticShapeDeclarations(rule.style).join("; ") || null : null,
         }));
       }

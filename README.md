@@ -46,7 +46,7 @@ Then write ordinary CSS:
 }
 ```
 
-That's it. Cornerfill discovers the CSS automatically; there is no build transform or second import. Chrome stays native when it passes Cornerfill's syntax, computed-value, and shaped-hit-test proxy. In WebKit and Gecko, an available live-image fallback remains preferred until the engine also qualifies for the native paint semantics that proxy does not certify.
+That's it. Cornerfill discovers the CSS automatically; no build transform or custom carrier declarations are required. Chrome stays native when it passes Cornerfill's syntax, computed-value, and shaped-hit-test proxy. In WebKit and Gecko, an available live-image fallback remains preferred until the engine also qualifies for the native paint semantics that proxy does not certify.
 
 ## How It Works
 
@@ -75,6 +75,7 @@ Unsupported syntax is reported or left native rather than approximated.
 - Outer shadows and outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented. Conflicting `!important` paint declarations are rejected.
 - A contained painted outline requires an empty, paint-owned host. Any open shadow root counts as foreground content because later shadow-tree mutations cannot safely preserve that contract.
 - Cross-origin raster images without CORS are unsupported even when native CSS could display them.
+- Linked and imported CSS source is recovered through a separate `fetch()`, so CSP must permit it through `connect-src`. A blocked or unreadable source fails automatic ownership closed for its root; dynamically varying responses require exact source handoff.
 - CSS animations and transitions of shape or paint inputs do not reproduce native timing.
 - Direct `dir` changes are observed. Content-driven direction changes under `dir=auto` are not tracked across arbitrary descendant text and require an explicit refresh.
 - Closed shadow roots, unreadable cross-origin CSS, and linked/imported CSS that is not UTF-8 fail automatic ownership closed by default. Unobservable selector states such as programmatic `:checked`, `:target`, and `:visited` are refused instead of becoming stale.

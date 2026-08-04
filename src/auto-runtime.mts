@@ -2612,6 +2612,11 @@ class CornerfillAutoController {
     for (const owner of owners) this._invalidateStylesheetSource(owner);
   }
 
+  _drainPendingStylesheetSourceMutations(): void {
+    const records = this.observation.observer?.takeRecords() ?? [];
+    if (records.length > 0) this._invalidateStylesheetSourceMutations(records);
+  }
+
   _handleMutations(records: readonly MutationRecord[]): void {
     this._invalidateStylesheetSourceMutations(records);
     const plan = planAutomaticMutations(records, {
@@ -2775,10 +2780,7 @@ class CornerfillAutoController {
   }: Readonly<RefreshRequestOptions> = {}): Promise<Readonly<CornerfillAutoExplanation>> {
     if (this.destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
     if (this.native) return Promise.resolve(this.explain());
-    if (sources) {
-      const pendingMutations = this.observation.observer?.takeRecords() ?? [];
-      if (pendingMutations.length > 0) this._invalidateStylesheetSourceMutations(pendingMutations);
-    }
+    if (sources) this._drainPendingStylesheetSourceMutations();
     this.refreshState.workRequested = true;
     this.refreshState.sourceRequested ||= sources;
     this.refreshState.candidateRequested ||= candidates || sources;
@@ -2849,10 +2851,11 @@ class CornerfillAutoController {
       if (this.root.adoptedStyleSheets.includes(stylesheet)) {
         return this.refreshAdoptedStyleSheet(stylesheet, source);
       }
-      const owner = stylesheetElements(this.root).find((candidate) => candidate.sheet === stylesheet);
+      const owner = stylesheetSourceElements(this.root).find((candidate) => candidate.sheet === stylesheet);
       if (!owner) {
         return Promise.reject(new TypeError("The stylesheet does not belong to this automatic scope"));
       }
+      this._drainPendingStylesheetSourceMutations();
       this._replaceStylesheetSource(owner, source);
       return this.refresh();
     }
@@ -2863,6 +2866,7 @@ class CornerfillAutoController {
     if (stylesheet.ownerDocument !== this.document || stylesheet.getRootNode() !== this.root) {
       return Promise.reject(new TypeError("The stylesheet owner does not belong to this automatic scope"));
     }
+    this._drainPendingStylesheetSourceMutations();
     this._replaceStylesheetSource(stylesheet, source);
     return this.refresh();
   }

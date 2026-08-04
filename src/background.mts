@@ -85,14 +85,33 @@ export interface BackgroundArea {
   readonly y: number;
 }
 
-export type CornerfillRasterSource = CanvasImageSource & Readonly<{
-  height?: number;
-  naturalHeight?: number;
-  naturalWidth?: number;
-  videoHeight?: number;
-  videoWidth?: number;
-  width?: number;
-}>;
+export type CornerfillRasterSource =
+  | HTMLCanvasElement
+  | HTMLImageElement
+  | HTMLVideoElement
+  | ImageBitmap
+  | OffscreenCanvas
+  | VideoFrame;
+
+export function rasterSourceDimensions(image: CornerfillRasterSource): PixelPair {
+  const source = image as Readonly<{
+    displayHeight?: unknown;
+    displayWidth?: unknown;
+    height?: unknown;
+    naturalHeight?: unknown;
+    naturalWidth?: unknown;
+    videoHeight?: unknown;
+    videoWidth?: unknown;
+    width?: unknown;
+  }>;
+  const width = source.naturalWidth ?? source.videoWidth ?? source.displayWidth ?? source.width;
+  const height = source.naturalHeight ?? source.videoHeight ?? source.displayHeight ?? source.height;
+  if (typeof width !== "number" || typeof height !== "number"
+    || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new TypeError("raster paint requires a decoded image with intrinsic dimensions");
+  }
+  return Object.freeze([width, height]);
+}
 
 interface NormalizedLayerCommon {
   readonly attachment: "scroll";
@@ -786,9 +805,10 @@ function resolvePositionComponent(
   imageSize: number,
 ): number {
   if (spec.kind === "edge-position") {
-    const offset = resolveLengthPercentage(spec.offset, areaSize);
+    const freeSpace = areaSize - imageSize;
+    const offset = spec.offset.px + spec.offset.percent * freeSpace;
     return spec.edge === "right" || spec.edge === "bottom"
-      ? areaSize - imageSize - offset
+      ? freeSpace - offset
       : offset;
   }
   return spec.px + spec.percent * (areaSize - imageSize);
@@ -1014,9 +1034,7 @@ function resolveLayerForBox(
   const positioningArea = areaForBox(descriptor.origin ?? "padding-box", width, height, metrics);
   let backgroundSize;
   if (descriptor.kind === "image") {
-    const resolvedImage = image!;
-    const intrinsicWidth = (resolvedImage.naturalWidth ?? resolvedImage.width) as number;
-    const intrinsicHeight = (resolvedImage.naturalHeight ?? resolvedImage.height) as number;
+    const [intrinsicWidth, intrinsicHeight] = rasterSourceDimensions(image!);
     backgroundSize = resolveSize(
       descriptor.backgroundSizeSpec,
       positioningArea.width,

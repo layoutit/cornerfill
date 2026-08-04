@@ -144,12 +144,27 @@ test("Firefox support requires live Canvas registration, not syntax alone", () =
   }), /unavailable/u);
 });
 
-test("Firefox validates allocation before registering a live image", () => {
+test("Firefox admits the surface pixel boundary and validates overflow before registration", () => {
   const document = firefoxDocument();
+  const below = createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 3,
+    cssHeight: 3,
+    maxSurfacePixels: 10,
+  });
+  below.dispose();
+  const exact = createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 2,
+    cssHeight: 5,
+    maxSurfacePixels: 10,
+  });
+  exact.dispose();
+  document.registrations.length = 0;
   assert.throws(() => createSurface(document, {
     backend: "moz-element",
-    cssWidth: 100,
-    cssHeight: 100,
+    cssWidth: 11,
+    cssHeight: 1,
     maxSurfacePixels: 10,
   }), /exceeds 10 pixels/u);
   assert.deepEqual(document.registrations, []);

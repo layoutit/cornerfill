@@ -1,6 +1,7 @@
 import {
   insetCornerGeometry,
 } from "./geometry.mjs";
+import { rasterSourceDimensions } from "./background.mjs";
 import type { CornerGeometry, Point } from "./geometry.mjs";
 import type { GradientStop, LinearGradientLine, RadialGradientShape } from "./gradients.mjs";
 import type {
@@ -250,20 +251,10 @@ function freezeRect(x: number, y: number, width: number, height: number): PixelR
   return Object.freeze([x, y, width, height]);
 }
 
-function imageDimensions(image: CornerfillRasterSource): PixelPair {
-  const width = image?.naturalWidth ?? image?.videoWidth ?? image?.width;
-  const height = image?.naturalHeight ?? image?.videoHeight ?? image?.height;
-  if (typeof width !== "number" || typeof height !== "number"
-    || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    throw new TypeError("raster paint requires a decoded image with intrinsic dimensions");
-  }
-  return freezePair(width, height);
-}
-
 function verifiedImageDimensions(
   paint: Pick<RasterPaintState, "image" | "sourceSize">,
 ): PixelPair {
-  const dimensions = imageDimensions(paint.image);
+  const dimensions = rasterSourceDimensions(paint.image);
   if (!paint.sourceSize) return dimensions;
   const [intrinsicWidth, intrinsicHeight] = dimensions;
   const [expectedWidth, expectedHeight] = paint.sourceSize;
