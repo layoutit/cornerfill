@@ -449,10 +449,6 @@ function selectorBranches(selector: string): readonly string[] {
   return Object.freeze(branches);
 }
 
-function selectorComponentCount(selector: string): number {
-  return selectorBranches(selector).length;
-}
-
 function selectorPseudo(
   selector: string,
   colon: number,
@@ -477,6 +473,41 @@ function selectorPseudo(
     end,
     name: decodeCssEscapes(selector.slice(colon + 1, end)).toLowerCase(),
   });
+}
+
+const SELECTOR_LIST_PSEUDOS = new Set([
+  "has",
+  "is",
+  "not",
+  "nth-child",
+  "nth-last-child",
+  "where",
+]);
+
+function selectorComponentCount(selector: string): number {
+  let count = 1;
+  const listDepths = new Set<number>();
+  const listOpenings = new Set<number>();
+  scanCssSyntax(selector, 0, (index, character, parentheses, brackets) => {
+    if (character === ":") {
+      const pseudo = selectorPseudo(selector, index);
+      if (pseudo && SELECTOR_LIST_PSEUDOS.has(pseudo.name) && selector[pseudo.end] === "(") {
+        listOpenings.add(pseudo.end);
+      }
+      return;
+    }
+    if (character === "(" && listOpenings.delete(index)) {
+      listDepths.add(parentheses + 1);
+      return;
+    }
+    if (character === ")") {
+      listDepths.delete(parentheses);
+      return;
+    }
+    if (character === "," && brackets === 0
+      && (parentheses === 0 || listDepths.has(parentheses))) count += 1;
+  });
+  return count;
 }
 
 function selectorHasHostPseudo(selector: string): boolean {
@@ -552,7 +583,11 @@ function replaceHostContextFunctions(
 function shadowIncludingContextMatches(host: Element, selector: string): boolean {
   let element: Element | null = host;
   while (element) {
-    if (element.matches(selector)) return true;
+    try {
+      if (element.matches(selector)) return true;
+    } catch {
+      return false;
+    }
     if (element.parentElement) {
       element = element.parentElement;
       continue;
@@ -561,6 +596,18 @@ function shadowIncludingContextMatches(host: Element, selector: string): boolean
     element = root.host ?? null;
   }
   return false;
+}
+
+function validHostContextArgument(host: Element, argument: string): boolean {
+  if (!argument || selectorBranches(argument).length !== 1 || selectorHasCombinator(argument)) {
+    return false;
+  }
+  try {
+    host.matches(argument);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function shadowSelectorMatches(root: ShadowRoot, selector: string): readonly Element[] {
@@ -1360,6 +1407,16 @@ class CornerfillAutoController {
   _rewriteHostContextSelector(selector: string): string {
     const attribute = this.hostContextAttribute;
     if (!attribute) return selector;
+    try {
+      let valid = true;
+      replaceHostContextFunctions(selector, (argument) => {
+        if (!validHostContextArgument((this.root as ShadowRoot).host, argument)) valid = false;
+        return `:host-context(${argument})`;
+      });
+      if (!valid) return ":not(*)";
+    } catch {
+      return ":not(*)";
+    }
     return replaceHostContextFunctions(selector, (argument) => {
       let token = this.hostContextConditions.get(argument);
       if (!token) {
@@ -1367,21 +1424,43 @@ class CornerfillAutoController {
         this.hostContextConditions.set(argument, token);
         this.hostContextArguments.set(token, argument);
       }
-      return `:host([${attribute}~="${token}"])`;
+      return `:host(:where([${attribute}~="${token}"]):is(:where(*),${argument}))`;
     });
   }
 
   _restoreHostContextSelector(selector: string): string {
     const attribute = this.hostContextAttribute;
     if (!attribute) return selector;
-    const pattern = new RegExp(
-      `:host\\(\\[${attribute}~=(?:"([^"]+)"|'([^']+)'|([-_a-z0-9]+))\\]\\)`,
-      "giu",
+    const marker = new RegExp(
+      `\\[${attribute}\\s*~=\\s*(?:"([^"]+)"|'([^']+)'|([-_a-z0-9]+))\\s*\\]`,
+      "iu",
     );
-    return selector.replaceAll(pattern, (match, doubleQuoted, singleQuoted, unquoted) => {
-      const argument = this.hostContextArguments.get(doubleQuoted ?? singleQuoted ?? unquoted);
-      return argument ? `:host-context(${argument})` : match;
+    const replacements: { end: number; start: number; value: string }[] = [];
+    let skipThrough = -1;
+    scanCssSyntax(selector, 0, (index, character) => {
+      if (index <= skipThrough || character !== ":") return;
+      const pseudo = selectorPseudo(selector, index);
+      if (pseudo?.name !== "host" || selector[pseudo.end] !== "(") return;
+      const end = matchingSelectorParenthesis(selector, pseudo.end);
+      if (end < 0) return;
+      skipThrough = end;
+      const match = marker.exec(selector.slice(pseudo.end + 1, end));
+      if (!match) return;
+      const argument = this.hostContextArguments.get(match[1] ?? match[2] ?? match[3]!);
+      if (argument) replacements.push({
+        start: index,
+        end: end + 1,
+        value: `:host-context(${argument})`,
+      });
     });
+    if (replacements.length === 0) return selector;
+    let output = "";
+    let cursor = 0;
+    for (const replacement of replacements) {
+      output += selector.slice(cursor, replacement.start) + replacement.value;
+      cursor = replacement.end;
+    }
+    return output + selector.slice(cursor);
   }
 
   _syncHostContextMarker(): void {

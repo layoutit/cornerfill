@@ -69,6 +69,27 @@ function nativeDocument({ liveFallback = false } = {}) {
   };
 }
 
+test("runtime rejects non-finite resource budgets before creating state", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?resource-budget-validation-test");
+  const { document } = nativeDocument();
+  for (const name of [
+    "maxActiveEntries",
+    "maxSurfacePixels",
+    "maxTotalSurfacePixels",
+    "maxGeometryCacheEntries",
+    "maxImageCacheEntries",
+    "maxImageCachePixels",
+    "imageTimeoutMs",
+    "webkitPoolEntriesPerPrefix",
+    "webkitPoolPrefixBuckets",
+  ]) {
+    assert.throws(
+      () => installCornerfill({ document, [name]: Number.NaN }),
+      new RegExp(name, "u"),
+    );
+  }
+});
+
 test("qualified native handles ignore fallback API availability and tear down cleanly", async () => {
   const { installCornerfill } = await import("../dist/runtime.mjs?native-teardown-test");
   const fixture = nativeDocument({ liveFallback: true });

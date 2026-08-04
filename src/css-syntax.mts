@@ -22,7 +22,7 @@ export function decodeCssEscapes(value: string): string {
   );
 }
 
-interface CssIdentifierParse {
+export interface CssIdentifierParse {
   readonly end: number;
   readonly start: number;
   readonly value: string;
@@ -104,6 +104,13 @@ function consumeCssIdentifier(
     end: index,
     value: decodeCssEscapes(source.slice(start, index)),
   });
+}
+
+export function cssIdentifierAt(
+  source: string,
+  start: number,
+): Readonly<CssIdentifierParse> | null {
+  return consumeCssIdentifier(source, start);
 }
 
 export function skipCssTrivia(source: string, start: number): number {

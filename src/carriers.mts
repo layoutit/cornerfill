@@ -4,6 +4,7 @@ import {
   serializeShapeParameter,
 } from "./values.mjs";
 import {
+  cssIdentifierAt,
   decodeCssEscapes,
   scanCssSyntax,
   skipCssTrivia,
@@ -456,6 +457,37 @@ function matchingParenthesis(value: string, start: number): number {
   return end;
 }
 
+function atKeyword(
+  source: string,
+  start = skipCssTrivia(source, 0),
+): Readonly<{ end: number; name: string }> | null {
+  if (source[start] !== "@") return null;
+  const identifier = cssIdentifierAt(source, start + 1);
+  return identifier ? Object.freeze({
+    end: identifier.end,
+    name: identifier.value.toLowerCase(),
+  }) : null;
+}
+
+function supportDeclaration(
+  source: string,
+): Readonly<{ property: string; value: string }> | null {
+  let colon = -1;
+  let invalid = false;
+  scanCssSyntax(source, 0, (index, character, parentheses, brackets, blocks) => {
+    if (parentheses !== 0 || brackets !== 0 || blocks !== 0) return;
+    if (character === ":" && colon < 0) colon = index;
+    else if (character === ";" || character === "{" || character === "}") {
+      invalid = true;
+      return false;
+    }
+  });
+  if (invalid || colon < 0) return null;
+  const property = wholeCssIdentifier(source.slice(0, colon))?.value.toLowerCase();
+  const value = source.slice(colon + 1).trim();
+  return property && value ? Object.freeze({ property, value }) : null;
+}
+
 function supportsShapeValue(property: string, value: string): boolean {
   if (/^(?:inherit|initial|revert|revert-layer|unset)$/iu.test(value)
     || /\b(?:env|var)\s*\(/iu.test(value)) return true;
@@ -497,16 +529,15 @@ function rulesMayAffectOwnedPaint(rules: CSSRuleList | readonly CSSRule[]): bool
 }
 
 function shapeSupportReplacements(header: string): readonly Readonly<TextReplacement>[] {
-  if (!/^@supports\b/iu.test(header)) return Object.freeze([]);
+  if (atKeyword(header)?.name !== "supports") return Object.freeze([]);
   const replacements: TextReplacement[] = [];
   for (let start = header.indexOf("("); start >= 0; start = header.indexOf("(", start + 1)) {
     const end = matchingParenthesis(header, start);
     if (end < 0) break;
     const inner = header.slice(start + 1, end);
-    const declaration = /^\s*(corner-(?:top-left|top-right|bottom-right|bottom-left|start-start|start-end|end-end|end-start)-shape|corner-shape)\s*:\s*([\s\S]+?)\s*$/iu.exec(inner);
-    if (!declaration) continue;
-    const property = declaration[1]!.toLowerCase();
-    const value = declaration[2]!;
+    const declaration = supportDeclaration(inner);
+    if (!declaration || !isShapeProperty(declaration.property)) continue;
+    const { property, value } = declaration;
     const supported = supportsShapeValue(property, value);
     replacements.push(Object.freeze({
       start: start + 1,
@@ -949,20 +980,16 @@ export function leadingImportStatements(
   while (cursor < source.length) {
     const start = skipCssTrivia(source, cursor);
     if (start >= source.length) break;
-    const importMatch = /^@import\b/iu.exec(source.slice(start));
-    const charsetMatch = /^@charset\b/iu.exec(source.slice(start));
-    const layerMatch = /^@layer\b/iu.exec(source.slice(start));
-    if (importMatch) {
-      const end = cssStatementEnd(source, start + importMatch[0].length);
+    const keyword = atKeyword(source, start);
+    if (keyword?.name === "import") {
+      const end = cssStatementEnd(source, keyword.end);
       if (end < 0) throw new SyntaxError("Automatic CSS found a malformed top-level @import rule");
       imports.push(Object.freeze({ start, end: end + 1, prelude: source.slice(start, end + 1) }));
       cursor = end + 1;
       continue;
     }
-    if (charsetMatch || layerMatch) {
-      const matchedRule = charsetMatch ?? layerMatch;
-      if (!matchedRule) break;
-      const end = cssStatementEnd(source, start + matchedRule[0].length);
+    if (keyword?.name === "charset" || keyword?.name === "layer") {
+      const end = cssStatementEnd(source, keyword.end);
       if (end >= 0) {
         cursor = end + 1;
         continue;
@@ -989,7 +1016,8 @@ function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
     rest: trimmed.slice(skipCssTrivia(trimmed, quoted[0].length)).trim(),
     url: decodeCssEscapes(quoted[1] ?? quoted[2] ?? ""),
   });
-  if (!/^url\s*\(/iu.test(trimmed)) {
+  const urlFunction = consumeImportFunction(trimmed, "url");
+  if (!urlFunction) {
     const unquoted = /^((?:\\[\s\S]|[^\s"'()])+)/u.exec(trimmed);
     if (unquoted) return Object.freeze({
       rest: trimmed.slice(skipCssTrivia(trimmed, unquoted[0].length)).trim(),
@@ -997,21 +1025,20 @@ function unquoteImportUrl(value: string): Readonly<ImportUrlParse> {
     });
     throw new SyntaxError("Automatic CSS supports quoted or url() @import URLs");
   }
-  const start = trimmed.indexOf("(");
-  const end = matchingParenthesis(trimmed, start);
-  if (end < 0) throw new SyntaxError("Automatic CSS found an unterminated @import url()");
-  const inner = trimmed.slice(start + 1, end).trim();
-  const nested: Readonly<ImportUrlParse> = unquoteImportUrl(inner);
+  const nested: Readonly<ImportUrlParse> = unquoteImportUrl(urlFunction.value);
   if (nested.rest) throw new SyntaxError("Automatic CSS found an invalid @import url()");
   return Object.freeze({
-    rest: trimmed.slice(skipCssTrivia(trimmed, end + 1)).trim(),
+    rest: urlFunction.rest,
     url: nested.url,
   });
 }
 
 function consumeImportFunction(value: string, name: string): Readonly<ImportFunctionParse> | null {
-  if (!new RegExp(`^${name}\\s*\\(`, "iu").test(value)) return null;
-  const start = value.indexOf("(");
+  const identifierStart = skipCssTrivia(value, 0);
+  const identifier = cssIdentifierAt(value, identifierStart);
+  if (identifier?.value.toLowerCase() !== name) return null;
+  const start = skipCssTrivia(value, identifier.end);
+  if (value[start] !== "(") return null;
   const end = matchingParenthesis(value, start);
   if (end < 0) throw new SyntaxError(`Automatic CSS found an unterminated @import ${name}()`);
   return Object.freeze({
@@ -1021,12 +1048,15 @@ function consumeImportFunction(value: string, name: string): Readonly<ImportFunc
 }
 
 export function parseImportStatement(statement: string, baseUrl: string): Readonly<ParsedImport> {
-  const body = statement.replace(/^@import\b/iu, "").replace(/;\s*$/u, "").trim();
+  const keyword = atKeyword(statement);
+  if (keyword?.name !== "import") throw new SyntaxError("Automatic CSS expected an @import rule");
+  const body = statement.slice(keyword.end).replace(/;\s*$/u, "").trim();
   const parsedUrl = unquoteImportUrl(body);
   let rest = parsedUrl.rest;
   let layer = null;
   let supports = null;
-  if (/^layer\b/iu.test(rest)) {
+  const layerIdentifier = cssIdentifierAt(rest, skipCssTrivia(rest, 0));
+  if (layerIdentifier?.value.toLowerCase() === "layer") {
     const layerFunction = consumeImportFunction(rest, "layer");
     if (!layerFunction) {
       throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous @import layer");

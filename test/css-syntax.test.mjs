@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalizeCornerShapeDeclarations,
+  carrierSupportsCondition,
   leadingImportStatements,
+  parseImportStatement,
 } from "../dist/carriers.mjs";
 import { cssDeclarationSignature, cssDeclarations } from "../dist/css-syntax.mjs";
 
@@ -65,5 +67,28 @@ test("stylesheet scanning rejects an unterminated import", () => {
   assert.throws(
     () => leadingImportStatements('@import url("theme.css")'),
     /malformed top-level @import/u,
+  );
+});
+
+test("import control grammar decodes escaped CSS identifiers", () => {
+  const source = String.raw`
+    @l\61yer reset, theme;
+    @im\70ort "./child.css" l\61yer(theme) s\75pports(\63orner-shape: bevel);
+    .local { corner-shape: scoop }
+  `;
+  const split = leadingImportStatements(source);
+  assert.equal(split.imports.length, 1);
+  assert(split.local.includes(String.raw`@l\61yer reset, theme`));
+  assert.match(split.local, /\.local/u);
+  const imported = parseImportStatement(split.imports[0].prelude, "https://example.test/root.css");
+  assert.deepEqual(imported, {
+    url: "https://example.test/child.css",
+    layer: "theme",
+    supports: String.raw`\63orner-shape: bevel`,
+    media: "",
+  });
+  assert.match(
+    carrierSupportsCondition(imported.supports),
+    /--cornerfill-supports-corner-shape:bevel/u,
   );
 });

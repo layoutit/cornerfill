@@ -120,6 +120,11 @@ async function startServer() {
         : ".cornerfill-import-condition-skipped{corner-shape:notch}");
       return;
     }
+    if (url.pathname === "/bench/imports/escaped-control-child.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-escaped-import{corner-shape:scoop}");
+      return;
+    }
     const path = resolve(PROJECT_ROOT, decodeURIComponent(url.pathname.slice(1)));
     if (!within(PROJECT_ROOT, path) || !existsSync(path) || !statSync(path).isFile()) {
       response.writeHead(404);

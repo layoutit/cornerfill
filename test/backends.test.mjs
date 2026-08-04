@@ -173,6 +173,17 @@ test("Firefox admits the surface pixel boundary and validates overflow before re
   assert.deepEqual(document.registrations, []);
 });
 
+test("surface creation rejects a non-finite per-surface pixel budget before allocation", () => {
+  const document = firefoxDocument();
+  assert.throws(() => createSurface(document, {
+    backend: "moz-element",
+    cssWidth: 10,
+    cssHeight: 10,
+    maxSurfacePixels: Number.NaN,
+  }), /maxSurfacePixels must be a positive safe integer/u);
+  assert.deepEqual(document.registrations, []);
+});
+
 test("Firefox registration failure rolls back the exact ID", () => {
   const document = firefoxDocument({ registrationThrows: true });
   assert.throws(() => createSurface(document, {

@@ -223,6 +223,9 @@ function backingDimensions(
     throw new TypeError("surface CSS dimensions must be finite and positive");
   }
   if (!Number.isFinite(dpr) || dpr <= 0) throw new TypeError("surface DPR must be finite and positive");
+  if (!Number.isSafeInteger(maxSurfacePixels) || maxSurfacePixels < 1) {
+    throw new TypeError("maxSurfacePixels must be a positive safe integer");
+  }
   const width = Math.max(1, Math.ceil(cssWidth * dpr));
   const height = Math.max(1, Math.ceil(cssHeight * dpr));
   if (width * height > maxSurfacePixels) {

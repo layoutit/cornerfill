@@ -1025,6 +1025,68 @@ await test("explicit flow and contextual colors resolve against the Cornerfill h
   }
 });
 
+await test("color resolution does not change selector-sensitive authored paint", async () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    body:last-child .cornerfill-color-snapshot-document { background: rgb(255, 0, 0) }
+    body:not(:last-child) .cornerfill-color-snapshot-document { background: rgb(0, 0, 255) }
+  `;
+  document.head.append(style);
+  const documentElement = host();
+  documentElement.className = "cornerfill-color-snapshot-document";
+  documentElement.style.removeProperty("background-color");
+  const shell = host();
+  const root = shell.attachShadow({ mode: "open" });
+  const shadowStyle = document.createElement("style");
+  shadowStyle.textContent = `
+    .cornerfill-color-snapshot-shadow:last-child { background: rgb(255, 0, 0) }
+    .cornerfill-color-snapshot-shadow:not(:last-child) { background: rgb(0, 0, 255) }
+  `;
+  root.append(shadowStyle);
+  const shadowElement = host(root);
+  shadowElement.className = "cornerfill-color-snapshot-shadow";
+  shadowElement.style.removeProperty("background-color");
+  const controller = installCornerfill(options());
+  const handles = [documentElement, shadowElement].map((element) => controller.attach(element, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+  }));
+  try {
+    await Promise.all(handles.map(({ ready }) => ready));
+    for (const handle of handles) {
+      const color = handle.explain().paint.layer.color;
+      assert(/rgb\(255,\s*0,\s*0\)/u.test(color), `color probe changed authored selector state: ${color}`);
+    }
+  } finally {
+    for (const handle of handles) handle.dispose();
+    controller.destroy();
+    style.remove();
+    documentElement.remove();
+    shell.remove();
+  }
+});
+
+await test("explicit colors inherit the host custom-property environment", async () => {
+  const element = host();
+  element.style.setProperty("--cornerfill-accent", "rgb(255, 0, 0)");
+  element.style.color = "rgb(0, 0, 255)";
+  const controller = installCornerfill(options());
+  const handle = controller.attach(element, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "var(--cornerfill-accent)" },
+  });
+  try {
+    await handle.ready;
+    const color = handle.explain().paint.layer.color;
+    assert(/rgb\(255,\s*0,\s*0\)/u.test(color), `host custom property resolved as ${color}`);
+  } finally {
+    handle.dispose();
+    controller.destroy();
+    element.remove();
+  }
+});
+
 await test("automatic signatures include text-orientation", async () => {
   const style = document.createElement("style");
   style.textContent = `
@@ -1589,6 +1651,11 @@ await test("automatic source budgets fail ownership closed", async () => {
     "maximum compiled selector count of 1",
   );
   await run(
+    ".cornerfill-source-budget:is(.first,.second){corner-shape:bevel;border-radius:5px}",
+    { maxCompiledSelectors: 1 },
+    "maximum compiled selector count of 1",
+  );
+  await run(
     [
       ".cornerfill-source-budget{corner-shape:bevel;border-radius:5px}",
       ".cornerfill-source-budget.other{corner-shape:scoop}",
@@ -1799,6 +1866,41 @@ await test("supports-false imports are filtered before fetch and source budgets"
     link.remove();
     local.remove();
     imported.remove();
+  }
+});
+
+await test("automatic imports decode escaped control identifiers", async () => {
+  const style = document.createElement("style");
+  style.textContent = String.raw`
+    @l\61yer cornerfill-escaped;
+    @im\70ort "/bench/imports/escaped-control-child.css"
+      l\61yer(cornerfill-escaped)
+      s\75pports(\63orner-shape: bevel);
+    .cornerfill-escaped-import-local { corner-shape: bevel }
+  `;
+  document.head.append(style);
+  const imported = host();
+  imported.className = "cornerfill-escaped-import";
+  const local = host();
+  local.className = "cornerfill-escaped-import-local";
+  const auto = installCornerfillAuto(options({ autoObserve: false }));
+  try {
+    await auto.ready;
+    equal(
+      auto.explain(imported)?.geometry.shapeParameters,
+      [-1, -1, -1, -1],
+      "escaped import controls did not compile the imported shape",
+    );
+    equal(
+      auto.explain(local)?.geometry.shapeParameters,
+      [0, 0, 0, 0],
+      "escaped control parsing discarded the local rule",
+    );
+  } finally {
+    auto.destroy();
+    style.remove();
+    imported.remove();
+    local.remove();
   }
 });
 
@@ -2223,9 +2325,10 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
 
 await test("registered shadow scopes discover and observe host selectors", async () => {
   const theme = host();
-  theme.className = "cornerfill-shadow-theme";
+  theme.id = "cornerfill-shadow-theme-id";
+  theme.className = "cornerfill-shadow-theme cornerfill-shadow-theme-a cornerfill-shadow-theme-b";
   const shell = host(theme);
-  shell.className = "cornerfill-shadow-host-active";
+  shell.className = "cornerfill-shadow-host-active cornerfill-shadow-invalid-wrapper";
   const root = shell.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = `
@@ -2245,6 +2348,16 @@ await test("registered shadow scopes discover and observe host selectors", async
       border-radius: 5px;
       background: blue;
     }
+    :host-context(#cornerfill-shadow-theme-id) .cornerfill-shadow-specific-id { corner-shape: bevel }
+    :host(.cornerfill-shadow-host-active) .cornerfill-shadow-specific-id { corner-shape: scoop }
+    :host-context(.cornerfill-shadow-theme-a.cornerfill-shadow-theme-b) .cornerfill-shadow-specific-classes { corner-shape: bevel }
+    :host(.cornerfill-shadow-host-active) .cornerfill-shadow-specific-classes { corner-shape: scoop }
+    :host(.cornerfill-shadow-host-active) .cornerfill-shadow-specific-type { corner-shape: scoop }
+    :host-context(div) .cornerfill-shadow-specific-type { corner-shape: bevel }
+    :host-context(:is(#cornerfill-shadow-theme-id,.cornerfill-unused-theme)) .cornerfill-shadow-specific-functional { corner-shape: bevel }
+    :host(.cornerfill-shadow-host-active) .cornerfill-shadow-specific-functional { corner-shape: scoop }
+    :host-context(.cornerfill-shadow-theme .cornerfill-shadow-invalid-wrapper) .cornerfill-shadow-invalid-context { corner-shape: bevel }
+    :host-context(.cornerfill-shadow-theme >) .cornerfill-shadow-malformed-context { corner-shape: bevel }
     [data-cornerfill-selector-literal=":host"] {
       corner-shape: scoop;
       border-radius: 5px;
@@ -2258,6 +2371,18 @@ await test("registered shadow scopes discover and observe host selectors", async
   contextual.className = "cornerfill-shadow-context-child";
   const direct = host(root);
   direct.className = "cornerfill-shadow-direct-child";
+  const specificId = host(root);
+  specificId.className = "cornerfill-shadow-specific-id";
+  const specificClasses = host(root);
+  specificClasses.className = "cornerfill-shadow-specific-classes";
+  const specificType = host(root);
+  specificType.className = "cornerfill-shadow-specific-type";
+  const specificFunctional = host(root);
+  specificFunctional.className = "cornerfill-shadow-specific-functional";
+  const invalidContext = host(root);
+  invalidContext.className = "cornerfill-shadow-invalid-context";
+  const malformedContext = host(root);
+  malformedContext.className = "cornerfill-shadow-malformed-context";
   const literal = host(root);
   literal.dataset.cornerfillSelectorLiteral = ":host";
   const nestedShell = host(root);
@@ -2282,6 +2407,12 @@ await test("registered shadow scopes discover and observe host selectors", async
     assert(scope.explain(child)?.status === "active", "normal branch beside :host was not discovered");
     assert(scope.explain(contextual)?.status === "active", ":host-context() descendant was not discovered");
     assert(scope.explain(direct)?.status === "active", ":host child combinator was not discovered");
+    equal(scope.explain(specificId)?.geometry.shapeParameters, [0, 0, 0, 0], ":host-context() ID specificity drifted");
+    equal(scope.explain(specificClasses)?.geometry.shapeParameters, [0, 0, 0, 0], ":host-context() class specificity drifted");
+    equal(scope.explain(specificType)?.geometry.shapeParameters, [-1, -1, -1, -1], ":host-context() type specificity drifted");
+    equal(scope.explain(specificFunctional)?.geometry.shapeParameters, [0, 0, 0, 0], ":host-context() functional specificity drifted");
+    assert(scope.explain(invalidContext) === null, "invalid complex :host-context() argument became active");
+    assert(scope.explain(malformedContext) === null, "malformed :host-context() argument became active");
     equal(scope.explain(literal)?.geometry.shapeParameters, [-1, -1, -1, -1], "host text inside an attribute value was parsed as a pseudo");
     assert(nestedScope.explain(nestedContextual)?.status === "active", "nested :host-context() was not discovered");
     theme.classList.remove("cornerfill-shadow-theme");

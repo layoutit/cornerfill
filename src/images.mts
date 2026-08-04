@@ -113,8 +113,8 @@ export class ImageCache {
     if (!Number.isSafeInteger(maxZeroReferenceEntries) || maxZeroReferenceEntries < 0) {
       throw new TypeError("maxZeroReferenceEntries must be a non-negative integer");
     }
-    if (!Number.isFinite(maxDecodedPixels) || maxDecodedPixels < 0) {
-      throw new TypeError("maxDecodedPixels must be finite and non-negative");
+    if (!Number.isSafeInteger(maxDecodedPixels) || maxDecodedPixels < 0) {
+      throw new TypeError("maxDecodedPixels must be a non-negative safe integer");
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new TypeError("timeoutMs must be finite and positive");
