@@ -98,6 +98,28 @@ async function startServer() {
       }, Number.isFinite(delay) && delay > 0 ? delay : 0);
       return;
     }
+    if (/^\/cornerfill-shadow-base-[ab]\/theme\.css$/u.test(url.pathname)) {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-shadow-base{corner-shape:bevel}");
+      return;
+    }
+    if (url.pathname === "/bench/imports/conditional-root.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(`
+        @import "/bench/imports/conditional-skipped.css" supports(display: __cornerfill_impossible__);
+        @import "/bench/imports/conditional-active.css" supports(corner-shape: bevel);
+        .cornerfill-import-condition-local { corner-shape: bevel }
+      `);
+      return;
+    }
+    if (url.pathname === "/bench/imports/conditional-active.css"
+      || url.pathname === "/bench/imports/conditional-skipped.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(url.pathname.endsWith("active.css")
+        ? ".cornerfill-import-condition-active{corner-shape:scoop}"
+        : ".cornerfill-import-condition-skipped{corner-shape:notch}");
+      return;
+    }
     const path = resolve(PROJECT_ROOT, decodeURIComponent(url.pathname.slice(1)));
     if (!within(PROJECT_ROOT, path) || !existsSync(path) || !statSync(path).isFile()) {
       response.writeHead(404);

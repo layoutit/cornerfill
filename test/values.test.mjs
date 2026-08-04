@@ -6,6 +6,7 @@ import {
   logicalCornerToPhysical,
   parseBorderRadius,
   parseCornerShape,
+  parseCornerShapeValue,
   parseLengthPercentage,
   resolveBorderRadius,
   resolveBorderRadiusDeclarations,
@@ -84,6 +85,34 @@ test("logical corner longhands resolve through writing mode and direction", () =
     { rx: 10, ry: 20 },
     { rx: 10, ry: 20 },
   ]);
+});
+
+test("vertical upright flow uses the ltr used direction", () => {
+  assert.equal(
+    logicalCornerToPhysical("start-start", {
+      writingMode: "vertical-rl",
+      direction: "rtl",
+      textOrientation: "upright",
+    }),
+    "top-right",
+  );
+  assert.equal(
+    logicalCornerToPhysical("start-start", {
+      writingMode: "vertical-rl",
+      direction: "rtl",
+      textOrientation: "mixed",
+    }),
+    "bottom-right",
+  );
+});
+
+test("corner-shape parsing consumes CSS identifier escapes", () => {
+  assert.deepEqual(parseCornerShape(String.raw`\62 evel scoop`), [0, -1, 0, -1]);
+  assert.equal(parseCornerShapeValue(String.raw`sup\65 rellipse(2)`), 2);
+  assert.throws(
+    () => parseCornerShapeValue(String.raw`superellipse\28 2\29 `),
+    /unsupported value/u,
+  );
 });
 
 test("sideways-lr reverses its inline axis relative to vertical-lr", () => {

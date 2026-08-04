@@ -1,7 +1,14 @@
+import {
+  cssEscapeEnd,
+  wholeCssFunction,
+  wholeCssIdentifier,
+} from "./css-syntax.mjs";
+
 const CORNER_COUNT = 4;
 
 export type Four<T> = readonly [T, T, T, T];
 export type CornerDirection = "ltr" | "rtl";
+export type CornerTextOrientation = "mixed" | "upright" | "sideways";
 export type CornerWritingMode =
   | "horizontal-tb"
   | "vertical-rl"
@@ -34,6 +41,7 @@ export interface ResolvedCornerRadius {
 
 export interface CornerWritingOptions {
   readonly direction?: CornerDirection;
+  readonly textOrientation?: CornerTextOrientation;
   readonly writingMode?: CornerWritingMode;
 }
 
@@ -72,15 +80,12 @@ function scanTopLevel(
 ): void {
   let depth = 0;
   let quote: string | null = null;
-  let escaped = false;
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
     if (character === "\\") {
-      escaped = true;
+      if (!quote) onCharacter(character, index, depth);
+      const end = cssEscapeEnd(value, index);
+      if (end > index) index = end - 1;
       continue;
     }
     if (quote) {
@@ -416,6 +421,7 @@ export function resolveBorderRadiusDeclarations({
   logical = {},
   writingMode = "horizontal-tb",
   direction = "ltr",
+  textOrientation = "mixed",
 }: BorderRadiusDeclarations = {}, width: number, height: number): Four<Readonly<ResolvedCornerRadius>> {
   const result = [...parseBorderRadius(shorthand)];
   for (const [corner, value] of Object.entries(physical)) {
@@ -424,31 +430,39 @@ export function resolveBorderRadiusDeclarations({
   }
   for (const [corner, value] of Object.entries(logical)) {
     const logicalCorner = logicalCornerName(corner, LOGICAL_RADIUS_PROPERTY, "logical radius corner");
-    const physicalCorner = logicalCornerToPhysical(logicalCorner, { writingMode, direction });
+    const physicalCorner = logicalCornerToPhysical(logicalCorner, {
+      writingMode,
+      direction,
+      textOrientation,
+    });
     result[PHYSICAL_CORNER_INDEX[physicalCorner]] = parseCornerRadius(value);
   }
   return resolveParsedRadii(result, width, height);
 }
 
 export function parseCornerShapeValue(input: string): number {
-  const source = String(input).trim().toLowerCase();
-  if (Object.hasOwn(CORNER_SHAPE_PARAMETERS, source)) {
-    return CORNER_SHAPE_PARAMETERS[source as keyof typeof CORNER_SHAPE_PARAMETERS];
+  const source = String(input).trim();
+  const identifier = wholeCssIdentifier(source)?.value.toLowerCase();
+  if (identifier && Object.hasOwn(CORNER_SHAPE_PARAMETERS, identifier)) {
+    return CORNER_SHAPE_PARAMETERS[identifier as keyof typeof CORNER_SHAPE_PARAMETERS];
   }
-  const match = /^superellipse\((.*)\)$/isu.exec(source);
-  if (!match) throw syntaxError("corner-shape", input, "contains an unsupported value");
-  const argument = match[1]!.trim();
-  if (argument === "infinity") return Number.POSITIVE_INFINITY;
-  if (argument === "-infinity") return Number.NEGATIVE_INFINITY;
+  const functionToken = wholeCssFunction(source);
+  if (functionToken?.name.toLowerCase() !== "superellipse") {
+    throw syntaxError("corner-shape", input, "contains an unsupported value");
+  }
+  const argument = functionToken.body.trim();
+  const argumentIdentifier = wholeCssIdentifier(argument)?.value.toLowerCase();
+  if (argumentIdentifier === "infinity") return Number.POSITIVE_INFINITY;
+  if (argumentIdentifier === "-infinity") return Number.NEGATIVE_INFINITY;
   const simpleNumber = new RegExp(`^[+-]?${NUMBER}$`, "iu");
   let value: number;
   if (simpleNumber.test(argument)) value = Number(argument);
   else {
-    const calculation = /^calc\((.*)\)$/isu.exec(argument);
-    if (!calculation) {
+    const calculation = wholeCssFunction(argument);
+    if (calculation?.name.toLowerCase() !== "calc") {
       throw syntaxError("corner-shape", input, "requires a finite number or signed infinity");
     }
-    const expression = calculation[1]!;
+    const expression = calculation.body;
     if (!expression.trim()) {
       throw syntaxError("corner-shape", input, "contains an empty calc()");
     }
@@ -476,6 +490,7 @@ export function parseCornerShape(input: string): Four<number> {
 export function logicalCornerToPhysical(logicalCorner: string, {
   writingMode = "horizontal-tb",
   direction = "ltr",
+  textOrientation = "mixed",
 }: CornerWritingOptions = {}): PhysicalCorner {
   const match = /^(start|end)-(start|end)$/u.exec(logicalCorner);
   if (!match) throw new TypeError(`invalid logical corner: ${logicalCorner}`);
@@ -485,7 +500,13 @@ export function logicalCornerToPhysical(logicalCorner: string, {
   if (directionValue !== "ltr" && directionValue !== "rtl") {
     throw new TypeError(`unsupported direction: ${direction}`);
   }
-  const rtl = directionValue === "rtl";
+  const orientation = String(textOrientation).toLowerCase();
+  if (orientation !== "mixed" && orientation !== "upright" && orientation !== "sideways") {
+    throw new TypeError(`unsupported text-orientation: ${textOrientation}`);
+  }
+  const verticalUpright = (mode === "vertical-rl" || mode === "vertical-lr")
+    && orientation === "upright";
+  const rtl = !verticalUpright && directionValue === "rtl";
   let blockStart: PhysicalSide;
   let blockEnd: PhysicalSide;
   let inlineStart: PhysicalSide;
@@ -521,6 +542,7 @@ export function resolveCornerShapeDeclarations({
   logical = {},
   writingMode = "horizontal-tb",
   direction = "ltr",
+  textOrientation = "mixed",
 }: CornerShapeDeclarations = {}): Four<number> {
   const result = [...parseCornerShape(shorthand)];
   for (const [corner, value] of Object.entries(physical)) {
@@ -529,7 +551,11 @@ export function resolveCornerShapeDeclarations({
   }
   for (const [corner, value] of Object.entries(logical)) {
     const logicalCorner = logicalCornerName(corner, LOGICAL_SHAPE_PROPERTY, "logical shape corner");
-    const physicalCorner = logicalCornerToPhysical(logicalCorner, { writingMode, direction });
+    const physicalCorner = logicalCornerToPhysical(logicalCorner, {
+      writingMode,
+      direction,
+      textOrientation,
+    });
     result[PHYSICAL_CORNER_INDEX[physicalCorner]] = parseCornerShapeValue(value);
   }
   return Object.freeze(result) as Four<number>;
@@ -538,6 +564,7 @@ export function resolveCornerShapeDeclarations({
 export function resolveCornerShape(input: CornerShapeSource, {
   writingMode = "horizontal-tb",
   direction = "ltr",
+  textOrientation = "mixed",
 }: CornerWritingOptions = {}): Four<number> {
   if (typeof input === "string") return parseCornerShape(input);
   if (Array.isArray(input)) {
@@ -552,6 +579,7 @@ export function resolveCornerShape(input: CornerShapeSource, {
       ...declarations,
       writingMode: declarations.writingMode ?? writingMode,
       direction: declarations.direction ?? direction,
+      textOrientation: declarations.textOrientation ?? textOrientation,
     });
   }
   throw new TypeError("unsupported corner-shape source");

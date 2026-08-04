@@ -45,6 +45,9 @@ test("disposed WebKit named canvas identifiers are reused per document and prefi
   assert.deepEqual(document.calls.at(-1), { id: firstId, width: 1, height: 1 });
   assert.deepEqual(getSurfaceResourceStats(document).webkit, {
     activeCanvases: 0,
+    activePixels: 0,
+    namedCanvases: 1,
+    peakActiveCanvases: 1,
     pooledCanvases: 1,
     pooledPixels: 1,
     retainedCanvases: 1,
@@ -211,13 +214,15 @@ test("WebKit overflow IDs remain reusable and every released canvas is shrunk", 
     cssWidth: 20,
     cssHeight: 20,
     idPrefix: "bounded",
-    maxWebkitPoolEntries: 1,
-    maxWebkitPoolPrefixes: 1,
+    webkitPoolEntriesPerPrefix: 1,
+    webkitPoolPrefixBuckets: 1,
   }));
   const originalIds = new Set(surfaces.map(({ id }) => id));
   for (const surface of surfaces) surface.dispose();
   const stats = getSurfaceResourceStats(document).webkit;
   assert.equal(stats.pooledCanvases, 3);
+  assert.equal(stats.namedCanvases, 3);
+  assert.equal(stats.peakActiveCanvases, 3);
   assert.equal(stats.retainedPixels, 3);
   assert.equal(stats.shrinkFailures, 0);
   const reused = Array.from({ length: 3 }, () => createSurface(document, {
@@ -225,11 +230,14 @@ test("WebKit overflow IDs remain reusable and every released canvas is shrunk", 
     cssWidth: 10,
     cssHeight: 10,
     idPrefix: "different-prefix",
-    maxWebkitPoolEntries: 1,
-    maxWebkitPoolPrefixes: 1,
+    webkitPoolEntriesPerPrefix: 1,
+    webkitPoolPrefixBuckets: 1,
   }));
   assert.deepEqual(new Set(reused.map(({ id }) => id)), originalIds);
-  assert.equal(getSurfaceResourceStats(document).webkit.activeCanvases, 3);
+  const activeStats = getSurfaceResourceStats(document).webkit;
+  assert.equal(activeStats.activeCanvases, 3);
+  assert.equal(activeStats.activePixels, 300);
+  assert.equal(activeStats.retainedPixels, 300);
   for (const surface of reused) surface.dispose();
 });
 

@@ -35,7 +35,7 @@ class FakeStyle {
   }
 }
 
-function nativeDocument() {
+function nativeDocument({ liveFallback = false } = {}) {
   class Element {
     constructor(ownerDocument) {
       this.ownerDocument = ownerDocument;
@@ -58,15 +58,20 @@ function nativeDocument() {
     removeEventListener() {},
   };
   const document = { baseURI: "https://example.test/", defaultView: view };
+  if (liveFallback) {
+    document.getCSSCanvasContext = () => {
+      throw new Error("a qualified native attachment must not initialize the fallback backend");
+    };
+  }
   return {
     document,
     element() { return new Element(document); },
   };
 }
 
-test("native handles dispose and controllers destroy without teardown errors", async () => {
+test("qualified native handles ignore fallback API availability and tear down cleanly", async () => {
   const { installCornerfill } = await import("../dist/runtime.mjs?native-teardown-test");
-  const fixture = nativeDocument();
+  const fixture = nativeDocument({ liveFallback: true });
   const first = fixture.element();
   first.style.setProperty("corner-shape", "round");
   first.style.setProperty("border-radius", "4px");

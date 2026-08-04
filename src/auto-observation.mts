@@ -1,4 +1,5 @@
 import { cssDeclarationSignature } from "./css-syntax.mjs";
+import { colorProbeMutation } from "./colors.mjs";
 
 export interface AutomaticMutationPlan {
   readonly attachments: boolean;
@@ -106,10 +107,13 @@ export function planAutomaticMutations(
   let candidates = false;
   let attachments = false;
   let baseChanged = false;
+  let childListChanged = false;
   let selectors: ReadonlySet<string> | null = null;
   let rootSensitiveSelectors: boolean | null = null;
   const placementTargets = new Set<Element>();
   for (const record of records) {
+    if (colorProbeMutation(record)) continue;
+    childListChanged ||= record.type === "childList";
     if (record.type === "attributes") {
       if (record.attributeName === "data-cornerfill-owned"
         || record.attributeName === "data-cornerfill-owned-border"
@@ -201,7 +205,7 @@ export function planAutomaticMutations(
     attachments,
     baseChanged,
     candidates,
-    childListChanged: records.some((record) => record.type === "childList"),
+    childListChanged,
     sources,
   });
 }

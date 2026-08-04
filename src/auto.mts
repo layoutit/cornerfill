@@ -10,8 +10,6 @@ import type {
 type RuntimeWindow = Window & typeof globalThis;
 type RuntimeDocument = Document & Readonly<{
   defaultView: RuntimeWindow;
-  getCSSCanvasContext?: unknown;
-  mozSetImageElement?: unknown;
 }>;
 
 interface NativeControllerOptions {
@@ -139,15 +137,9 @@ async function automaticController(): Promise<CornerfillAutoControllerHandle | n
   const document = globalThis.document as RuntimeDocument | undefined;
   if (!document) return null;
   const nativeQualification = qualifyNativeCornerShape(document);
-  const liveFallbackAvailable = typeof document.getCSSCanvasContext === "function"
-    || typeof document.mozSetImageElement === "function";
-  const preferFallback = nativeQualification.qualified
-    && liveFallbackAvailable
-    && !nativeQualification.tiers.fullNativeQualified;
-  if (nativeQualification.qualified && !preferFallback) return nativeController(nativeQualification);
+  if (nativeQualification.qualified) return nativeController(nativeQualification);
   const { installCornerfillAuto } = await import("./auto-runtime.mjs");
   return installCornerfillAuto({
-    forceFallback: preferFallback,
     nativeQualification,
     onError(error, context) {
       console.error(`Cornerfill could not polyfill ${context}:`, error);

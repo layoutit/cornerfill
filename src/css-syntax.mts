@@ -28,7 +28,7 @@ interface CssIdentifierParse {
   readonly value: string;
 }
 
-function cssEscapeEnd(source: string, start: number): number {
+export function cssEscapeEnd(source: string, start: number): number {
   if (source[start] !== "\\") return -1;
   const first = source[start + 1];
   if (!first || /[\n\f\r]/u.test(first)) return -1;
@@ -42,6 +42,14 @@ function cssEscapeEnd(source: string, start: number): number {
   if (source[index] === "\r" && source[index + 1] === "\n") return index + 2;
   if (/[\t\n\f\r ]/u.test(source[index] ?? "")) index += 1;
   return index;
+}
+
+function cssSyntaxEscapeEnd(source: string, start: number): number {
+  const first = source[start + 1];
+  if (!first) return start + 1;
+  if (first === "\r" && source[start + 2] === "\n") return start + 3;
+  if (/[\n\f\r]/u.test(first)) return start + 2;
+  return cssEscapeEnd(source, start);
 }
 
 function cssNameStart(character: string): boolean {
@@ -155,7 +163,6 @@ export function scanCssSyntax(
 ): void {
   let quote: "\"" | "'" | null = null;
   let comment = false;
-  let escaped = false;
   let parentheses = 0;
   let brackets = 0;
   let blocks = 0;
@@ -172,17 +179,13 @@ export function scanCssSyntax(
       continue;
     }
     if (quote) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (escaped) {
-      escaped = false;
+      if (character === "\\") {
+        index = cssSyntaxEscapeEnd(source, index) - 1;
+      } else if (character === quote) quote = null;
       continue;
     }
     if (character === "\\") {
-      escaped = true;
+      index = cssSyntaxEscapeEnd(source, index) - 1;
       continue;
     }
     if (character === "/" && next === "*") {
@@ -202,6 +205,26 @@ export function scanCssSyntax(
     else if (character === "{") blocks += 1;
     else if (character === "}") blocks = Math.max(0, blocks - 1);
   }
+}
+
+export function wholeCssFunction(
+  source: string,
+): Readonly<{ body: string; name: string }> | null {
+  const start = skipCssTrivia(source, 0);
+  const identifier = consumeCssIdentifier(source, start);
+  if (!identifier || source[identifier.end] !== "(") return null;
+  let end = -1;
+  scanCssSyntax(source, identifier.end, (index, character, parentheses) => {
+    if (character === ")" && parentheses === 1) {
+      end = index;
+      return false;
+    }
+  });
+  if (end < 0 || skipCssTrivia(source, end + 1) !== source.length) return null;
+  return Object.freeze({
+    name: identifier.value,
+    body: source.slice(identifier.end + 1, end),
+  });
 }
 
 export function cssDeclarations(source: unknown): readonly Readonly<CssDeclarationToken>[] {

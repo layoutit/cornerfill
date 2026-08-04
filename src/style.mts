@@ -515,6 +515,7 @@ export function flowFromComputed(computed: CSSStyleDeclaration): Required<Corner
   return Object.freeze({
     writingMode: (computed.writingMode || "horizontal-tb") as Required<CornerWritingOptions>["writingMode"],
     direction: (computed.direction || "ltr") as Required<CornerWritingOptions>["direction"],
+    textOrientation: (computed.textOrientation || "mixed") as Required<CornerWritingOptions>["textOrientation"],
   });
 }
 
@@ -670,10 +671,12 @@ export function captureShapeCarriers(
     present,
     source: Object.freeze({
       kind: "declarations",
-      shorthand: shorthand || capturedBaseline.shorthand,
+      shorthand: shorthand || (Object.keys(logical).length > 0 ? "round" : capturedBaseline.shorthand),
       physical: Object.freeze(shorthand
         ? { ...carrierPhysical }
-        : { ...capturedBaseline.physical, ...carrierPhysical }),
+        : Object.keys(logical).length > 0
+          ? { ...carrierPhysical }
+          : { ...capturedBaseline.physical, ...carrierPhysical }),
       logical,
       ...flowFromComputed(computed),
     }) as CornerShapeSource,

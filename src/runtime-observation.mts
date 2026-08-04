@@ -29,6 +29,7 @@ const ANIMATED_PAINT_PROPERTIES = new Set([
   "display",
   "height",
   "image-rendering",
+  "text-orientation",
   "visibility",
   "width",
   "writing-mode",

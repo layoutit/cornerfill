@@ -468,7 +468,7 @@ function supportsShapeValue(property: string, value: string): boolean {
   }
 }
 
-const OBSERVED_OWNED_PROPERTY = /^(?:-webkit-(?:appearance|backdrop-filter)$|appearance$|aspect-ratio$|backdrop-filter$|background(?:-|$)|block-size$|border(?:-|$)|box-shadow$|box-sizing$|color(?:-scheme)?$|contain$|content(?:-|$)|corner-(?:.*-)?shape$|direction$|display$|font(?:-|$)|height$|image-rendering$|inline-size$|line-height$|list-style(?:-|$)|max-(?:block-size|height|inline-size|width)$|min-(?:block-size|height|inline-size|width)$|outline(?:-|$)|overflow(?:-|$)|padding(?:-|$)|visibility$|width$|writing-mode$)/u;
+const OBSERVED_OWNED_PROPERTY = /^(?:-webkit-(?:appearance|backdrop-filter)$|appearance$|aspect-ratio$|backdrop-filter$|background(?:-|$)|block-size$|border(?:-|$)|box-shadow$|box-sizing$|color(?:-scheme)?$|contain$|content(?:-|$)|corner-(?:.*-)?shape$|direction$|display$|font(?:-|$)|height$|image-rendering$|inline-size$|line-height$|list-style(?:-|$)|max-(?:block-size|height|inline-size|width)$|min-(?:block-size|height|inline-size|width)$|outline(?:-|$)|overflow(?:-|$)|padding(?:-|$)|text-orientation$|visibility$|width$|writing-mode$)/u;
 
 function styleProperties(style: CSSStyleDeclaration | null | undefined): readonly string[] {
   if (!style) return Object.freeze([]);
@@ -533,6 +533,12 @@ function carrierSupportsHeader(header: string): string {
   return output + header.slice(cursor);
 }
 
+export function carrierSupportsCondition(condition: string): string {
+  const source = String(condition).trim();
+  const normalized = /^(?:\(|not\b)/iu.test(source) ? source : `(${source})`;
+  return carrierSupportsHeader(`@supports ${normalized}`).slice("@supports ".length);
+}
+
 function resolvedNestedSelector(selector: string, parent: string): string {
   let output = "";
   let cursor = 0;
@@ -546,6 +552,74 @@ function resolvedNestedSelector(selector: string, parent: string): string {
   return replaced ? output + selector.slice(cursor) : `:is(${parent}) ${selector}`;
 }
 
+function selectorUsesNamespace(selector: string): boolean {
+  let namespaced = false;
+  scanCssSyntax(selector, 0, (index, character) => {
+    if (character !== "|") return;
+    const previous = selector[index - 1];
+    const next = selector[index + 1];
+    if (previous === "|" || next === "|" || next === "=") return;
+    namespaced = true;
+    return false;
+  });
+  return namespaced;
+}
+
+interface SourceRuleScan {
+  readonly namespaceBinding: boolean;
+  readonly selectors: readonly Readonly<{ end: number; start: number }>[];
+}
+
+function sourceRuleScan(source: string): Readonly<SourceRuleScan> {
+  const starts = [0];
+  const blocks: ("at" | "declaration" | "style")[] = [];
+  const selectors: Readonly<{ end: number; start: number }>[] = [];
+  let namespaceBinding = false;
+  const statementStart = (depth: number) => skipCssTrivia(source, starts[depth] ?? 0);
+  scanCssSyntax(source, 0, (index, character, parentheses, brackets, depth) => {
+    if (parentheses !== 0 || brackets !== 0) return;
+    if (character === ";") {
+      const header = source.slice(statementStart(depth), index).trim();
+      if (depth === 0 && /^@namespace\b/iu.test(header)) namespaceBinding = true;
+      starts[depth] = index + 1;
+      return;
+    }
+    if (character === "{") {
+      const start = statementStart(depth);
+      const header = source.slice(start, index).trim();
+      const parent = blocks[depth - 1];
+      const customBlock = parent === "style" && /^--[-_a-z0-9\\]+\s*:/iu.test(header);
+      const kind = parent === "declaration"
+        ? "declaration"
+        : header.startsWith("@") ? "at" : customBlock ? "declaration" : "style";
+      blocks[depth] = kind;
+      starts[depth + 1] = index + 1;
+      if (/^@namespace\b/iu.test(header)) namespaceBinding = true;
+      else if (kind === "style") selectors.push(Object.freeze({ start, end: index }));
+      return;
+    }
+    if (character === "}") {
+      blocks.length = Math.max(0, depth - 1);
+      starts[Math.max(0, depth - 1)] = index + 1;
+    }
+  });
+  return Object.freeze({ namespaceBinding, selectors: Object.freeze(selectors) });
+}
+
+function transformSelectorHeaders(
+  source: string,
+  selectors: readonly Readonly<{ end: number; start: number }>[],
+  transform: (selector: string) => string,
+): string {
+  let output = "";
+  let cursor = 0;
+  for (const { start, end } of selectors) {
+    output += source.slice(cursor, start) + transform(source.slice(start, end));
+    cursor = end;
+  }
+  return output + source.slice(cursor);
+}
+
 function serializeCarrierRules(
   rules: CSSRuleList | readonly CSSRule[],
   selectors: Set<string>,
@@ -555,11 +629,15 @@ function serializeCarrierRules(
   observationSelectors: Set<string>,
   strictShapeSupports = false,
   parentSelector: string | null = null,
+  selectorDisplay: ((selector: string) => string) | null = null,
 ): string {
   let output = "";
   for (const rawRule of rules) {
     const rule = rawRule as CarrierRule;
     const statement = rule.cssText.trim();
+    if (/^@namespace\b/iu.test(statement)) {
+      throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve @namespace selector bindings");
+    }
     if (/^@layer\b[^{}]*;$/iu.test(statement)) {
       output += statement;
       continue;
@@ -591,13 +669,28 @@ function serializeCarrierRules(
       );
     }
     const declarations = carrierDeclarations(rule.style);
-    const selector = typeof rule.selectorText === "string"
-      ? (parentSelector ? resolvedNestedSelector(rule.selectorText, parentSelector) : rule.selectorText)
+    const ruleSelector = typeof rule.selectorText === "string"
+      ? (selectorDisplay ? selectorDisplay(rule.selectorText) : rule.selectorText)
       : null;
+    const selector = ruleSelector
+      ? (parentSelector ? resolvedNestedSelector(ruleSelector, parentSelector) : ruleSelector)
+      : null;
+    if (selector && selectorUsesNamespace(selector)) {
+      throw ownershipBlockingSyntaxError(
+        `Automatic CSS cannot discover namespace-qualified selector matches: ${selector}`,
+      );
+    }
     const shapeSupports = shapeSupportReplacements(header).length > 0;
     const observesOwnedSubtree = Boolean(rule.cssRules && rulesMayAffectOwnedPaint(rule.cssRules));
     if (/^@container\b/iu.test(header) && observesOwnedSubtree) {
       throw ownershipBlockingSyntaxError(`Automatic CSS cannot observe container-query paint dependencies: ${header}`);
+    }
+    if (/^@layer\s*$/iu.test(header) && observesOwnedSubtree) {
+      throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous cascade layer");
+    }
+    if (rule.cssRules && typeof rule.selectorText !== "string"
+      && !supportedGroupingRule && observesOwnedSubtree) {
+      throw ownershipBlockingSyntaxError(`Automatic CSS cannot preserve at-rule context: ${header}`);
     }
     const nested = rule.cssRules
       ? serializeCarrierRules(
@@ -609,6 +702,7 @@ function serializeCarrierRules(
         observationSelectors,
         strictShapeSupports || shapeSupports,
         selector ?? parentSelector,
+        selectorDisplay,
       )
       : "";
     if (/^@media\b/iu.test(header) && observesOwnedSubtree) {
@@ -667,13 +761,13 @@ function serializeCarrierRules(
     const preserveEmptyLayer = strictShapeSupports && namedLayer;
     if (nested || preserveEmptyLayer) {
       if (/^@layer\s*$/iu.test(header)) {
-        throw new SyntaxError("Automatic CSS cannot preserve an anonymous cascade layer");
+        throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous cascade layer");
       }
       if (/^@supports\b/iu.test(header)) output += `${carrierSupportsHeader(header)}{${nested}}`;
       else if (/^@media\b/iu.test(header) || namedLayer) {
         output += `${header}{${nested}}`;
       } else {
-        throw new SyntaxError(`Automatic CSS cannot preserve at-rule context: ${header}`);
+        throw ownershipBlockingSyntaxError(`Automatic CSS cannot preserve at-rule context: ${header}`);
       }
     }
   }
@@ -696,7 +790,7 @@ const SELECTOR_STATE_EVENTS: Readonly<Record<string, readonly string[]>> = Objec
 });
 
 const STATIC_SELECTOR_PSEUDOS = new Set<string>([
-  "any-link", "empty", "first-child", "first-of-type", "has", "is", "lang",
+  "any-link", "empty", "first-child", "first-of-type", "has", "host", "host-context", "is", "lang",
   "last-child", "last-of-type", "link", "not", "nth-child",
   "nth-last-child", "nth-last-of-type", "nth-of-type", "only-child",
   "only-of-type", "root", "scope", "where",
@@ -766,8 +860,25 @@ export function parseCarrierSheet(
   nonce: string | null = null,
   sourceIdentity = baseUrl,
   strictShapeSupports = false,
+  selectorTransform: ((selector: string) => string) | null = null,
+  selectorDisplay: ((selector: string) => string) | null = null,
 ): Readonly<CarrierCompilation> {
-  const transformed = canonicalizeCornerShapeDeclarations(source);
+  const sourceRules = sourceRuleScan(source);
+  if (sourceRules.namespaceBinding) {
+    throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve @namespace selector bindings");
+  }
+  for (const { start, end } of sourceRules.selectors) {
+    const selector = source.slice(start, end).trim();
+    if (selectorUsesNamespace(selector)) {
+      throw ownershipBlockingSyntaxError(
+        `Automatic CSS cannot discover namespace-qualified selector matches: ${selector}`,
+      );
+    }
+  }
+  const selectorSource = selectorTransform
+    ? transformSelectorHeaders(source, sourceRules.selectors, selectorTransform)
+    : source;
+  const transformed = canonicalizeCornerShapeDeclarations(selectorSource);
   let sheet: CSSStyleSheet | null;
   let parserStyle: HTMLStyleElement | null = null;
   try {
@@ -794,6 +905,8 @@ export function parseCarrierSheet(
       mediaQueries,
       observationSelectors,
       strictShapeSupports,
+      null,
+      selectorDisplay,
     );
     const selectorList = Object.freeze([...selectors]);
     const observation = selectorObservation(observationSelectors);
@@ -915,7 +1028,9 @@ export function parseImportStatement(statement: string, baseUrl: string): Readon
   let supports = null;
   if (/^layer\b/iu.test(rest)) {
     const layerFunction = consumeImportFunction(rest, "layer");
-    if (!layerFunction) throw new SyntaxError("Automatic CSS refuses anonymous @import layers");
+    if (!layerFunction) {
+      throw ownershipBlockingSyntaxError("Automatic CSS cannot preserve an anonymous @import layer");
+    }
     if (!validCssLayerName(layerFunction.value)) {
       throw new SyntaxError(`Automatic CSS cannot preserve @import layer name: ${layerFunction.value}`);
     }
@@ -939,10 +1054,7 @@ export function wrapImportedCarrierCss(css: string, imported: Readonly<ParsedImp
   let output = css;
   if (imported.layer) output = `@layer ${imported.layer}{${output}}`;
   if (imported.supports) {
-    const condition = /^(?:\(|not\b)/iu.test(imported.supports)
-      ? imported.supports
-      : `(${imported.supports})`;
-    output = `${carrierSupportsHeader(`@supports ${condition}`)}{${output}}`;
+    output = `@supports ${carrierSupportsCondition(imported.supports)}{${output}}`;
   }
   if (imported.media) output = `@media ${imported.media}{${output}}`;
   return output;
@@ -972,7 +1084,7 @@ export function mergeSelectorObservation(
   });
 }
 
-function ownershipBlockingSyntaxError(message: string): DiagnosticError {
+export function ownershipBlockingSyntaxError(message: string): DiagnosticError {
   const error = new SyntaxError(message) as DiagnosticError;
   Object.defineProperty(error, "cornerfillOwnershipBlocking", { value: true });
   return error;

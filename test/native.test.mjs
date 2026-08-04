@@ -17,6 +17,7 @@ test("the package root statically imports only native and oracle qualification",
     .map((match) => match[1]);
   assert.deepEqual(staticImports, ["./native.mjs", "./qualification.mjs"]);
   assert.match(source, /await import\("\.\/auto-runtime\.mjs"\)/u);
+  assert.doesNotMatch(source, /getCSSCanvasContext|mozSetImageElement|fullNativeQualified/u);
 });
 
 test("syntax support alone cannot qualify native corner-shape", () => {

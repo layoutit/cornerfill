@@ -382,10 +382,12 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
         const failures = new Map<Entry, unknown>();
         let pending = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
         let settled = false;
+        let frame = 0;
         let timer = 0;
         const finish = () => {
           if (settled) return;
           settled = true;
+          this.view.cancelAnimationFrame(frame);
           this.view.clearTimeout(timer);
           this.cancelVerification = null;
           resolve(failures);
@@ -420,7 +422,7 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
             finish();
             return;
           }
-          timer = this.view.setTimeout(verify, 16);
+          frame = this.view.requestAnimationFrame(verify);
         };
         this.cancelVerification = finish;
         timer = this.view.setTimeout(verify, 0);

@@ -52,17 +52,36 @@ test("decoded image cache evicts zero-reference records to its configured bound"
   assert.equal(stats.evictions, 1);
 });
 
-test("decoded image cache enforces its retained pixel budget", async () => {
+test("decoded image cache rejects a source larger than its hard pixel budget", async () => {
   const cache = new ImageCache(document(), {
     maxZeroReferenceEntries: 10,
-    maxEstimatedPixels: 0,
+    maxDecodedPixels: 99,
   });
   const lease = cache.acquire("large.webp");
-  await lease.promise;
+  await assert.rejects(lease.promise, /exceeds 99 cached pixels/u);
   lease.release();
   assert.equal(cache.stats().entries, 0);
-  assert.equal(cache.stats().estimatedPixels, 0);
+  assert.equal(cache.stats().decodedPixels, 0);
+  assert.equal(cache.stats().evictions, 0);
+});
+
+test("decoded image cache evicts idle images before refusing active allocations", async () => {
+  const cache = new ImageCache(document(), {
+    maxZeroReferenceEntries: 10,
+    maxDecodedPixels: 150,
+  });
+  const idle = cache.acquire("idle.webp");
+  await idle.promise;
+  idle.release();
+  const active = cache.acquire("active.webp");
+  await active.promise;
+  assert.equal(cache.stats().entries, 1);
+  assert.equal(cache.stats().decodedPixels, 100);
   assert.equal(cache.stats().evictions, 1);
+  const refused = cache.acquire("refused.webp");
+  await assert.rejects(refused.promise, /exceeds 150 cached pixels/u);
+  refused.release();
+  active.release();
 });
 
 test("image cache cancels a pending load when its last lease is released", async () => {

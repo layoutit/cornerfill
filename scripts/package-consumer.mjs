@@ -47,13 +47,10 @@ async function browserImport() {
           #fixture { width: 20px; height: 16px; border-radius: 8px; corner-shape: bevel; background: red }
         </style>
         <div id="fixture"></div>
-        <script type="importmap">{"imports":{"cornerfill":"/package/dist/auto.mjs","cornerfill/auto":"/package/dist/auto-runtime.mjs"}}</script>
+        <script type="importmap">{"imports":{"cornerfill":"/package/dist/auto.mjs"}}</script>
         <script type="module">
           try {
-            const forceFallback = new URL(location.href).searchParams.has("forceFallback");
-            const cornerfill = forceFallback
-              ? (await import("cornerfill/auto")).installCornerfillAuto({ forceFallback: true })
-              : (await import("cornerfill")).default;
+            const cornerfill = (await import("cornerfill")).default;
             const report = await cornerfill?.ready;
             const entry = cornerfill?.explain(document.querySelector("#fixture"));
             globalThis.__cornerfillPackage = {
@@ -105,7 +102,7 @@ async function browserImport() {
         const page = await context.newPage();
         const requested = [];
         page.on("request", (request) => requested.push(request.url()));
-        await page.goto(`${origin}${expectedMode === "fallback" ? "?forceFallback" : ""}`, {
+        await page.goto(origin, {
           waitUntil: "domcontentloaded",
           timeout: 30_000,
         });

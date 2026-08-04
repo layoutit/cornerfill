@@ -46,7 +46,7 @@ Then write ordinary CSS:
 }
 ```
 
-That's it. Cornerfill discovers the CSS automatically; no build transform or custom carrier declarations are required. Chrome stays native when it passes Cornerfill's syntax, computed-value, and shaped-hit-test proxy. In WebKit and Gecko, an available live-image fallback remains preferred until the engine also qualifies for the native paint semantics that proxy does not certify.
+That's it. Cornerfill discovers the CSS automatically; no build transform or custom carrier declarations are required. An engine stays native when it passes Cornerfill's syntax, computed-value, and shaped-hit-test proxy; fallback API availability does not affect that decision. Engines that fail the proxy use an available live-image fallback.
 
 ## How It Works
 
@@ -61,10 +61,10 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, or baked-a
 Every fallback paint path below is experimental. Native-versus-candidate pixel parity remains `UNQUALIFIED`.
 
 - `round`, `squircle`, `square`, `bevel`, `scoop`, `notch`, finite `superellipse()` corners, physical and logical properties, and browser-computed `border-radius` values.
-- Solid colors and static same-origin or CORS-enabled raster backgrounds with supported sizing, positioning, repetition, origin, and clip. Native CSS image sampling and Canvas `drawImage()` can drift at raster edges, so raster pixel parity is explicitly unqualified.
+- Solid colors, including `currentColor` and system colors resolved in the host's color context, plus static same-origin or CORS-enabled raster backgrounds with supported sizing, positioning, repetition, origin, and clip. Native CSS image sampling and Canvas `drawImage()` can drift at raster edges, so raster pixel parity is explicitly unqualified.
 - Non-repeating gradients with supported geometry. Canvas does not reproduce default CSS gradient color interpolation, so gradient color parity is explicitly unqualified.
 - One-color solid borders with unequal widths, one inset shadow, and one contained solid outline.
-- Inline, embedded, and readable linked CSS, including imports, variables, media queries, layers, observable focus/hover/open/fullscreen selectors, and registered open shadow roots.
+- Inline, embedded, and readable linked CSS, including imports, variables, media queries, named layers, observable focus/hover/open/fullscreen selectors, and registered open shadow roots with `:host`, `:host()`, `:host-context()`, or ordinary descendant selectors.
 - Resize plus discovered source, class, attribute, inline-style, and observable selector-state changes update automatically.
 
 Unsupported syntax is reported or left native rather than approximated.
@@ -75,10 +75,13 @@ Unsupported syntax is reported or left native rather than approximated.
 - Outer shadows and outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are not implemented. Conflicting `!important` paint declarations are rejected.
 - A contained painted outline requires an empty, paint-owned host. Any open shadow root counts as foreground content because later shadow-tree mutations cannot safely preserve that contract.
 - Cross-origin raster images without CORS are unsupported even when native CSS could display them.
+- Default fallback budgets are 512 automatic entries (2,048 through the explicit runtime), `2048²` pixels per surface, and `4096²` pixels each for total live surfaces and decoded images per controller. Explicit runtime options can change these limits.
 - Linked and imported CSS source is recovered through a separate `fetch()`, so CSP must permit it through `connect-src`. A blocked or unreadable source fails automatic ownership closed for its root; dynamically varying responses require exact source handoff.
 - CSS animations and transitions of shape or paint inputs do not reproduce native timing.
 - Direct `dir` changes are observed. Content-driven direction changes under `dir=auto` are not tracked across arbitrary descendant text and require an explicit refresh.
-- Closed shadow roots, unreadable cross-origin CSS, and linked/imported CSS that is not UTF-8 fail automatic ownership closed by default. Unobservable selector states such as programmatic `:checked`, `:target`, and `:visited` are refused instead of becoming stale.
+- Closed shadow roots, unreadable cross-origin CSS, and linked/imported CSS that is not UTF-8 fail automatic ownership closed by default. `cornerfill.explain().automatic.ownership` reports `blocked-root` when this happens. Unobservable selector states such as programmatic `:checked`, `:target`, and `:visited` are refused instead of becoming stale.
+- Automatic ownership also fails closed for `@scope`, anonymous layer blocks/import layers, namespace bindings or qualified selectors, and other valid cascade contexts Cornerfill cannot preserve.
+- In registered shadow roots, a host pseudo must lead its selector branch. Nested host pseudos and complex relative chains after `:host >` fail that root closed.
 - `insertRule()` and `deleteRule()` are observed only on the top-level `CSSStyleSheet` owned by a readable `<style>` or `<link>` element. Imported child sheets and adopted stylesheets still require their documented explicit source handoff.
 - Direct mutation of existing CSSOM declarations, selectors, grouping rules, or media lists requires exact authored source through `replaceStylesheetSource()`; generic `refresh()` cannot reconstruct source the browser no longer exposes.
 - The explicit `cornerfill/runtime` observer covers host class, inline style, content, and size. Call `handle.refresh()` or `controller.refresh()` after other cascade inputs change.

@@ -5,6 +5,11 @@ import {
   paintDescriptorKey,
   resolvePaintForBox,
 } from "./background.mjs";
+import {
+  colorProbeMutation,
+  withElementColorResolver,
+} from "./colors.mjs";
+import type { ContextualColorResolver } from "./colors.mjs";
 import type {
   BackgroundBoxMetrics,
   BackgroundBoxMetricsInput,
@@ -17,6 +22,7 @@ import type {
   ResolvedPaintDescriptor,
 } from "./background.mjs";
 import {
+  DEFAULT_MAX_SURFACE_PIXELS,
   createSurface,
   detectSurfaceCapabilities,
   getSurfaceResourceStats,
@@ -31,7 +37,7 @@ import {
   buildCornerGeometry,
 } from "./geometry.mjs";
 import type { CornerGeometry } from "./geometry.mjs";
-import { ImageCache } from "./images.mjs";
+import { DEFAULT_MAX_DECODED_IMAGE_PIXELS, ImageCache } from "./images.mjs";
 import type { ImageLease } from "./images.mjs";
 import { qualifyNativeCornerShape } from "./native.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
@@ -183,8 +189,8 @@ export interface CornerfillInstallOptions {
   readonly maxImageCachePixels?: number | undefined;
   readonly maxSurfacePixels?: number | undefined;
   readonly maxTotalSurfacePixels?: number | undefined;
-  readonly maxWebkitPoolEntries?: number | undefined;
-  readonly maxWebkitPoolPrefixes?: number | undefined;
+  readonly webkitPoolEntriesPerPrefix?: number | undefined;
+  readonly webkitPoolPrefixBuckets?: number | undefined;
   readonly nativeQualification?: Readonly<CornerfillNativeQualification> | undefined;
   readonly nonce?: string | null | undefined;
   readonly observe?: boolean | undefined;
@@ -202,8 +208,8 @@ export interface ResolvedCornerfillOptions {
   readonly maxImageCachePixels: number;
   readonly maxSurfacePixels: number;
   readonly maxTotalSurfacePixels: number;
-  readonly maxWebkitPoolEntries: number;
-  readonly maxWebkitPoolPrefixes: number;
+  readonly webkitPoolEntriesPerPrefix: number;
+  readonly webkitPoolPrefixBuckets: number;
   readonly nonce: string | null;
   readonly observe: boolean;
   readonly staticFallback: boolean;
@@ -513,6 +519,7 @@ function applyDynamicSnapshot(entry: DynamicEntry, snapshot: Readonly<DynamicSna
 
 interface PreparedLayoutSnapshot {
   readonly border: Readonly<OwnedBorderPaintState> | null;
+  readonly borderSource: Readonly<OwnedBorderPaintState> | null;
   readonly borderRadius: RadiusSource | undefined;
   readonly composition: Readonly<HostComposition>;
   readonly cornerShape: CornerShapeSource | undefined;
@@ -521,10 +528,12 @@ interface PreparedLayoutSnapshot {
   readonly geometry: CornerGeometry;
   readonly height: number;
   readonly outline: Readonly<ContainedOutlinePaintState> | null;
+  readonly outlineSource: Readonly<ContainedOutlinePaintState> | null;
   readonly paint: ResolvedPaintDescriptor;
   readonly paintLeases: Readonly<PaintLeaseTransaction>;
   readonly program: Readonly<PreparedOpaqueImageProgram> | null;
   readonly shadow: Readonly<InsetShadowPaintState> | null;
+  readonly shadowSource: Readonly<InsetShadowPaintState> | null;
   readonly width: number;
 }
 
@@ -545,9 +554,9 @@ function applyPreparedLayoutSnapshot(
   entry.composition = snapshot.composition;
   entry.resolvedPaint = snapshot.paint;
   entry.paintSource = snapshot.descriptor;
-  entry.borderSource = snapshot.border;
-  entry.shadowSource = snapshot.shadow;
-  entry.outlineSource = snapshot.outline;
+  entry.borderSource = snapshot.borderSource;
+  entry.shadowSource = snapshot.shadowSource;
+  entry.outlineSource = snapshot.outlineSource;
   entry.radiusSource = snapshot.borderRadius;
   entry.shapeSource = snapshot.cornerShape;
   entry.positionX = snapshot.paint.kind === "image" ? snapshot.paint.backgroundPosition[0] : 0;
@@ -568,6 +577,7 @@ function errorFrom(value: unknown): Error {
 }
 
 export const CORNERFILL_RUNTIME_SCHEMA = "cornerfill-runtime@2";
+const DEFAULT_MAX_TOTAL_SURFACE_PIXELS = 4_096 ** 2;
 
 export const CORNERFILL_LIMITATIONS = Object.freeze({
   descendantOverflowClipping: Object.freeze({
@@ -993,28 +1003,65 @@ function normalizeContainedOutline(outline: unknown): Readonly<ContainedOutlineP
   });
 }
 
-type ExplicitColorValidator = (value: string, label: string) => void;
+function resolveLayerColors(
+  layer: Readonly<NormalizedBackgroundLayer>,
+  resolve: ContextualColorResolver,
+): Readonly<NormalizedBackgroundLayer> {
+  if (layer.kind !== "linear-gradient"
+    && layer.kind !== "radial-gradient"
+    && layer.kind !== "conic-gradient") return layer;
+  return Object.freeze({
+    ...layer,
+    stops: Object.freeze(layer.stops.map(([offset, color]) => Object.freeze([
+      offset,
+      resolve(color, `${layer.kind} stop color`),
+    ] as const))),
+  });
+}
 
-function validateNormalizedColors(
-  validate: ExplicitColorValidator,
-  paint: Readonly<NormalizedPaintDescriptor> | null = null,
-  border: Readonly<OwnedBorderPaintState> | null = null,
-  shadow: Readonly<InsetShadowPaintState> | null = null,
-  outline: Readonly<ContainedOutlinePaintState> | null = null,
-): void {
-  if (paint) {
-    validate(paint.color, "background color");
-    const layers = paint.kind === "layers" ? paint.layers : [paint];
-    for (const layer of layers) {
-      if (layer.kind !== "linear-gradient"
-        && layer.kind !== "radial-gradient"
-        && layer.kind !== "conic-gradient") continue;
-      for (const [, color] of layer.stops) validate(color, `${layer.kind} stop color`);
-    }
+function resolvePaintColors(
+  paint: Readonly<NormalizedPaintDescriptor>,
+  resolve: ContextualColorResolver,
+): Readonly<NormalizedPaintDescriptor> {
+  const color = resolve(paint.color, "background color");
+  if (paint.kind === "solid") return Object.freeze({ ...paint, color });
+  if (paint.kind === "layers") {
+    return Object.freeze({
+      ...paint,
+      color,
+      layers: Object.freeze(paint.layers.map((layer) => resolveLayerColors(layer, resolve))),
+    });
   }
-  if (border) validate(border.color, "border color");
-  if (shadow) validate(shadow.color, "inset shadow color");
-  if (outline) validate(outline.color, "outline color");
+  return Object.freeze({ ...resolveLayerColors(paint, resolve), color }) as NormalizedPaintDescriptor;
+}
+
+function resolveBorderColor(
+  border: Readonly<OwnedBorderPaintState> | null,
+  resolve: ContextualColorResolver,
+): Readonly<OwnedBorderPaintState> | null {
+  if (!border) return null;
+  const color = resolve(border.color, "border color");
+  return Object.freeze({ ...border, color, colors: frozenFour(color, color, color, color) });
+}
+
+function resolveShadowColor(
+  shadow: Readonly<InsetShadowPaintState> | null,
+  resolve: ContextualColorResolver,
+): Readonly<InsetShadowPaintState> | null {
+  return shadow ? Object.freeze({
+    ...shadow,
+    color: resolve(shadow.color, "inset shadow color"),
+  }) : null;
+}
+
+function resolveOutlineColor(
+  outline: Readonly<ContainedOutlinePaintState> | null,
+  resolve: ContextualColorResolver,
+): Readonly<ContainedOutlinePaintState> | null {
+  return outline ? Object.freeze({
+    ...outline,
+    color: resolve(outline.color, "outline color"),
+  }) : null;
 }
 
 interface OutlineOverrides {
@@ -1040,7 +1087,7 @@ function captureInitialSources(
   element: CornerfillElement,
   config: Readonly<CornerfillAttachConfig>,
   computed: CSSStyleDeclaration,
-  validateColor: ExplicitColorValidator,
+  resolveColor: ContextualColorResolver | null,
 ): Readonly<InitialSources> {
   const radiusCapture = captureRadiusCarriers(computed);
   const computedShape = computed.getPropertyValue("corner-shape").trim();
@@ -1083,29 +1130,31 @@ function captureInitialSources(
     : normalizePaintDescriptor(config.paint);
   const paintSource = capturedPaintSource;
   const borderColorCarrier = readBorderColorCarriers(computed);
-  const borderSource = config.border === undefined
+  const capturedBorderSource = config.border === undefined
     ? captureBorder(computed, borderColorCarrier)
     : normalizeBorder(config.border);
+  const borderSource = capturedBorderSource;
   const shadowCarrier = readShadowCarrier(computed);
-  const shadowSource = config.shadow === undefined
+  const capturedShadowSource = config.shadow === undefined
     ? normalizeInsetShadow(shadowCarrier || computed.boxShadow)
     : normalizeInsetShadow(config.shadow);
+  const shadowSource = capturedShadowSource;
   const outlineCarrierValues = Object.freeze({
     width: readCarrier(computed, CARRIER.outlineWidth),
     style: readCarrier(computed, CARRIER.outlineStyle),
     color: readColorCarrier(computed, CARRIER.outlineColor),
     offset: readCarrier(computed, CARRIER.outlineOffset),
   });
-  const outlineSource = config.outline === undefined
+  const capturedOutlineSource = config.outline === undefined
     ? captureOutline(computed, outlineCarrierValues)
     : normalizeContainedOutline(config.outline);
-  validateNormalizedColors(
-    validateColor,
-    config.paint === undefined ? null : paintSource,
-    config.border === undefined ? null : borderSource,
-    config.shadow === undefined ? null : shadowSource,
-    config.outline === undefined ? null : outlineSource,
-  );
+  const outlineSource = capturedOutlineSource;
+  if (resolveColor) {
+    if (config.paint !== undefined) resolvePaintColors(paintSource, resolveColor);
+    if (config.border !== undefined) resolveBorderColor(borderSource, resolveColor);
+    if (config.shadow !== undefined) resolveShadowColor(shadowSource, resolveColor);
+    if (config.outline !== undefined) resolveOutlineColor(outlineSource, resolveColor);
+  }
   const initial: Readonly<InitialSources> = Object.freeze({
     radiusSource,
     shapeSource,
@@ -1221,6 +1270,19 @@ function currentSources(
   });
 }
 
+function resolveCurrentSourceColors(
+  sources: Readonly<CurrentSources>,
+  resolve: ContextualColorResolver,
+): Readonly<CurrentSources> {
+  return Object.freeze({
+    ...sources,
+    paintSource: resolvePaintColors(sources.paintSource, resolve),
+    borderSource: resolveBorderColor(sources.borderSource, resolve),
+    shadowSource: resolveShadowColor(sources.shadowSource, resolve),
+    outlineSource: resolveOutlineColor(sources.outlineSource, resolve),
+  });
+}
+
 function resolveRadiusSource(
   source: RadiusSource,
   width: number,
@@ -1255,6 +1317,9 @@ function resolveRadiusSource(
           : {}),
         ...(record.direction ?? flow.direction
           ? { direction: (record.direction ?? flow.direction) as NonNullable<BorderRadiusDeclarations["direction"]> }
+          : {}),
+        ...(record.textOrientation ?? flow.textOrientation
+          ? { textOrientation: (record.textOrientation ?? flow.textOrientation) as NonNullable<BorderRadiusDeclarations["textOrientation"]> }
           : {}),
       };
       return resolveBorderRadiusDeclarations(declarations, width, height);
@@ -1500,8 +1565,6 @@ class CornerfillController {
   declare readonly dirty: Set<DynamicEntry>;
   declare readonly preparedDirty: Set<PreparedEntry>;
   declare readonly activeAnimations: Map<DynamicEntry, Map<string, number>>;
-  declare colorValidationContext: CanvasRenderingContext2D | null;
-  declare readonly validatedColors: Set<string>;
   declare flushHandle: number | null;
   declare flushRunning: boolean;
   declare destroyed: boolean;
@@ -1522,14 +1585,14 @@ class CornerfillController {
       backend: options.backend ?? "auto",
       observe: options.observe !== false,
       maxActiveEntries: options.maxActiveEntries ?? 2048,
-      maxSurfacePixels: options.maxSurfacePixels ?? 16_777_216,
-      maxTotalSurfacePixels: options.maxTotalSurfacePixels ?? 67_108_864,
+      maxSurfacePixels: options.maxSurfacePixels ?? DEFAULT_MAX_SURFACE_PIXELS,
+      maxTotalSurfacePixels: options.maxTotalSurfacePixels ?? DEFAULT_MAX_TOTAL_SURFACE_PIXELS,
       maxGeometryCacheEntries: options.maxGeometryCacheEntries ?? 2048,
       maxImageCacheEntries: options.maxImageCacheEntries ?? 32,
-      maxImageCachePixels: options.maxImageCachePixels ?? 67_108_864,
+      maxImageCachePixels: options.maxImageCachePixels ?? DEFAULT_MAX_DECODED_IMAGE_PIXELS,
       imageTimeoutMs: options.imageTimeoutMs ?? 10_000,
-      maxWebkitPoolEntries: options.maxWebkitPoolEntries ?? 256,
-      maxWebkitPoolPrefixes: options.maxWebkitPoolPrefixes ?? 16,
+      webkitPoolEntriesPerPrefix: options.webkitPoolEntriesPerPrefix ?? 256,
+      webkitPoolPrefixBuckets: options.webkitPoolPrefixBuckets ?? 16,
       idPrefix: options.idPrefix ?? "cornerfill",
       nonce: options.nonce ?? null,
     });
@@ -1560,8 +1623,6 @@ class CornerfillController {
     this.dirty = new Set();
     this.preparedDirty = new Set();
     this.activeAnimations = new Map();
-    this.colorValidationContext = null;
-    this.validatedColors = new Set();
     this.flushHandle = null;
     this.flushRunning = false;
     this.destroyed = false;
@@ -1599,7 +1660,7 @@ class CornerfillController {
       onHit: () => { this.counters.imageCacheHits += 1; },
       onEvict: () => { this.counters.imageCacheEvictions += 1; },
       maxZeroReferenceEntries: this.options.maxImageCacheEntries,
-      maxEstimatedPixels: this.options.maxImageCachePixels,
+      maxDecodedPixels: this.options.maxImageCachePixels,
       timeoutMs: this.options.imageTimeoutMs,
     });
     this._onMutation = this._onMutation.bind(this);
@@ -1608,24 +1669,6 @@ class CornerfillController {
     this._onAnimationEnd = this._onAnimationEnd.bind(this);
     this._animationTick = this._animationTick.bind(this);
     this.observersInstalled = false;
-  }
-
-  _validateExplicitColor(value: string, label: string): void {
-    const color = String(value).trim();
-    if (!color) throw new SyntaxError(`${label} must be a valid CSS color`);
-    if (this.validatedColors.has(color)) return;
-    const context = this.colorValidationContext
-      ?? this.document.createElement("canvas").getContext("2d");
-    if (!context) throw new Error("CSS color validation requires a 2D Canvas context");
-    this.colorValidationContext = context;
-    context.fillStyle = "#010203";
-    context.fillStyle = color;
-    const first = String(context.fillStyle);
-    context.fillStyle = "#fefdfc";
-    context.fillStyle = color;
-    const second = String(context.fillStyle);
-    if (first !== second) throw new SyntaxError(`invalid ${label}: ${value}`);
-    this.validatedColors.add(color);
   }
 
   _repairEntryOwnership(entry: FallbackEntry): boolean {
@@ -1803,6 +1846,7 @@ class CornerfillController {
   }
 
   _collectMutationEffects(record: MutationRecord, effects: RuntimeMutationEffects): void {
+    if (colorProbeMutation(record)) return;
     const stylesheetRoot = mutationStylesheetRoot(record);
     if (stylesheetRoot) effects.stylesheetRoots.add(stylesheetRoot);
     if (record.type === "childList" || record.type === "characterData") {
@@ -2311,18 +2355,20 @@ class CornerfillController {
     entry: DynamicEntry,
     revision: number | null = null,
   ): Promise<Readonly<DynamicSnapshot>> {
-    const authored = this.ownership.withAuthoredComputedStyle(entry, (computed) => {
-      const composition = inspectFallbackHost(entry.element, computed);
-      const size = measureBorderBox(entry.element, computed);
-      return Object.freeze({
-        computed: Object.freeze({ visibility: computed.visibility }),
-        composition,
-        size,
-        sources: currentSources(entry, computed),
-        flow: flowFromComputed(computed),
-        boxMetrics: backgroundBoxMetrics(computed),
-      });
-    });
+    const authored = this.ownership.withAuthoredComputedStyle(entry, (computed) => (
+      withElementColorResolver(this.view, entry.element, computed, (resolveColor) => {
+        const composition = inspectFallbackHost(entry.element, computed);
+        const size = measureBorderBox(entry.element, computed);
+        return Object.freeze({
+          computed: Object.freeze({ visibility: computed.visibility }),
+          composition,
+          size,
+          sources: resolveCurrentSourceColors(currentSources(entry, computed), resolveColor),
+          flow: flowFromComputed(computed),
+          boxMetrics: backgroundBoxMetrics(computed),
+        });
+      })
+    ));
     const { width, height } = authored.size;
     const dpr = this.view.devicePixelRatio || 1;
     const { sources, flow, boxMetrics } = authored;
@@ -2667,8 +2713,8 @@ class CornerfillController {
       backend,
       idPrefix: this.options.idPrefix,
       maxSurfacePixels: this.options.maxSurfacePixels,
-      maxWebkitPoolEntries: this.options.maxWebkitPoolEntries,
-      maxWebkitPoolPrefixes: this.options.maxWebkitPoolPrefixes,
+      webkitPoolEntriesPerPrefix: this.options.webkitPoolEntriesPerPrefix,
+      webkitPoolPrefixBuckets: this.options.webkitPoolPrefixBuckets,
     });
   }
 
@@ -2923,26 +2969,30 @@ class CornerfillController {
       throw new RangeError("prepared geometry dimensions or DPR do not match prepared layout");
     }
     const paintSource = config.paint ?? entry.paintSource;
-    const descriptor = normalizePaintDescriptor(paintSource);
-    if (descriptor.kind !== "solid" && descriptor.kind !== "layers"
-      && descriptor.blendMode === "multiply") {
+    const normalizedDescriptor = normalizePaintDescriptor(paintSource);
+    if (normalizedDescriptor.kind !== "solid" && normalizedDescriptor.kind !== "layers"
+      && normalizedDescriptor.blendMode === "multiply") {
       throw new TypeError("prepared paint requires normal background blending");
     }
-    const border = config.border === undefined
+    const normalizedBorder = config.border === undefined
       ? initial ? captureBorder(computed) : entry.borderSource
       : normalizeBorder(config.border);
-    const shadow = config.shadow === undefined
+    const normalizedShadow = config.shadow === undefined
       ? entry.shadowSource
       : normalizeInsetShadow(config.shadow);
-    const outline = config.outline === undefined
+    const normalizedOutline = config.outline === undefined
       ? entry.outlineSource
       : normalizeContainedOutline(config.outline);
-    validateNormalizedColors(
-      (color, label) => this._validateExplicitColor(color, label),
-      descriptor,
-      border,
-      shadow,
-      outline,
+    const { descriptor, border, shadow, outline } = withElementColorResolver(
+      this.view,
+      entry.element,
+      computed,
+      (resolveColor) => Object.freeze({
+        descriptor: resolvePaintColors(normalizedDescriptor, resolveColor),
+        border: resolveBorderColor(normalizedBorder, resolveColor),
+        shadow: resolveShadowColor(normalizedShadow, resolveColor),
+        outline: resolveOutlineColor(normalizedOutline, resolveColor),
+      }),
     );
     assertOutlineHost(this.view, entry.element, outline);
     const paintLeases = await this._resolvePaintTransaction(
@@ -2972,10 +3022,13 @@ class CornerfillController {
         geometry,
         paint,
         paintLeases,
-        descriptor,
+        descriptor: normalizedDescriptor,
         border,
+        borderSource: normalizedBorder,
         shadow,
+        shadowSource: normalizedShadow,
         outline,
+        outlineSource: normalizedOutline,
         composition,
         borderRadius,
         cornerShape,
@@ -3250,8 +3303,6 @@ class CornerfillController {
 
   _shouldUseNative(config: Readonly<CornerfillAttachConfig>): boolean {
     if (this.options.forceFallback || !this.capabilities.native.qualified) return false;
-    const liveFallbackAvailable = this.capabilities.surfaces.preferredBackend !== "none";
-    if (liveFallbackAvailable && !this.capabilities.native.tiers.fullNativeQualified) return false;
     if (config.paint !== undefined || config.border !== undefined
       || config.shadow !== undefined || config.outline !== undefined) return false;
     return true;
@@ -3394,18 +3445,30 @@ class CornerfillController {
     entry: DynamicEntry,
     next: Readonly<CornerfillHandleUpdate>,
   ): Readonly<ResolvedDynamicEntryUpdate> {
-    const paint = next.paint === undefined ? undefined : normalizePaintDescriptor(next.paint);
-    const border = next.border === undefined ? undefined : normalizeBorder(next.border);
-    const shadow = next.shadow === undefined ? undefined : normalizeInsetShadow(next.shadow);
-    const outline = next.outline === undefined ? undefined : normalizeContainedOutline(next.outline);
-    validateNormalizedColors(
-      (color, label) => this._validateExplicitColor(color, label),
-      paint ?? null,
-      border ?? null,
-      shadow ?? null,
-      outline ?? null,
-    );
-    if (outline !== undefined) assertOutlineHost(this.view, entry.element, outline);
+    const normalizedPaint = next.paint === undefined ? undefined : normalizePaintDescriptor(next.paint);
+    const normalizedBorder = next.border === undefined ? undefined : normalizeBorder(next.border);
+    const normalizedShadow = next.shadow === undefined ? undefined : normalizeInsetShadow(next.shadow);
+    const normalizedOutline = next.outline === undefined ? undefined : normalizeContainedOutline(next.outline);
+    if (normalizedPaint !== undefined || normalizedBorder !== undefined
+      || normalizedShadow !== undefined || normalizedOutline !== undefined) {
+      const resolvedOutline = this.ownership.withAuthoredComputedStyle(
+        entry,
+        (computed) => withElementColorResolver(
+          this.view,
+          entry.element,
+          computed,
+          (resolveColor) => {
+            if (normalizedPaint) resolvePaintColors(normalizedPaint, resolveColor);
+            if (normalizedBorder !== undefined) resolveBorderColor(normalizedBorder, resolveColor);
+            if (normalizedShadow !== undefined) resolveShadowColor(normalizedShadow, resolveColor);
+            return normalizedOutline === undefined
+              ? undefined
+              : resolveOutlineColor(normalizedOutline, resolveColor);
+          },
+        ),
+      );
+      if (resolvedOutline !== undefined) assertOutlineHost(this.view, entry.element, resolvedOutline);
+    }
     const updatesGeometry = next.borderRadius !== undefined || next.cornerShape !== undefined;
     const flow = updatesGeometry
       ? this.ownership.withAuthoredComputedStyle(entry, (computed) => flowFromComputed(computed))
@@ -3416,7 +3479,13 @@ class CornerfillController {
     const resolvedShape = next.cornerShape === undefined
       ? null
       : resolveCornerShape(next.cornerShape, flow);
-    return { border, outline, paint, resolvedShape, shadow };
+    return {
+      border: normalizedBorder,
+      outline: normalizedOutline,
+      paint: normalizedPaint,
+      resolvedShape,
+      shadow: normalizedShadow,
+    };
   }
 
   _handle(entry: RuntimeEntry): Readonly<CornerfillHandle> {
@@ -3513,12 +3582,18 @@ class CornerfillController {
     assertCooperativeOwnership(element);
     const computed = this.view.getComputedStyle(element);
     const composition = inspectFallbackHost(element, computed);
-    const initial = captureInitialSources(
-      element,
-      config,
-      computed,
-      (color, label) => this._validateExplicitColor(color, label),
-    );
+    const hasExplicitColorSource = config.paint !== undefined
+      || config.border !== undefined
+      || config.shadow !== undefined
+      || config.outline !== undefined;
+    const initial = hasExplicitColorSource
+      ? withElementColorResolver(
+        this.view,
+        element,
+        computed,
+        (resolveColor) => captureInitialSources(element, config, computed, resolveColor),
+      )
+      : captureInitialSources(element, config, computed, null);
     const watchCarriers = initial.dynamic.radius || initial.dynamic.shape || initial.dynamic.paint
       || (initial.dynamic.border && Boolean(initial.borderSource))
       || initial.dynamic.shadow || initial.dynamic.outline;

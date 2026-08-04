@@ -1,4 +1,5 @@
-const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@2";
+const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@3";
+export const DEFAULT_MAX_DECODED_IMAGE_PIXELS = 4_096 ** 2;
 
 type ImageCacheRecordState = "loading" | "ready" | "error";
 
@@ -14,7 +15,7 @@ export interface ImageCacheRecord {
 }
 
 export interface ImageCacheOptions {
-  maxEstimatedPixels?: number;
+  maxDecodedPixels?: number;
   maxZeroReferenceEntries?: number;
   onDecode?: ((record: ImageCacheRecord) => void) | null;
   onEvict?: ((record: ImageCacheRecord) => void) | null;
@@ -94,26 +95,26 @@ export class ImageCache {
   declare readonly onHit: ((record: ImageCacheRecord) => void) | null;
   declare readonly onEvict: ((record: ImageCacheRecord) => void) | null;
   declare readonly maxZeroReferenceEntries: number;
-  declare readonly maxEstimatedPixels: number;
+  declare readonly maxDecodedPixels: number;
   declare readonly timeoutMs: number;
   declare evictions: number;
   declare destroyed: boolean;
-  private estimatedPixels: number;
+  private decodedPixels: number;
 
   constructor(document: Document, {
     onDecode = null,
     onHit = null,
     onEvict = null,
     maxZeroReferenceEntries = 32,
-    maxEstimatedPixels = 67_108_864,
+    maxDecodedPixels = DEFAULT_MAX_DECODED_IMAGE_PIXELS,
     timeoutMs = 10_000,
   }: ImageCacheOptions = {}) {
     if (!document?.defaultView?.Image) throw new TypeError("ImageCache requires a browser document");
     if (!Number.isSafeInteger(maxZeroReferenceEntries) || maxZeroReferenceEntries < 0) {
       throw new TypeError("maxZeroReferenceEntries must be a non-negative integer");
     }
-    if (!Number.isFinite(maxEstimatedPixels) || maxEstimatedPixels < 0) {
-      throw new TypeError("maxEstimatedPixels must be finite and non-negative");
+    if (!Number.isFinite(maxDecodedPixels) || maxDecodedPixels < 0) {
+      throw new TypeError("maxDecodedPixels must be finite and non-negative");
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new TypeError("timeoutMs must be finite and positive");
@@ -125,36 +126,36 @@ export class ImageCache {
     this.onHit = onHit;
     this.onEvict = onEvict;
     this.maxZeroReferenceEntries = maxZeroReferenceEntries;
-    this.maxEstimatedPixels = maxEstimatedPixels;
+    this.maxDecodedPixels = maxDecodedPixels;
     this.timeoutMs = timeoutMs;
     this.evictions = 0;
     this.destroyed = false;
-    this.estimatedPixels = 0;
+    this.decodedPixels = 0;
   }
 
-  private _estimatedPixels(record: ImageCacheRecord): number {
+  private _decodedPixels(record: ImageCacheRecord): number {
     return record.state === "ready"
       ? Math.max(0, record.image.naturalWidth * record.image.naturalHeight)
       : 0;
   }
 
-  private _evict(): void {
+  private _evict(requiredPixels = 0): void {
     if (this.destroyed) return;
     while (this.zeroReferenceRecords.size > 0
       && (this.zeroReferenceRecords.size > this.maxZeroReferenceEntries
-        || this.estimatedPixels > this.maxEstimatedPixels)) {
+        || this.decodedPixels + requiredPixels > this.maxDecodedPixels)) {
       const record = this.zeroReferenceRecords.values().next().value;
       if (!record) break;
       this.zeroReferenceRecords.delete(record.key);
       if (record.refs !== 0 || this.records.get(record.key) !== record) continue;
-      const pixels = this._estimatedPixels(record);
+      const pixels = this._decodedPixels(record);
       this.records.delete(record.key);
       if (record.state === "loading") {
         record.cancel(new Error(`image load was evicted before decode completed: ${record.absoluteUrl}`));
       } else {
         record.image.src = "";
       }
-      this.estimatedPixels -= pixels;
+      this.decodedPixels -= pixels;
       this.evictions += 1;
       this.onEvict?.(record);
     }
@@ -188,19 +189,28 @@ export class ImageCache {
         if (!(image.naturalWidth > 0 && image.naturalHeight > 0)) {
           throw new Error(`decoded image has no intrinsic dimensions: ${absoluteUrl}`);
         }
+        const decodedPixels = image.naturalWidth * image.naturalHeight;
+        this._evict(decodedPixels);
+        if (this.decodedPixels + decodedPixels > this.maxDecodedPixels) {
+          throw new RangeError(
+            `decoded image allocation ${this.decodedPixels + decodedPixels} exceeds `
+            + `${this.maxDecodedPixels} cached pixels: ${absoluteUrl}`,
+          );
+        }
         created.state = "ready";
-        this.estimatedPixels += this._estimatedPixels(created);
+        this.decodedPixels += decodedPixels;
         this.onDecode?.(created);
         this._evict();
         return image;
       })().catch((error) => {
         if (created.state === "ready") {
-          this.estimatedPixels -= this._estimatedPixels(created);
+          this.decodedPixels -= this._decodedPixels(created);
         }
         this.zeroReferenceRecords.delete(key);
         created.state = "error";
         created.error = error;
         if (this.records.get(key) === created) this.records.delete(key);
+        image.src = "";
         throw error;
       });
       created = {
@@ -252,11 +262,11 @@ export class ImageCache {
       errors: records.filter(({ state }) => state === "error").length,
       references: records.reduce((total, { refs }) => total + refs, 0),
       zeroReferenceEntries: this.zeroReferenceRecords.size,
-      estimatedPixels: this.estimatedPixels,
+      decodedPixels: this.decodedPixels,
       evictions: this.evictions,
       limits: Object.freeze({
         zeroReferenceEntries: this.maxZeroReferenceEntries,
-        estimatedPixels: this.maxEstimatedPixels,
+        decodedPixels: this.maxDecodedPixels,
         timeoutMs: this.timeoutMs,
       }),
     });
@@ -273,7 +283,7 @@ export class ImageCache {
     }
     this.records.clear();
     this.zeroReferenceRecords.clear();
-    this.estimatedPixels = 0;
+    this.decodedPixels = 0;
     this.destroyed = true;
   }
 }
