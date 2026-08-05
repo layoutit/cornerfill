@@ -107,13 +107,15 @@ async function startServer() {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(`
         @import "/bench/imports/conditional-skipped.css" supports(display: __cornerfill_impossible__);
+        @import "/bench/imports/conditional-media-skipped.css" (max-width: 1px);
         @import "/bench/imports/conditional-active.css" supports(corner-shape: bevel);
         .cornerfill-import-condition-local { corner-shape: bevel }
       `);
       return;
     }
     if (url.pathname === "/bench/imports/conditional-active.css"
-      || url.pathname === "/bench/imports/conditional-skipped.css") {
+      || url.pathname === "/bench/imports/conditional-skipped.css"
+      || url.pathname === "/bench/imports/conditional-media-skipped.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(url.pathname.endsWith("active.css")
         ? ".cornerfill-import-condition-active{corner-shape:scoop}"

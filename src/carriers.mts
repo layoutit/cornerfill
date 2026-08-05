@@ -53,8 +53,10 @@ export interface CarrierCompilation {
 }
 
 interface CarrierRule extends CSSRule {
+  readonly conditionText?: string | undefined;
   readonly cssRules?: CSSRuleList | undefined;
   readonly keyText?: string | undefined;
+  readonly media?: MediaList | undefined;
   readonly selectorText?: string | undefined;
   readonly style?: CSSStyleDeclaration | undefined;
 }
@@ -449,8 +451,35 @@ function diagnosticShapeDeclarations(style: CSSStyleDeclaration): readonly strin
 }
 
 function ruleHeader(rule: CSSRule): string {
-  const index = rule.cssText.indexOf("{");
+  let index = -1;
+  scanCssSyntax(rule.cssText, 0, (position, character, parentheses, brackets, blocks) => {
+    if (character !== "{" || parentheses !== 0 || brackets !== 0 || blocks !== 0) return;
+    index = position;
+    return false;
+  });
   return index < 0 ? "" : rule.cssText.slice(0, index).trim();
+}
+
+function groupingRuleMatches(
+  document: RuntimeDocument,
+  rule: Readonly<CarrierRule>,
+  header: string,
+  observesOwnedSubtree: boolean,
+  mediaQueries: Set<string>,
+): boolean {
+  if (/^@media\b/iu.test(header)) {
+    const condition = (rule.conditionText || rule.media?.mediaText
+      || header.replace(/^@media\b/iu, "")).trim();
+    if (observesOwnedSubtree && condition) mediaQueries.add(condition);
+    return !condition || document.defaultView.matchMedia(condition).matches;
+  }
+  if (/^@supports\b/iu.test(header)) {
+    const condition = (rule.conditionText || header.replace(/^@supports\b/iu, "")).trim();
+    return !condition || document.defaultView.CSS.supports(
+      carrierSupportsHeader(`@supports ${condition}`).slice("@supports ".length),
+    );
+  }
+  return true;
 }
 
 function matchingParenthesis(value: string, start: number): number {
@@ -709,6 +738,7 @@ function transformSelectorHeaders(
 }
 
 function serializeCarrierRules(
+  document: RuntimeDocument,
   rules: CSSRuleList | readonly CSSRule[],
   selectors: Set<string>,
   selectorOccurrences: string[],
@@ -771,6 +801,13 @@ function serializeCarrierRules(
     }
     const shapeSupports = shapeSupportReplacements(header).length > 0;
     const observesOwnedSubtree = Boolean(rule.cssRules && rulesMayAffectOwnedPaint(rule.cssRules));
+    if (rule.cssRules && !groupingRuleMatches(
+      document,
+      rule,
+      header,
+      observesOwnedSubtree,
+      mediaQueries,
+    )) continue;
     if (/^@container\b/iu.test(header) && observesOwnedSubtree) {
       throw ownershipBlockingSyntaxError(`Automatic CSS cannot observe container-query paint dependencies: ${header}`);
     }
@@ -783,6 +820,7 @@ function serializeCarrierRules(
     }
     const nested = rule.cssRules
       ? serializeCarrierRules(
+        document,
         rule.cssRules,
         selectors,
         selectorOccurrences,
@@ -795,9 +833,6 @@ function serializeCarrierRules(
         selectorDisplay,
       )
       : "";
-    if (/^@media\b/iu.test(header) && observesOwnedSubtree) {
-      mediaQueries.add(header.replace(/^@media\b/iu, "").trim());
-    }
     if (nestedDeclarations) {
       if (!parentSelector) {
         throw ownershipBlockingSyntaxError("Automatic CSS found nested declarations without a parent selector");
@@ -996,6 +1031,7 @@ export function parseCarrierSheet(
     const selectorRecords: Readonly<SelectorRecord>[] = [];
     const mediaQueries = new Set<string>();
     const css = serializeCarrierRules(
+      document,
       sheet?.cssRules ?? [],
       selectors,
       selectorOccurrences,

@@ -82,6 +82,9 @@ function nativeController(
       if (shadowRoot.host.shadowRoot !== shadowRoot) {
         throw new TypeError("Cornerfill automatic scopes cannot register a closed ShadowRoot");
       }
+      if (root !== document && shadowRoot.host.getRootNode() !== root) {
+        throw new TypeError("A shadow-root scope can register only a directly nested open ShadowRoot");
+      }
       const existing = scopes.get(shadowRoot);
       if (existing) return existing;
       const scope = nativeController(nativeQualification, {

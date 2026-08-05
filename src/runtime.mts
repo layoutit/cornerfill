@@ -270,12 +270,37 @@ export interface CornerfillPreparedUpdate {
   readonly paintActive?: boolean | undefined;
 }
 
-export type CornerfillHandleUpdate = Omit<
+export type CornerfillNativeHandleUpdate = Readonly<Pick<
   CornerfillAttachConfig,
-  "observeBackgroundPosition" | "rasterIsOpaque"
-> & Readonly<{
-  readonly backgroundPosition?: PixelPair | undefined;
+  "borderRadius" | "cornerShape"
+>> & Readonly<{
+  readonly backgroundPosition?: never;
+  readonly border?: never;
+  readonly outline?: never;
+  readonly paint?: never;
+  readonly paintActive?: never;
+  readonly shadow?: never;
 }>;
+
+export type CornerfillDynamicHandleUpdate = Readonly<Pick<
+  CornerfillAttachConfig,
+  "border" | "borderRadius" | "cornerShape" | "outline" | "paint" | "paintActive" | "shadow"
+>> & Readonly<{
+  readonly backgroundPosition?: never;
+}>;
+
+export type CornerfillPreparedHandleUpdate = Omit<CornerfillPreparedUpdate, "element"> & Readonly<{
+  readonly border?: never;
+  readonly borderRadius?: never;
+  readonly cornerShape?: never;
+  readonly outline?: never;
+  readonly paint?: never;
+  readonly shadow?: never;
+}>;
+
+type CornerfillInternalHandleUpdate = CornerfillNativeHandleUpdate
+  | CornerfillDynamicHandleUpdate
+  | CornerfillPreparedHandleUpdate;
 
 const NATIVE_UPDATE_KEYS = new Set(["borderRadius", "cornerShape"]);
 const PREPARED_UPDATE_KEYS = new Set(["backgroundPosition", "paintActive"]);
@@ -287,6 +312,18 @@ const DYNAMIC_UPDATE_KEYS = new Set([
   "paint",
   "shadow",
   "paintActive",
+]);
+
+const OBSERVED_STYLESHEET_ATTRIBUTES = Object.freeze([
+  "crossorigin",
+  "href",
+  "integrity",
+  "media",
+  "nonce",
+  "referrerpolicy",
+  "rel",
+  "title",
+  "type",
 ]);
 
 function assertSupportedUpdateKeys(
@@ -412,22 +449,44 @@ export interface CornerfillEntryExplanation {
   readonly transformOwnedByCornerfill: false;
 }
 
-export interface CornerfillHandle {
+interface CornerfillHandleBase {
   readonly backend: ConcreteSurfaceBackend | "native-corner-shape" | "pending";
   readonly ready: Promise<CornerfillEntryExplanation>;
   dispose(): void;
   explain(): Readonly<CornerfillEntryExplanation>;
+  refresh(): Promise<CornerfillEntryExplanation>;
+  verify(): Readonly<CornerfillEntryExplanation>;
+}
+
+export interface CornerfillNativeHandle extends CornerfillHandleBase {
+  readonly mode: "native";
   interpolateCornerShape(
     from: CornerShapeSource,
     to: CornerShapeSource,
     progress: number,
     options?: CornerWritingOptions,
   ): Promise<CornerfillEntryExplanation>;
-  refresh(): Promise<CornerfillEntryExplanation>;
-  resize(next?: CornerfillPreparedResizeConfig): Promise<CornerfillEntryExplanation>;
-  update(next?: CornerfillHandleUpdate): Promise<CornerfillEntryExplanation>;
-  verify(): Readonly<CornerfillEntryExplanation>;
+  readonly update: (next?: CornerfillNativeHandleUpdate) => Promise<CornerfillEntryExplanation>;
 }
+
+export interface CornerfillDynamicHandle extends CornerfillHandleBase {
+  readonly mode: "dynamic";
+  interpolateCornerShape(
+    from: CornerShapeSource,
+    to: CornerShapeSource,
+    progress: number,
+    options?: CornerWritingOptions,
+  ): Promise<CornerfillEntryExplanation>;
+  readonly update: (next?: CornerfillDynamicHandleUpdate) => Promise<CornerfillEntryExplanation>;
+}
+
+export interface CornerfillPreparedHandle extends CornerfillHandleBase {
+  readonly mode: "prepared";
+  resize(next?: CornerfillPreparedResizeConfig): Promise<CornerfillEntryExplanation>;
+  readonly update: (next?: CornerfillPreparedHandleUpdate) => Promise<CornerfillEntryExplanation>;
+}
+
+export type CornerfillHandle = CornerfillNativeHandle | CornerfillDynamicHandle | CornerfillPreparedHandle;
 
 export interface CornerfillControllerStats {
   readonly activeFallbackEntries: number;
@@ -455,11 +514,11 @@ export interface CornerfillControllerHandle {
   attach(
     element: CornerfillElement,
     config?: Readonly<CornerfillAttachConfig>,
-  ): Readonly<CornerfillHandle>;
+  ): Readonly<CornerfillNativeHandle | CornerfillDynamicHandle>;
   attachPrepared(
     element: CornerfillElement,
     config: Readonly<CornerfillPreparedConfig>,
-  ): Readonly<CornerfillHandle>;
+  ): Readonly<CornerfillPreparedHandle>;
   destroy(): void;
   detach(element: CornerfillElement): boolean;
   explain(element: CornerfillElement): Readonly<CornerfillEntryExplanation> | null;
@@ -1820,9 +1879,10 @@ class CornerfillController {
       const observer = new this.view.MutationObserver(this._onMutation);
       observer.observe(target, {
         attributes: true,
-        attributeFilter: ["class", "dir", "style"],
+        attributeFilter: ["class", "dir", "style", ...OBSERVED_STYLESHEET_ATTRIBUTES],
         attributeOldValue: true,
         childList: true,
+        characterData: true,
         subtree: true,
       });
       this.attachmentLifecycleObservers.set(root, observer);
@@ -1841,6 +1901,7 @@ class CornerfillController {
           "class",
           "dir",
           "style",
+          ...OBSERVED_STYLESHEET_ATTRIBUTES,
           "data-cornerfill-shape",
           OWNERSHIP_ATTRIBUTE,
           OWNED_BORDER_ATTRIBUTE,
@@ -1891,7 +1952,7 @@ class CornerfillController {
     if (effects.stylesheetRoots.size > 0) {
       for (const entry of this.entries) {
         if (entry.mode !== "dynamic" || entry.disposed
-          || !effects.stylesheetRoots.has(entry.ownershipRoot)) continue;
+          || !hasShadowIncludingAncestor(effects.stylesheetRoots, entry.element)) continue;
         this._markDirty(entry, "stylesheet-source", true);
       }
     }
@@ -3012,7 +3073,12 @@ class CornerfillController {
     let geometry = config.geometry ?? null;
     if (!geometry) {
       if (borderRadius === undefined || cornerShape === undefined) {
-        if (!initial && width === entry.width && height === entry.height && dpr === entry.dpr) geometry = entry.geometry;
+        const changesGeometryInput = config.borderRadius !== undefined
+          || config.cornerShape !== undefined;
+        if (!initial && !changesGeometryInput
+          && width === entry.width && height === entry.height && dpr === entry.dpr) {
+          geometry = entry.geometry;
+        }
         else throw new TypeError("resizing explicit prepared geometry requires new geometry or reusable radius and shape sources");
       } else {
         geometry = this._geometry(
@@ -3314,7 +3380,7 @@ class CornerfillController {
   attachPrepared(
     element: CornerfillElement,
     config: Readonly<CornerfillPreparedConfig>,
-  ): Readonly<CornerfillHandle> {
+  ): Readonly<CornerfillPreparedHandle> {
     if (this.destroyed) throw new Error("Cornerfill controller is destroyed");
     if (!(element instanceof this.view.Element)) throw new TypeError("attachPrepared() requires an Element from this document");
     const existing = this.entryByElement.get(element);
@@ -3380,7 +3446,7 @@ class CornerfillController {
   _attachNative(
     element: CornerfillElement,
     config: Readonly<CornerfillAttachConfig>,
-  ): Readonly<CornerfillHandle> {
+  ): Readonly<CornerfillNativeHandle> {
     assertElementAvailable(element);
     const computed = this.view.getComputedStyle(element);
     const radiusCapture = captureRadiusCarriers(computed);
@@ -3423,7 +3489,7 @@ class CornerfillController {
 
   _updateNativeEntry(
     entry: NativeEntry,
-    next: Readonly<CornerfillHandleUpdate>,
+    next: Readonly<CornerfillNativeHandleUpdate>,
   ): Promise<Readonly<CornerfillEntryExplanation>> {
     assertSupportedUpdateKeys(next as Readonly<Record<string, unknown>>, NATIVE_UPDATE_KEYS, "native");
     const shapeDeclarations = next.cornerShape === undefined
@@ -3439,7 +3505,7 @@ class CornerfillController {
 
   _updatePreparedEntry(
     entry: PreparedEntry,
-    next: Readonly<CornerfillHandleUpdate>,
+    next: Readonly<CornerfillPreparedHandleUpdate>,
   ): Promise<Readonly<CornerfillEntryExplanation>> {
     assertSupportedUpdateKeys(next as Readonly<Record<string, unknown>>, PREPARED_UPDATE_KEYS, "prepared");
     const backgroundPosition = next.backgroundPosition;
@@ -3460,7 +3526,7 @@ class CornerfillController {
 
   _updateDynamicEntry(
     entry: DynamicEntry,
-    next: Readonly<CornerfillHandleUpdate>,
+    next: Readonly<CornerfillDynamicHandleUpdate>,
   ): Promise<Readonly<CornerfillEntryExplanation>> {
     const state = entry.overrides;
     assertSupportedUpdateKeys(next as Readonly<Record<string, unknown>>, DYNAMIC_UPDATE_KEYS, "dynamic fallback");
@@ -3512,7 +3578,7 @@ class CornerfillController {
 
   _resolveDynamicEntryUpdate(
     entry: DynamicEntry,
-    next: Readonly<CornerfillHandleUpdate>,
+    next: Readonly<CornerfillDynamicHandleUpdate>,
   ): Readonly<ResolvedDynamicEntryUpdate> {
     const normalizedPaint = next.paint === undefined ? undefined : normalizePaintDescriptor(next.paint);
     const normalizedBorder = next.border === undefined ? undefined : normalizeBorder(next.border);
@@ -3563,9 +3629,13 @@ class CornerfillController {
     };
   }
 
+  _handle(entry: NativeEntry): Readonly<CornerfillNativeHandle>;
+  _handle(entry: DynamicEntry): Readonly<CornerfillDynamicHandle>;
+  _handle(entry: PreparedEntry): Readonly<CornerfillPreparedHandle>;
   _handle(entry: RuntimeEntry): Readonly<CornerfillHandle> {
     const controller = this;
     return Object.freeze({
+      get mode() { return entry.mode; },
       get ready() {
         if (!entry.ready) throw new Error("Cornerfill entry initialization has not started");
         return entry.ready;
@@ -3573,11 +3643,15 @@ class CornerfillController {
       get backend() {
         return entry.mode === "native" ? "native-corner-shape" : entry.surface?.backend ?? entry.backend ?? "pending";
       },
-      update(next: CornerfillHandleUpdate = {}) {
+      update(next: CornerfillInternalHandleUpdate = {}) {
         if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
-        if (entry.mode === "native") return controller._updateNativeEntry(entry, next);
-        if (entry.mode === "prepared") return controller._updatePreparedEntry(entry, next);
-        return controller._updateDynamicEntry(entry, next);
+        if (entry.mode === "native") {
+          return controller._updateNativeEntry(entry, next as CornerfillNativeHandleUpdate);
+        }
+        if (entry.mode === "prepared") {
+          return controller._updatePreparedEntry(entry, next as CornerfillPreparedHandleUpdate);
+        }
+        return controller._updateDynamicEntry(entry, next as CornerfillDynamicHandleUpdate);
       },
       interpolateCornerShape(
         from: CornerShapeSource,
@@ -3638,13 +3712,13 @@ class CornerfillController {
       dispose() {
         if (controller.entryByElement.get(entry.element) === entry) controller.detach(entry.element);
       },
-    });
+    }) as Readonly<CornerfillHandle>;
   }
 
   attach(
     element: CornerfillElement,
     config: Readonly<CornerfillAttachConfig> = {},
-  ): Readonly<CornerfillHandle> {
+  ): Readonly<CornerfillNativeHandle | CornerfillDynamicHandle> {
     if (this.destroyed) throw new Error("Cornerfill controller is destroyed");
     if (!(element instanceof this.view.Element)) throw new TypeError("attach() requires an Element from this document");
     const existing = this.entryByElement.get(element);

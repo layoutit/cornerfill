@@ -182,8 +182,30 @@ await runWithCleanup(async () => {
     import { buildCornerGeometry } from "cornerfill/geometry";
     import { parseCornerShape } from "cornerfill/values";
     import { CORNERFILL_SPEC_REVISION } from "cornerfill/spec";
+    declare const element: HTMLElement;
+    declare const shadowRoot: ShadowRoot;
+    declare const runtime: ReturnType<typeof installCornerfill>;
+    const attached = runtime.attach(element);
+    // @ts-expect-error attach() can select native or fallback, so mode must be narrowed first.
+    attached.update({ paint: { kind: "solid", color: "red" } });
+    if (attached.mode === "native") {
+      attached.update({ cornerShape: "bevel" });
+      // @ts-expect-error native handles do not own paint.
+      attached.update({ paint: { kind: "solid", color: "red" } });
+    } else {
+      attached.update({ paint: { kind: "solid", color: "red" } });
+      // @ts-expect-error dynamic handles do not expose prepared crop updates.
+      attached.update({ backgroundPosition: [0, 0] });
+    }
+    declare const prepared: ReturnType<typeof runtime.attachPrepared>;
+    prepared.update({ backgroundPosition: [0, 0] });
+    prepared.resize({ cornerShape: "scoop", borderRadius: "5px" });
+    // @ts-expect-error prepared direct updates do not accept geometry fields.
+    prepared.update({ cornerShape: "scoop" });
+    // @ts-expect-error open roots must be registered through the document controller.
+    installCornerfillAuto({ root: shadowRoot });
     void [cornerfill, installCornerfillAuto, installCornerfill, buildCornerGeometry,
-      parseCornerShape, CORNERFILL_SPEC_REVISION];
+      parseCornerShape, CORNERFILL_SPEC_REVISION, attached, prepared];
   `);
   writeFileSync(join(consumerRoot, "tsconfig.json"), `${JSON.stringify({
     compilerOptions: {

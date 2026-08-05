@@ -4,6 +4,7 @@ import {
   cssIdentifierAt,
   cssIdentifiers,
   cssWideKeyword,
+  scanCssSyntax,
   skipCssTrivia,
   wholeCssIdentifier,
 } from "./css-syntax.mjs";
@@ -71,17 +72,64 @@ export function colorProbeMutation(record: MutationRecord): boolean {
   return nodes.length > 0 && nodes.every(colorProbeNode);
 }
 
-function customPropertyReferences(source: string, output: Set<string>): void {
-  if (!source.includes("\\") && !/var\(/iu.test(source)) return;
-  for (const token of cssFunctions(source)) {
-    if (token.name !== "var") continue;
-    const name = cssIdentifierAt(source, skipCssTrivia(source, token.open + 1));
-    if (name?.value.startsWith("--")) output.add(name.value);
-  }
-}
-
 function hostAttributeDependentColor(source: string): boolean {
   return cssFunctions(source).some(({ name }) => name === "attr");
+}
+
+function colorFunctionEnd(source: string, open: number): number {
+  let end = -1;
+  scanCssSyntax(source, open, (index, character, parentheses) => {
+    if (character !== ")" || parentheses !== 1) return;
+    end = index;
+    return false;
+  });
+  return end;
+}
+
+function varFallback(body: string, nameEnd: number): string {
+  let comma = -1;
+  scanCssSyntax(body, nameEnd, (index, character, parentheses, brackets, blocks) => {
+    if (character !== "," || parentheses !== 0 || brackets !== 0 || blocks !== 0) return;
+    comma = index;
+    return false;
+  });
+  return comma < 0 ? "" : body.slice(comma + 1);
+}
+
+function collectActiveColorDependencies(
+  source: string,
+  computed: CSSStyleDeclaration,
+  customProperties: Set<string>,
+  stack: ReadonlySet<string> = new Set(),
+): boolean {
+  const variable = cssFunctions(source).find(({ name }) => name === "var");
+  if (!variable) return hostAttributeDependentColor(source);
+  const end = colorFunctionEnd(source, variable.open);
+  if (end < 0) return hostAttributeDependentColor(source);
+  if (collectActiveColorDependencies(
+    source.slice(0, variable.start),
+    computed,
+    customProperties,
+    stack,
+  )) return true;
+  const body = source.slice(variable.open + 1, end);
+  const name = cssIdentifierAt(body, skipCssTrivia(body, 0));
+  if (!name?.value.startsWith("--")) return hostAttributeDependentColor(source);
+  customProperties.add(name.value);
+  const value = computed.getPropertyValue(name.value);
+  const selected = value !== "" ? value : varFallback(body, name.end);
+  if (selected) {
+    if (stack.has(name.value)) return hostAttributeDependentColor(selected);
+    const nextStack = new Set(stack);
+    nextStack.add(name.value);
+    if (collectActiveColorDependencies(selected, computed, customProperties, nextStack)) return true;
+  }
+  return collectActiveColorDependencies(
+    source.slice(end + 1),
+    computed,
+    customProperties,
+    stack,
+  );
 }
 
 export function captureElementColorContext(
@@ -91,33 +139,22 @@ export function captureElementColorContext(
   const pending = new Set<string>();
   for (const value of values) {
     const source = String(value);
-    if (hostAttributeDependentColor(source)) {
+    if (collectActiveColorDependencies(source, computed, pending)) {
       throw new TypeError("explicit attr() colors require host-attribute resolution");
     }
-    customPropertyReferences(source, pending);
   }
   const customProperties: Readonly<{
     readonly name: string;
     readonly priority: string;
     readonly value: string;
   }>[] = [];
-  const captured = new Set<string>();
-  while (pending.size > 0) {
-    const name = pending.values().next().value;
-    if (!name) break;
-    pending.delete(name);
-    if (captured.has(name)) continue;
-    captured.add(name);
+  for (const name of pending) {
     const value = computed.getPropertyValue(name);
-    if (hostAttributeDependentColor(value)) {
-      throw new TypeError("explicit attr() colors require host-attribute resolution");
-    }
     customProperties.push(Object.freeze({
       name,
       priority: computed.getPropertyPriority(name),
       value,
     }));
-    customPropertyReferences(value, pending);
   }
   const color = computed.color || "canvastext";
   const colorScheme = computed.colorScheme || "normal";
@@ -252,7 +289,8 @@ export function withElementColorResolver<T>(
     const color = String(value).trim();
     if (!color) throw new SyntaxError(`${label} must be a valid CSS color`);
     if (cssWideKeyword(color)) throw new SyntaxError(`invalid ${label}: ${value}`);
-    if (hostAttributeDependentColor(color)) {
+    if (hostAttributeDependentColor(color)
+      && !cssFunctions(color).some(({ name }) => name === "var")) {
       throw new TypeError("explicit attr() colors require host-attribute resolution");
     }
     const cached = cache.get(color);

@@ -1199,6 +1199,36 @@ await test("explicit paint rejects invalid CSS colors before taking ownership", 
     }
     assert(error instanceof TypeError && /attr\(\).*host-attribute/u.test(error.message), `attribute-dependent explicit color was accepted: ${color}`);
   }
+  const fallbackColor = "var(--cornerfill-safe-color, attr(data-cornerfill-accent type(<color>), #0000ff))";
+  element.style.setProperty("--cornerfill-safe-color", "green");
+  const fallbackHandle = controller.attach(element, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: fallbackColor },
+  });
+  await fallbackHandle.ready;
+  assert(
+    /(?:0,\s*128,\s*0|green)/u.test(fallbackHandle.explain().paint.layer.color),
+    "attr() in an unused var() fallback rejected or replaced the selected custom property",
+  );
+  fallbackHandle.dispose();
+  element.style.removeProperty("--cornerfill-safe-color");
+  let activeFallbackError = null;
+  try {
+    const activeFallback = controller.attach(element, {
+      borderRadius: "5px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: fallbackColor },
+    });
+    await activeFallback.ready;
+    activeFallback.dispose();
+  } catch (error) {
+    activeFallbackError = error;
+  }
+  assert(
+    activeFallbackError instanceof TypeError && /attr\(\).*host-attribute/u.test(activeFallbackError.message),
+    "an active attr() var fallback bypassed host-attribute refusal",
+  );
   let indirectHandle = null;
   let indirectError = null;
   try {
@@ -1809,18 +1839,90 @@ await test("automatic source budgets fail ownership closed", async () => {
     "maximum aggregate compiled selector count of 1",
   );
   await run(
-    '@import "data:text/css,.one%7Bcolor:red%7D" not all;@import "data:text/css,.two%7Bcolor:blue%7D" not all;.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}',
+    '@import "data:text/css,.one%7Bcolor:red%7D";@import "data:text/css,.two%7Bcolor:blue%7D";.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}',
     { maxImportCount: 1 },
     "maximum @import count of 1",
   );
 });
 
+await test("inactive source contexts stay observable without owning or consuming source work", async () => {
+  const originalFetch = window.fetch;
+  const linkedCss = ".cornerfill-inactive-link{corner-shape:scoop;border-radius:5px;background:blue}";
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.media = "not all";
+  link.href = `/bench/imports/delayed-runtime.css?css=${encodeURIComponent(linkedCss)}`;
+  let linkedFetches = 0;
+  window.fetch = (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url === link.href) linkedFetches += 1;
+    return originalFetch(input, init);
+  };
+  const inactive = document.createElement("style");
+  inactive.media = "not all";
+  inactive.textContent = "@layer{.cornerfill-inactive-owner{corner-shape:notch}}";
+  const active = document.createElement("style");
+  active.textContent = `
+    @media not all { @layer { .cornerfill-false-media { corner-shape: notch } } }
+    @supports (display: __cornerfill_impossible__) {
+      @layer { .cornerfill-false-supports { corner-shape: notch } }
+    }
+    @supports (content: "{") {
+      .cornerfill-header-string { corner-shape: bevel; border-radius: 5px; background: red }
+    }
+    .cornerfill-inactive-baseline { corner-shape: bevel; border-radius: 5px; background: red }
+  `;
+  document.head.append(link, inactive, active);
+  const linked = host();
+  linked.className = "cornerfill-inactive-link";
+  const baseline = host();
+  baseline.className = "cornerfill-inactive-baseline";
+  const headerString = host();
+  headerString.className = "cornerfill-header-string";
+  const auto = installCornerfillAuto(options({
+    autoObserve: true,
+    maxCompiledSelectors: 3,
+    onError() {},
+  }));
+  try {
+    await auto.ready;
+    assert(linkedFetches === 0, "inactive linked source was fetched by Cornerfill");
+    assert(auto.sourceState.stylesheets.get(link)?.applicable === false, "inactive link was not recorded as inactive");
+    assert(auto.sourceState.stylesheets.get(inactive)?.applicable === false, "inactive style was not recorded as inactive");
+    assert(auto.explain().automatic.ownership === "active", "false conditional descendants blocked ownership");
+    assert(auto.explain(baseline)?.status === "active", "inactive source disturbed an active source");
+    assert(auto.explain(headerString)?.status === "active", "a brace inside a support-condition string truncated the rule header");
+    assert(auto.explain(linked) === null, "inactive linked source attached an element");
+
+    link.media = "all";
+    await waitFor(() => auto.explain(linked)?.status === "active", "inactive link activation");
+    assert(linkedFetches === 1, `activated linked source was fetched ${linkedFetches} times`);
+
+    inactive.media = "all";
+    await waitFor(() => auto.explain().automatic.ownership === "blocked-root", "inactive unsafe owner activation");
+    assert(auto.explain(baseline) === null, "activated unsafe source retained fallback ownership");
+    inactive.media = "not all";
+    await waitFor(() => auto.explain(baseline)?.status === "active", "inactive unsafe owner recovery");
+  } finally {
+    auto.destroy();
+    window.fetch = originalFetch;
+    link.remove();
+    inactive.remove();
+    active.remove();
+    linked.remove();
+    baseline.remove();
+    headerString.remove();
+  }
+});
+
 await test("inactive conditional imports do not establish their named layer", async () => {
   const importUrl = "data:text/css,/*cornerfill-empty-conditional*/";
   const originalFetch = window.fetch;
+  let requests = 0;
   window.fetch = (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url !== importUrl) return originalFetch(input, init);
+    requests += 1;
     return Promise.resolve({
       headers: { get: (name) => name.toLowerCase() === "content-type" ? "text/css" : null },
       ok: true,
@@ -1830,7 +1932,7 @@ await test("inactive conditional imports do not establish their named layer", as
     });
   };
   const imported = document.createElement("style");
-  imported.textContent = `@import "${importUrl}" layer(cornerfill-conditional-theme) not all;`;
+  imported.textContent = `@import "${importUrl}" layer(cornerfill-conditional-theme) (max-width: 1px);`;
   const cascade = document.createElement("style");
   cascade.textContent = `
     @layer cornerfill-conditional-base, cornerfill-conditional-theme;
@@ -1857,6 +1959,7 @@ await test("inactive conditional imports do not establish their named layer", as
       /(?:blue|0,\s*0,\s*255)/u.test(auto.explain(element)?.paint?.layer?.color ?? ""),
       "inactive layered import inverted later layer paint",
     );
+    assert(requests === 0, "media-inactive import was fetched by Cornerfill");
   } finally {
     auto.destroy();
     window.fetch = originalFetch;
@@ -1964,16 +2067,19 @@ await test("automatic source recovery handles comments and CSS identifier escape
   }
 });
 
-await test("supports-false imports are filtered before fetch and source budgets", async () => {
+await test("supports- and media-false imports are filtered before fetch and source budgets", async () => {
   const skippedUrl = new URL("/bench/imports/conditional-skipped.css", location.href).href;
+  const mediaSkippedUrl = new URL("/bench/imports/conditional-media-skipped.css", location.href).href;
   const activeUrl = new URL("/bench/imports/conditional-active.css", location.href).href;
   const originalFetch = window.fetch;
   const requests = [];
   window.fetch = (input, init = {}) => {
     const url = input instanceof Request ? input.url : String(input);
-    if (url !== skippedUrl && url !== activeUrl) return originalFetch(input, init);
+    if (url !== skippedUrl && url !== mediaSkippedUrl && url !== activeUrl) return originalFetch(input, init);
     requests.push(url);
-    if (url === skippedUrl) return Promise.reject(new Error("supports-false import was fetched"));
+    if (url === skippedUrl || url === mediaSkippedUrl) {
+      return Promise.reject(new Error("inactive import was fetched"));
+    }
     return Promise.resolve({
       headers: { get: (name) => name.toLowerCase() === "content-type" ? "text/css" : null },
       ok: true,
@@ -2005,10 +2111,88 @@ await test("supports-false imports are filtered before fetch and source budgets"
       "Cornerfill-transformed import support condition stayed false",
     );
     equal(requests, [activeUrl], "inactive import participated in fetch or import budgets");
+    assert(
+      [...auto.sourceState.stylesheets.values()].some(({ mediaQueries }) => mediaQueries.some((query) => (
+        query.replace(/\s+/gu, "") === "(max-width:1px)"
+      ))),
+      "media-inactive import did not retain its activation dependency",
+    );
   } finally {
     auto.destroy();
     window.fetch = originalFetch;
     link.remove();
+    local.remove();
+    imported.remove();
+  }
+});
+
+await test("native-true carrier-false imports are audited before fallback ownership", async () => {
+  const safeCss = ".cornerfill-negative-imported{corner-shape:bevel}";
+  const unsafeCss = ".cornerfill-negative-unsafe{corner-shape:bevel;background:blue}";
+  const safeUrl = new URL(
+    `/bench/imports/delayed-runtime.css?css=${encodeURIComponent(safeCss)}`,
+    location.href,
+  ).href;
+  const unsafeUrl = new URL(
+    `/bench/imports/delayed-runtime.css?css=${encodeURIComponent(unsafeCss)}`,
+    location.href,
+  ).href;
+  const originalFetch = window.fetch;
+  const requests = [];
+  window.fetch = (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url === safeUrl || url === unsafeUrl) {
+      requests.push(url);
+    }
+    return originalFetch(input, init);
+  };
+  const safe = document.createElement("style");
+  safe.textContent = `
+    @import "${safeUrl}" supports(not (corner-shape: bevel));
+    .cornerfill-negative-local { corner-shape: scoop; border-radius: 5px; background: red }
+  `;
+  document.head.append(safe);
+  const local = host();
+  local.className = "cornerfill-negative-local";
+  const imported = host();
+  imported.className = "cornerfill-negative-imported";
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    onError() {},
+    unreadableStylesheetPolicy: "best-effort",
+  }));
+  const nativeShapeSyntax = CSS.supports("corner-shape", "bevel");
+  const unsafe = document.createElement("style");
+  try {
+    await auto.ready;
+    assert(
+      auto.explain(local)?.status === "active",
+      `safe negative import blocked a local carrier: ${JSON.stringify(auto.explain().errors)}`,
+    );
+    assert(auto.explain(imported) === null, "carrier-false negative import emitted fallback carriers");
+    assert(
+      requests.filter((url) => url === safeUrl).length === (nativeShapeSyntax ? 0 : 1),
+      "negative import did not follow native applicability for its safety audit",
+    );
+
+    unsafe.textContent = `@import "${unsafeUrl}" supports(not (corner-shape: bevel));`;
+    document.head.append(unsafe);
+    await auto.refresh();
+    if (nativeShapeSyntax) {
+      assert(auto.explain(local)?.status === "active", "native-false negative import blocked fallback ownership");
+    } else {
+      assert(auto.explain().automatic.ownership === "blocked-root", "unsafe negative import did not fail closed");
+      assert(auto.explain(local) === null, "unsafe negative import retained fallback ownership");
+      assert(
+        auto.explain().errors.some(({ message }) => /also declares: background/u.test(message)),
+        `unsafe negative import was not diagnosed: ${JSON.stringify(auto.explain().errors)}`,
+      );
+    }
+  } finally {
+    auto.destroy();
+    window.fetch = originalFetch;
+    safe.remove();
+    unsafe.remove();
     local.remove();
     imported.remove();
   }
@@ -2351,6 +2535,33 @@ await test("automatic import requests are stale-safe, cycle-bounded, and failure
     const requestCount = requests.length;
     await auto.refresh();
     assert(requests.length === requestCount, "failed import graph retried without an explicit retry");
+
+    await loadLink('@import "/bench/imports/child.css";.cornerfill-import-stale{width:12px;height:10px;border-radius:5px;background:purple}', true);
+    const siblingCycle = auto.refresh();
+    await waitFor(() => requests.length === requestCount + 1, "sibling-cycle root stylesheet request");
+    requests[requestCount].resolve(response(
+      '@import "./a.css";@import "./b.css";',
+      "https://assets.example/sibling-cycle/root.css",
+    ));
+    await waitFor(() => requests.length === requestCount + 3, "sibling-cycle branch requests");
+    const siblingRequests = requests.slice(requestCount + 1);
+    const requestFor = (suffix) => siblingRequests.find(({ url }) => url.endsWith(suffix));
+    requestFor("/a.css").resolve(response(
+      '@import "./b.css";',
+      "https://assets.example/sibling-cycle/a.css",
+    ));
+    requestFor("/b.css").resolve(response(
+      '@import "./a.css";',
+      "https://assets.example/sibling-cycle/b.css",
+    ));
+    await Promise.race([
+      siblingCycle,
+      new Promise((_resolve, reject) => setTimeout(
+        () => reject(new Error("sibling import cycle deadlocked automatic readiness")),
+        1_000,
+      )),
+    ]);
+    assert(errors.some((message) => /@import cycle/u.test(message)), "sibling import cycle was not diagnosed");
   } finally {
     auto.destroy();
     window.fetch = originalFetch;
@@ -2443,6 +2654,12 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
   const closedShell = host();
   const closed = closedShell.attachShadow({ mode: "closed" });
   const auto = installCornerfillAuto(options({ autoObserve: false }));
+  let directRootError = null;
+  try { installCornerfillAuto(options({ root: rootA })); } catch (error) { directRootError = error; }
+  assert(
+    /Register open shadow roots through a document automatic controller/u.test(directRootError?.message ?? ""),
+    "direct shadow-root installation bypassed containing-tree observation",
+  );
   let scopeA;
   let scopeB;
   try {
@@ -2452,6 +2669,12 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
     try { auto.registerRoot(closed); } catch (error) { closedError = error; }
     assert(/closed ShadowRoot/u.test(closedError?.message ?? ""), "closed root registration did not fail explicitly");
     scopeA = auto.registerRoot(rootA, { adoptedStyleSheets: true });
+    let unrelatedRootError = null;
+    try { scopeA.registerRoot(rootB); } catch (error) { unrelatedRootError = error; }
+    assert(
+      /directly nested open ShadowRoot/u.test(unrelatedRootError?.message ?? ""),
+      "a shadow scope registered an unrelated root",
+    );
     scopeB = auto.registerRoot(rootB, { adoptedStyleSheets: true });
     assert(auto.registerRoot(rootA, { adoptedStyleSheets: true }) === scopeA, "duplicate root registration created another scope");
     await Promise.all([scopeA.ready, scopeB.ready]);
@@ -2533,6 +2756,76 @@ await test("automatic open-root scopes own local, inline, and opted-in adopted C
     shellA.remove();
     shellB.remove();
     closedShell.remove();
+  }
+});
+
+await test("containing styles refresh inherited paint inside registered roots", async () => {
+  const outerStyle = document.createElement("style");
+  outerStyle.textContent = ".cornerfill-inherited-host{--cornerfill-inherited-color:red}";
+  document.head.append(outerStyle);
+  const shell = host();
+  shell.className = "cornerfill-inherited-host";
+  const root = shell.attachShadow({ mode: "open" });
+  const localStyle = document.createElement("style");
+  localStyle.textContent = `
+    .cornerfill-inherited-paint {
+      corner-shape: bevel;
+      border-radius: 5px;
+      background: var(--cornerfill-inherited-color);
+    }
+  `;
+  root.append(localStyle);
+  const element = host(root);
+  element.className = "cornerfill-inherited-paint";
+  element.style.removeProperty("background-color");
+  element.style.removeProperty("border-radius");
+  const auto = installCornerfillAuto(options({ autoObserve: true }));
+  const scope = auto.registerRoot(root);
+  try {
+    await Promise.all([auto.ready, scope.ready]);
+    assert(/(?:255,\s*0,\s*0|red)/u.test(scope.explain(element)?.paint?.layer?.color ?? ""), "inherited shadow paint did not start red");
+    outerStyle.textContent = ".cornerfill-inherited-host{--cornerfill-inherited-color:blue}";
+    await waitFor(
+      () => /(?:0,\s*0,\s*255|blue)/u.test(scope.explain(element)?.paint?.layer?.color ?? ""),
+      "containing stylesheet refresh in registered root",
+    );
+  } finally {
+    scope.destroy();
+    auto.destroy();
+    outerStyle.remove();
+    shell.remove();
+  }
+
+  const runtimeStyle = document.createElement("style");
+  runtimeStyle.textContent = ".cornerfill-runtime-inherited-host{--cornerfill-runtime-color:red}";
+  document.head.append(runtimeStyle);
+  const runtimeShell = host();
+  runtimeShell.className = "cornerfill-runtime-inherited-host";
+  const runtimeRoot = runtimeShell.attachShadow({ mode: "open" });
+  const runtimeLocal = document.createElement("style");
+  runtimeLocal.textContent = ".cornerfill-runtime-inherited{background:var(--cornerfill-runtime-color)}";
+  runtimeRoot.append(runtimeLocal);
+  const runtimeElement = host(runtimeRoot);
+  runtimeElement.className = "cornerfill-runtime-inherited";
+  runtimeElement.style.removeProperty("background-color");
+  const controller = installCornerfill(options({ observe: true }));
+  const handle = controller.attach(runtimeElement, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+  });
+  try {
+    await handle.ready;
+    assert(/(?:255,\s*0,\s*0|red)/u.test(handle.explain().paint?.layer?.color ?? ""), "explicit inherited paint did not start red");
+    runtimeStyle.firstChild.data = ".cornerfill-runtime-inherited-host{--cornerfill-runtime-color:blue}";
+    await waitFor(
+      () => /(?:0,\s*0,\s*255|blue)/u.test(handle.explain().paint?.layer?.color ?? ""),
+      "containing stylesheet refresh in explicit runtime",
+    );
+  } finally {
+    handle.dispose();
+    controller.destroy();
+    runtimeStyle.remove();
+    runtimeShell.remove();
   }
 });
 
@@ -4568,6 +4861,53 @@ await test("prepared layout resize rebuilds once and crop remains paint-only", a
   assert(element.style.getPropertyValue("--cornerfill-live-image") === "author-value", "teardown lost the authored live-image property");
   controller.destroy();
   element.remove();
+});
+
+await test("explicit prepared geometry refuses partial geometry-source updates", async () => {
+  const { buildCornerGeometry } = await import("../dist/geometry.mjs");
+  const element = host();
+  const geometry = buildCornerGeometry({
+    width: 12,
+    height: 10,
+    dpr: 1,
+    borderRadius: "5px",
+    cornerShape: "bevel",
+  });
+  const controller = installCornerfill(options());
+  const handle = controller.attachPrepared(element, {
+    size: [12, 10],
+    dpr: 1,
+    geometry,
+    paint: { kind: "solid", color: "red" },
+  });
+  try {
+    await handle.ready;
+    const before = handle.explain();
+    for (const operation of [
+      () => handle.resize({ cornerShape: "scoop" }),
+      () => handle.resize({ borderRadius: "2px" }),
+      () => handle.interpolateCornerShape("bevel", "scoop", 0.5),
+    ]) {
+      let error = null;
+      try { await operation(); } catch (caught) { error = caught; }
+      assert(
+        /requires new geometry or reusable radius and shape sources/u.test(error?.message ?? ""),
+        "partial explicit-geometry update was not refused",
+      );
+      equal(
+        handle.explain().geometry.shapeParameters,
+        before.geometry.shapeParameters,
+        "refused explicit-geometry update changed retained geometry",
+      );
+      assert(handle.explain().counters.paints === before.counters.paints, "refused explicit-geometry update repainted");
+    }
+    await handle.resize({ paint: { kind: "solid", color: "blue" } });
+    assert(/(?:0,\s*0,\s*255|blue)/u.test(handle.explain().paint.layer.color), "paint-only explicit-geometry update did not recover");
+  } finally {
+    handle.dispose();
+    controller.destroy();
+    element.remove();
+  }
 });
 
 await test("shadow-root ownership paints and verifies", async () => {

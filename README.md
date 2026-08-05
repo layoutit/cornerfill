@@ -85,7 +85,7 @@ Unsupported syntax is reported or left native rather than approximated.
 - In registered shadow roots, a host pseudo must lead its selector branch. Nested host pseudos and complex relative chains after `:host >` fail that root closed.
 - `insertRule()` and `deleteRule()` are observed only on the top-level `CSSStyleSheet` owned by a readable `<style>` or `<link>` element. Imported child sheets and adopted stylesheets still require their documented explicit source handoff.
 - Direct mutation of existing CSSOM declarations, selectors, grouping rules, or media lists requires exact authored source through `replaceStylesheetSource()`; generic `refresh()` cannot reconstruct source the browser no longer exposes.
-- The explicit `cornerfill/runtime` observer covers host class, inline style, content, and size. Call `handle.refresh()` or `controller.refresh()` after other cascade inputs change.
+- The explicit `cornerfill/runtime` observer covers host class, inline style, content, size, and readable stylesheet-source changes in observed containing trees. Call `handle.refresh()` or `controller.refresh()` after other cascade inputs change.
 
 ## Development
 
