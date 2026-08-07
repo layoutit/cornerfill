@@ -473,10 +473,37 @@ await test("compiled CSS drives the production runtime without source reconstruc
   const inlineRadius = document.createElement("div");
   inlineRadius.className = "cornerfill-compiled-inline-radius";
   inlineRadius.style.borderRadius = "var(--cornerfill-compiled-inline-radius)";
+  const inlineEdgeReads = compiled.explain().counters.manifestReads;
   document.body.append(inlineRadius);
-  await new Promise(requestAnimationFrame);
+  await waitFor(() => compiled.explain().counters.manifestReads > inlineEdgeReads,
+    "the first inline standard-property var() edge did not rebuild dependency metadata");
   assert(compiled.explain(inlineRadius) === null,
     "an inline standard-property var() edge attached at zero radius");
+  const inlineOnlyFrame = document.createElement("iframe");
+  inlineOnlyFrame.srcdoc = "<!doctype html><html><head></head><body></body></html>";
+  const inlineOnlyLoaded = new Promise((resolve) => (
+    inlineOnlyFrame.addEventListener("load", resolve, { once: true })
+  ));
+  document.body.append(inlineOnlyFrame);
+  await inlineOnlyLoaded;
+  const inlineOnlyDocument = inlineOnlyFrame.contentDocument;
+  const inlineOnlyStyle = inlineOnlyDocument.createElement("style");
+  inlineOnlyStyle.textContent = await fetch("/bench/compiled-inline-only.css")
+    .then((response) => response.text());
+  inlineOnlyDocument.head.append(inlineOnlyStyle);
+  const inlineOnly = inlineOnlyDocument.createElement("div");
+  inlineOnly.className = "cornerfill-compiled-inline-only";
+  inlineOnly.style.borderRadius = "var(--cornerfill-compiled-inline-only-radius)";
+  inlineOnlyDocument.body.append(inlineOnly);
+  const inlineOnlyController = installCornerfillCompiled({
+    document: inlineOnlyDocument,
+    backend,
+    forceFallback: true,
+    staticFallback: backend === "static-data-url",
+  });
+  await inlineOnlyController.ready;
+  assert(inlineOnlyController.explain(inlineOnly) === null,
+    "an isolated inline-only var() edge attached at zero radius");
   const insertedVariableParent = document.createElement("section");
   insertedVariableParent.style.setProperty(
     "--cornerfill-compiled-dynamic-shape",
@@ -485,13 +512,10 @@ await test("compiled CSS drives the production runtime without source reconstruc
   const insertedVariableShape = document.createElement("div");
   insertedVariableShape.className = "cornerfill-compiled-variable-shape";
   insertedVariableParent.append(insertedVariableShape);
-  const insertedEdgeReads = compiled.explain().counters.manifestReads;
   document.body.append(insertedVariableParent);
   await waitFor(() => compiled.explain(insertedVariableShape)?.status === "active"
     && compiledShapeParameter(compiled, insertedVariableShape) === 0,
     "an inline var() edge inserted with a subtree did not attach");
-  await waitFor(() => compiled.explain().counters.manifestReads > insertedEdgeReads,
-    "an inserted inline var() edge did not rebuild dependency metadata");
   variableShapeParent.style.setProperty("--cornerfill-compiled-dynamic-shape", "bevel");
   await waitFor(() => compiled.explain(variableShape)?.status === "active",
     "an inherited inline custom-property change did not activate a potential candidate");
@@ -505,6 +529,34 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await waitFor(() => compiled.explain(variableShape)?.status === "active"
     && compiledShapeParameter(compiled, variableShape) === 0,
     "an inline var() edge did not resolve through transformed CSS");
+
+  let admission = null;
+  let brokenImage = null;
+  if (backend !== "static-data-url") {
+    admission = document.createElement("div");
+    admission.className = "cornerfill-compiled-admission";
+    const admissionChild = document.createElement("span");
+    admission.append(admissionChild);
+    document.body.append(admission);
+    await new Promise(requestAnimationFrame);
+    assert(compiled.explain(admission) === null,
+      "a paint-owned host with foreground content passed admission");
+    admissionChild.remove();
+    await waitFor(() => compiled.explain(admission)?.status === "active",
+      "a refused host was not reconsidered after its child was removed");
+    admission.append(document.createElement("span"));
+    await waitFor(() => compiled.explain(admission) === null,
+      "an active host was not reconsidered after foreground content was added");
+
+    const candidatesBeforeBrokenImage = compiled.explain().candidates;
+    brokenImage = document.createElement("div");
+    brokenImage.className = "cornerfill-compiled-broken-image";
+    document.body.append(brokenImage);
+    await waitFor(() => compiled.explain().errors.some((message) => /image/u.test(message))
+      && compiled.explain().candidates === candidatesBeforeBrokenImage,
+    "a failed asynchronous initialization retained an active candidate claim");
+    brokenImage.remove();
+  }
 
   const added = document.createElement("div");
   added.className = "cornerfill-compiled-dynamic active";
@@ -547,6 +599,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
     "a subtree-inserted inline var() edge missed its transformed media dependency");
   await waitFor(() => compiled.explain(inlineRadius)?.status === "active",
     "an inline standard-property var() edge missed its transformed media dependency");
+  await waitFor(() => inlineOnlyController.explain(inlineOnly)?.status === "active",
+    "an inline-only var() edge did not seed its compiled dependency graph");
   await waitFor(() => /20,\s*40,\s*220/u.test(compiledPaintColor(crossFile)),
     "metadata-only custom property media did not repaint its cross-file target");
   mediaDriver.stage = "compiled-media-light-ready";
@@ -563,6 +617,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
     "a subtree-inserted inline var() edge did not restore after media deactivation");
   await waitFor(() => compiled.explain(inlineRadius) === null,
     "an inline standard-property var() edge did not restore after media deactivation");
+  await waitFor(() => inlineOnlyController.explain(inlineOnly) === null,
+    "an inline-only var() edge did not restore after media deactivation");
   await waitFor(() => /(?:220,\s*40,\s*40|red)/u.test(
     compiledPaintColor(crossFile)
   ), "metadata-only custom property media did not restore its cross-file target");
@@ -1099,6 +1155,44 @@ await test("compiled CSS drives the production runtime without source reconstruc
     && destroyedCompiled.runtime.surfaceResources.webkit.activePixels === 0,
   "compiled controller destroy retained live backend resources");
 
+  const viewportFrame = document.createElement("iframe");
+  viewportFrame.width = "1200";
+  viewportFrame.srcdoc = "<!doctype html><html><head></head><body></body></html>";
+  const viewportLoaded = new Promise((resolve) => (
+    viewportFrame.addEventListener("load", resolve, { once: true })
+  ));
+  document.body.append(viewportFrame);
+  await viewportLoaded;
+  const viewportDocument = viewportFrame.contentDocument;
+  const viewportStyle = viewportDocument.createElement("style");
+  viewportStyle.textContent = await fetch("/bench/compiled-viewport-recovery.css")
+    .then((response) => response.text());
+  viewportDocument.head.append(viewportStyle);
+  for (let index = 0; index < 2; index += 1) {
+    const item = viewportDocument.createElement("div");
+    item.className = "cornerfill-compiled-viewport-recovery";
+    viewportDocument.body.append(item);
+  }
+  const viewportController = installCornerfillCompiled({
+    document: viewportDocument,
+    backend,
+    forceFallback: true,
+    staticFallback: backend === "static-data-url",
+    maxCandidateElements: 1,
+  });
+  await viewportController.ready.then(
+    () => { throw new Error("viewport-relative candidates did not exceed the active budget"); },
+    () => undefined,
+  );
+  viewportFrame.width = "300";
+  await waitFor(() => viewportDocument.defaultView.innerWidth < 1000,
+    "compiled viewport recovery narrow fixture");
+  await waitFor(() => viewportController.explain().status === "active"
+    && viewportController.explain().candidates === 0,
+  "viewport resize did not recover a failed compiled scope");
+  viewportController.destroy();
+  viewportFrame.remove();
+
   const budgetFrame = document.createElement("iframe");
   budgetFrame.id = "cornerfill-compiled-budget-frame";
   budgetFrame.srcdoc = "<!doctype html><html><head></head><body></body></html>";
@@ -1127,7 +1221,6 @@ await test("compiled CSS drives the production runtime without source reconstruc
     item.className = "cornerfill-compiled-recovery-item";
     recoveryGrid.append(item);
   }
-  budgetDocument.body.append(recoveryGrid);
   for (let index = 0; index < 2; index += 1) {
     const refused = budgetDocument.createElement("div");
     refused.className = "cornerfill-compiled-budget-refused";
@@ -1143,6 +1236,7 @@ await test("compiled CSS drives the production runtime without source reconstruc
   const budgetReport = await budgetController.ready;
   assert(budgetReport.candidates === 1 && budgetReport.potentialCandidates > 512,
     "an inactive conditional selector still consumed the active candidate budget");
+  budgetDocument.body.append(recoveryGrid);
   const recoveryDriver = { stage: "compiled-recovery-hover-ready" };
   globalThis.__CORNERFILL_POINTER_DRIVER__ = recoveryDriver;
   await waitFor(() => recoveryDriver.stage === "compiled-recovery-hover-driven",
@@ -1272,6 +1366,10 @@ await test("compiled CSS drives the production runtime without source reconstruc
   crossFile.remove();
   variableShapeParent.remove();
   inlineRadius.remove();
+  admission?.remove();
+  brokenImage?.remove();
+  inlineOnlyController.destroy();
+  inlineOnlyFrame.remove();
   insertedVariableParent.remove();
   media.remove();
   conditional.remove();

@@ -134,7 +134,10 @@ function hostBranch(branch: string): Readonly<{
   if (!leadingWhitespace && !/^[>+~]/u.test(trimmed)) {
     throw new SyntaxError("tokens after :host() must begin a descendant or child branch");
   }
-  const elementSelector = trimmed.replace(/^[>+~]\s*/u, "").trim();
+  if (/^[>+~]/u.test(trimmed)) {
+    throw new SyntaxError("host-relative child and sibling combinators require cornerfill/runtime");
+  }
+  const elementSelector = trimmed.trim();
   if (!elementSelector) throw new SyntaxError("shadow host selector has no element branch");
   return Object.freeze({
     elementSelector,

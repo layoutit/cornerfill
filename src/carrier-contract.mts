@@ -372,6 +372,7 @@ export interface CornerfillCompiledManifest {
   readonly candidateSelectors: readonly string[];
   readonly customProperties: readonly Readonly<CornerfillCompiledCustomProperty>[];
   readonly hostContexts: readonly Readonly<CornerfillCompiledHostContext>[];
+  readonly inheritedReferencedCustomProperties: readonly string[];
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
   readonly referencedCustomProperties: readonly string[];
@@ -405,6 +406,7 @@ export interface CornerfillCompiledManifestInput {
   readonly candidateSelectors?: Iterable<string> | undefined;
   readonly customProperties?: Iterable<Readonly<CornerfillCompiledCustomPropertyInput>> | undefined;
   readonly hostContexts?: Iterable<Readonly<CornerfillCompiledHostContext>> | undefined;
+  readonly inheritedReferencedCustomProperties?: Iterable<string> | undefined;
   readonly mediaQueries?: Iterable<string> | undefined;
   readonly observation: Readonly<SelectorObservation>;
   readonly referencedCustomProperties?: Iterable<string> | undefined;
@@ -506,11 +508,15 @@ export function createCompiledManifest(
   const referencedCustomProperties = normalizedStrings(
     input.referencedCustomProperties ?? [],
   ).map(normalizedCustomPropertyName);
+  const inheritedReferencedCustomProperties = normalizedStrings(
+    input.inheritedReferencedCustomProperties ?? [],
+  ).map(normalizedCustomPropertyName);
   return Object.freeze({
     schema: COMPILED_MANIFEST_SCHEMA,
     candidateSelectors: normalizedStrings(input.candidateSelectors ?? []),
     customProperties: normalizedCustomProperties(input.customProperties ?? []),
     hostContexts: normalizedHostContexts(input.hostContexts ?? []),
+    inheritedReferencedCustomProperties: Object.freeze(inheritedReferencedCustomProperties),
     mediaQueries: normalizedStrings(input.mediaQueries ?? []),
     observation: manifestObservation(input.observation),
     referencedCustomProperties: Object.freeze(referencedCustomProperties),
@@ -575,6 +581,7 @@ export function parseCompiledManifest(source: string): Readonly<CornerfillCompil
   }
   if (!Array.isArray(record.candidateSelectors)
     || !Array.isArray(record.customProperties)
+    || !Array.isArray(record.inheritedReferencedCustomProperties)
     || !Array.isArray(record.mediaQueries)
     || !Array.isArray(record.referencedCustomProperties)) {
     throw new TypeError("compiled manifest selector or media list is invalid");
@@ -596,6 +603,7 @@ export function parseCompiledManifest(source: string): Readonly<CornerfillCompil
     candidateSelectors: record.candidateSelectors as string[],
     customProperties: record.customProperties as CornerfillCompiledCustomPropertyInput[],
     hostContexts: (record.hostContexts ?? []) as CornerfillCompiledHostContext[],
+    inheritedReferencedCustomProperties: record.inheritedReferencedCustomProperties as string[],
     mediaQueries: record.mediaQueries as string[],
     referencedCustomProperties: record.referencedCustomProperties as string[],
     observation: {

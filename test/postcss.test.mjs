@@ -236,7 +236,14 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
     ["@media all { @layer theme { .card { corner-shape: bevel } } }", /conditional cascade-layer first establishment/u],
     ["@media all { @property --shape { syntax: '*'; inherits: false; initial-value: round } }", /conditional @property registration/u],
     ["@property --cornerfill-corner-top-left-shape { syntax: '<color>'; inherits: true; initial-value: red } .card { corner-shape: bevel }", /incompatible descriptors/u],
+    ["@unknown { @property --cornerfill-corner-top-left-shape { syntax: '*'; inherits: false; initial-value: __cornerfill_unset__ } } .card { corner-shape: bevel }", /must be one top-level rule/u],
+    ["@property --cornerfill-corner-top-left-shape { syntax: '*' !important; inherits: false; initial-value: __cornerfill_unset__ } .card { corner-shape: bevel }", /cannot be important/u],
     [":host-context(.theme .wrapper) .card { corner-shape: bevel }", /one compound selector/u],
+    [":host > .card { corner-shape: bevel }", /host-relative child and sibling combinators/u],
+    [".card { border-radius: attr(data-radius type(<length>), 0px); corner-shape: bevel }", /attr\(\) creates an unobservable attribute dependency/u],
+    [".card { --radius: attr(data-radius type(<length>), 0px); border-radius: var(--radius); corner-shape: bevel }", /cannot observe --radius.*attr\(\)/u],
+    [".card { border-radius: 10cqi; corner-shape: bevel }", /container-relative units create an unobservable container dependency/u],
+    [".card { --radius: 10cqmin; border-radius: var(--radius); corner-shape: bevel }", /cannot observe --radius.*container-relative units/u],
     [".parent { & .card { corner-shape: bevel } }", /after the nesting transform/u],
   ]) {
     await assert.rejects(
@@ -255,6 +262,16 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
   `, { from: "layered.css" });
   assert.match(layered.css, /@layer base, theme/u);
   assert.match(layered.css, /@media all\s*\{\s*@layer theme/u);
+
+  await assert.rejects(
+    postcss([cornerfillPostcss()]).process(`
+      @layer { @layer theme { .unrelated { color: red } } }
+      @media (prefers-color-scheme: dark) { @layer theme; }
+      @layer base { .face { corner-shape: bevel } }
+      @layer theme { .face { corner-shape: scoop } }
+    `, { from: "anonymous-layer.css" }),
+    /conditional cascade-layer first establishment/u,
+  );
 });
 
 test("unrelated custom properties do not become Cornerfill paint dependencies", async () => {

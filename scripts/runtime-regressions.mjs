@@ -146,6 +146,22 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
     border-radius: 14px;
     background: rgb(220, 40, 40);
   }
+  .cornerfill-compiled-admission {
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+    outline: 2px solid blue;
+    outline-offset: -4px;
+    corner-shape: bevel;
+  }
+  .cornerfill-compiled-broken-image {
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background-image: url("/cornerfill-missing-image.png");
+    corner-shape: bevel;
+  }
   .cornerfill-compiled-dynamic.active { corner-shape: bevel; }
   .cornerfill-compiled-dynamic[data-compiled-shape="on"] { corner-shape: scoop; }
   #cornerfill-compiled-dynamic-id { corner-shape: notch; }
@@ -197,14 +213,16 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-external-theme:hover .cornerfill-compiled-external-hover-host {
     --cornerfill-compiled-external-hover-shape: scoop;
   }
-  .cornerfill-compiled-inherited-standard-host { color: rgb(220, 40, 40); }
+  .cornerfill-compiled-inherited-standard-host {
+    color: var(--cornerfill-compiled-inherited-color, rgb(220, 40, 40));
+  }
   @media (prefers-color-scheme: dark) {
     :root {
+      --cornerfill-compiled-inherited-color: rgb(20, 40, 220);
       --cornerfill-compiled-indirect-shape: scoop;
       --cornerfill-compiled-inline-radius: 14px;
     }
     .cornerfill-compiled-inherited-host { --cornerfill-compiled-inherited-shape: scoop; }
-    .cornerfill-compiled-inherited-standard-host { color: rgb(20, 40, 220); }
   }
   .cornerfill-compiled-shared-host { corner-shape: bevel; }
   @media print { * { corner-shape: bevel; } }
@@ -254,6 +272,18 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
 const COMPILED_SHADOW_RESET_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-shadow { corner-shape: initial; }
 `, { from: "compiled-shadow-reset.css" })).css;
+const COMPILED_INLINE_ONLY_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-inline-only {
+    width: 36px;
+    height: 28px;
+    corner-shape: bevel;
+    background: rgb(220, 40, 40);
+  }
+  :root { --cornerfill-compiled-inline-only-radius: 0px; }
+  @media (prefers-color-scheme: dark) {
+    :root { --cornerfill-compiled-inline-only-radius: 14px; }
+  }
+`, { from: "compiled-inline-only.css" })).css;
 const COMPILED_SELECTOR_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-style-gate[style] + .cornerfill-compiled-style-gated,
   .cornerfill-compiled-selector-shell:has(.cornerfill-compiled-empty-marker:empty)
@@ -322,6 +352,15 @@ const COMPILED_BUDGET_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
     corner-shape: bevel;
   }
 `, { from: "compiled-budget-fixture.css" })).css;
+const COMPILED_VIEWPORT_RECOVERY_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-viewport-recovery {
+    width: 12px;
+    height: 10px;
+    border-radius: clamp(0px, calc(100vw - 1000px), 5px);
+    background: red;
+    corner-shape: bevel;
+  }
+`, { from: "compiled-viewport-recovery.css" })).css;
 const COMPILED_BUDGET_MEDIA_ONLY_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-budget-real { corner-shape: bevel; }
   .cornerfill-compiled-budget-round {
@@ -370,6 +409,11 @@ function within(root, path) {
 async function startServer() {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/cornerfill-missing-image.png") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "image/png" });
+      response.end("not-an-image");
+      return;
+    }
     if (url.pathname === "/bench/compiled-fixture.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_FIXTURE_CSS);
@@ -383,6 +427,11 @@ async function startServer() {
     if (url.pathname === "/bench/compiled-shadow-reset.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_SHADOW_RESET_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-inline-only.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_INLINE_ONLY_CSS);
       return;
     }
     if (url.pathname === "/bench/compiled-selector-fixture.css") {
@@ -418,6 +467,11 @@ async function startServer() {
     if (url.pathname === "/bench/compiled-budget-fixture.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_BUDGET_FIXTURE_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-viewport-recovery.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_VIEWPORT_RECOVERY_CSS);
       return;
     }
     if (url.pathname === "/bench/compiled-budget-media-only.css") {

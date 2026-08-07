@@ -75,6 +75,7 @@ test("compiled manifests normalize and round-trip deterministically", () => {
       name: "--z",
       observation,
     }],
+    inheritedReferencedCustomProperties: ["--tone"],
     mediaQueries: ["(min-width: 10px)", ""],
     observation,
     referencedCustomProperties: ["--tone"],
@@ -83,6 +84,7 @@ test("compiled manifests normalize and round-trip deterministically", () => {
   assert.equal(created.schema, COMPILED_MANIFEST_SCHEMA);
   assert.deepEqual(created.candidateSelectors, [".a", ".z"]);
   assert.deepEqual(created.referencedCustomProperties, ["--tone"]);
+  assert.deepEqual(created.inheritedReferencedCustomProperties, ["--tone"]);
   assert.deepEqual(created.customProperties.map(({ name }) => name), ["--tone", "--z", "--ä"]);
   assert.deepEqual(created.customProperties[0].references, ["--palette"]);
   assert.deepEqual(created.observation.attributes, ["class", "id"]);
@@ -108,6 +110,7 @@ test("compiled manifests fail closed on malformed or mismatched input", () => {
       schema: COMPILED_MANIFEST_SCHEMA,
       candidateSelectors: [7],
       customProperties: [],
+      inheritedReferencedCustomProperties: [],
       mediaQueries: [],
       referencedCustomProperties: [],
       observation,

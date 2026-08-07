@@ -157,6 +157,7 @@ interface ReconcileResult {
 interface CompiledScopeInternal {
   readonly candidates: Set<HTMLElement>;
   readonly counters: CompiledCounters;
+  readonly demote: (element: HTMLElement) => void;
   readonly handle: CornerfillCompiledScopeHandle;
   readonly localManifests: () => readonly Readonly<CornerfillCompiledManifest>[];
   readonly performRefresh: (notifyDependents?: boolean) => Promise<Readonly<CornerfillCompiledExplanation>>;
@@ -507,12 +508,17 @@ function manifestState(
   addDefinitions(localManifests, true);
   addDefinitions(inheritedManifests, false);
   const reachable = new Set<string>();
-  const pending = localManifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties);
+  const pending = [
+    ...localManifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties),
+    ...inheritedManifests.flatMap(
+      ({ inheritedReferencedCustomProperties }) => inheritedReferencedCustomProperties,
+    ),
+  ];
   const localDependencyObservations: Readonly<SelectorObservation>[] = [];
   const externalDependencyObservations: Readonly<SelectorObservation>[] = [];
   const dependencyMediaQueries = new Set<string>();
   const dependencyHostContexts: Readonly<CompiledHostContext>[] = [];
-  let unresolvedInlineEdge = pending.length > 0 && inlineCustomVariableEdge;
+  let unresolvedInlineEdge = inlineCustomVariableEdge;
   const includeDefinition = (
     definition: { readonly local: boolean; readonly record: CornerfillCompiledManifest["customProperties"][number] },
   ): void => {
@@ -875,6 +881,7 @@ export function installCornerfillCompiled(
         if (inspection.fallbackProblem) throw new TypeError(inspection.fallbackProblem);
         if (!hasResolvedShapeCarrier(inspection.values) || !inspection.requiresFallback) {
           detach(element);
+          for (const scope of [...elementClaims]) scope.demote(element);
           return elementErrors;
         }
         const existing = handles.get(element);
@@ -896,6 +903,7 @@ export function installCornerfillCompiled(
         try { detach(element); } catch (cleanupError) {
           elementErrors.push(errorMessage(cleanupError));
         }
+        for (const scope of [...elementClaims]) scope.demote(element);
         elementErrors.push(errorMessage(error));
       }
       return elementErrors;
@@ -968,6 +976,7 @@ export function installCornerfillCompiled(
     let queued = false;
     let stateFrame: number | null = null;
     let manifestFrame: number | null = null;
+    let viewportRecoveryActive = false;
     const ownedHostContextMarkers = new Set<string>();
     const pendingHostContextWrites = new Map<string, string | null>();
 
@@ -1118,6 +1127,12 @@ export function installCornerfillCompiled(
         runtime: runtime.stats(),
       });
     }
+
+    const demote = (element: HTMLElement): void => {
+      if (!candidates.delete(element)) return;
+      removeClaim(scope, element);
+      if (potential.has(element) || potential.size < maxPotentialCandidates) potential.add(element);
+    };
 
     const scan = (roots: Iterable<Readonly<ScanRoot>>, replaceAll: boolean): Readonly<ScanResult> => {
       const scanErrors = new Set<string>();
@@ -1459,6 +1474,28 @@ export function installCornerfillCompiled(
       });
     }
 
+    const scheduleViewportRecovery = (): void => {
+      if (viewportRecoveryActive || destroyed || scopeDestroyed) return;
+      viewportRecoveryActive = true;
+      let retry = true;
+      const attempt = (): void => {
+        if (destroyed || scopeDestroyed || status !== "blocked-recoverable") {
+          viewportRecoveryActive = false;
+          return;
+        }
+        void queueOperation(async () => { await performRefresh(); }).then(() => {
+          viewportRecoveryActive = false;
+        }, (error) => {
+          reportAsyncError(error, "compiled viewport recovery");
+          if (retry && !destroyed && !scopeDestroyed && status === "blocked-recoverable") {
+            retry = false;
+            view.requestAnimationFrame(attempt);
+          } else viewportRecoveryActive = false;
+        });
+      };
+      view.requestAnimationFrame(attempt);
+    };
+
     const handleMutations = (records: readonly MutationRecord[]): void => {
       counters.mutationBatches += 1;
       const attributes = new Set(state.observation.attributes);
@@ -1530,6 +1567,10 @@ export function installCornerfillCompiled(
         }
         scheduleMovedScopes(record);
         const target = record.target instanceof view.Element ? record.target : null;
+        if (target instanceof view.HTMLElement
+          && (candidates.has(target) || potential.has(target))) {
+          pendingElements.add(target);
+        }
         const directionRoot = autoDirectionAncestor(target);
         if (directionRoot) pendingSubtrees.add(directionRoot);
         if (stylesheetTextOwner(record.target, view)) stylesheetChanged = true;
@@ -1936,6 +1977,7 @@ export function installCornerfillCompiled(
           : true
       );
       if (recovery) {
+        addEventRecord(view, "resize", scheduleViewportRecovery, Object.freeze({ passive: true }));
         for (const query of recoveryMediaQueries) {
           const key = `recovery:${query}`;
           mediaKeys.add(key);
@@ -2157,6 +2199,7 @@ export function installCornerfillCompiled(
     const scope: CompiledScopeInternal = {
       candidates,
       counters,
+      demote,
       handle,
       localManifests: () => localManifests,
       contains,

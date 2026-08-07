@@ -24,6 +24,7 @@ import type {
 import {
   cssFunctions,
   cssIdentifierAt,
+  cssIdentifiers,
   decodeCssEscapes,
   replaceCssCommentsWithWhitespace,
   scanCssSyntax,
@@ -77,6 +78,7 @@ const INVALIDATION_RANK: Readonly<Record<SelectorInvalidation, number>> = Object
   parent: 2,
   root: 3,
 });
+const CONTAINER_RELATIVE_UNITS = new Set(["cqb", "cqh", "cqi", "cqmax", "cqmin", "cqw"]);
 
 function declarationRule(declaration: Declaration): Rule | null {
   return declaration.parent?.type === "rule" ? declaration.parent : null;
@@ -111,6 +113,31 @@ function customPropertyReferences(value: string): readonly string[] {
     if (name?.value.startsWith("--")) references.add(name.value);
   }
   return Object.freeze([...references].sort());
+}
+
+function fallbackValueProblem(value: string): string | null {
+  if (cssFunctions(value).some(({ name }) => name === "attr")) {
+    return "attr() creates an unobservable attribute dependency; use cornerfill/runtime";
+  }
+  const identifiers = cssIdentifiers(value);
+  let identifierIndex = 0;
+  let problem = false;
+  scanCssSyntax(value, 0, (index) => {
+    while (identifiers[identifierIndex] && identifiers[identifierIndex]!.end <= index) {
+      identifierIndex += 1;
+    }
+    const containing = identifiers[identifierIndex];
+    if (containing && containing.start <= index) return;
+    const number = /^[+-]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][+-]?\d+)?/u.exec(value.slice(index));
+    if (!number) return;
+    const unit = cssIdentifierAt(value, index + number[0].length)?.value.toLowerCase();
+    if (!unit || !CONTAINER_RELATIVE_UNITS.has(unit)) return;
+    problem = true;
+    return false;
+  });
+  return problem
+    ? "container-relative units create an unobservable container dependency; use cornerfill/runtime"
+    : null;
 }
 
 function ancestorAtRule(node: Node, names: ReadonlySet<string>): AtRule | null {
@@ -175,6 +202,19 @@ function completeLayerNames(atRule: AtRule): readonly (readonly string[])[] {
   return Object.freeze(parsedLayerNames(atRule.params).map((name) => (
     Object.freeze([...prefix, ...name])
   )));
+}
+
+function hasAnonymousLayerAncestor(atRule: AtRule): boolean {
+  let parent: Node | undefined = atRule.parent;
+  while (parent) {
+    if (parent.type === "atrule") {
+      const ancestor = parent as AtRule;
+      if (decodeCssEscapes(ancestor.name).toLowerCase() === "layer"
+        && parsedLayerNames(ancestor.params).length === 0) return true;
+    }
+    parent = parent.parent;
+  }
+  return false;
 }
 
 function layerKey(name: readonly string[]): string {
@@ -431,17 +471,26 @@ function registeredProperties(root: Root): Map<string, AtRule[]> {
   return properties;
 }
 
-function validateCarrierRegistration(registration: AtRule, property: string): void {
+function validateCarrierRegistration(root: Root, registration: AtRule, property: string): void {
   if (ancestorAtRule(registration, CONDITIONAL_SEMANTIC_AT_RULES)) {
     throw registration.error(`Cornerfill private registration ${property} cannot be conditional`);
   }
+  if (registration.parent !== root
+    || registration.nodes?.length !== 3
+    || registration.nodes.some((node) => node.type !== "decl")) {
+    throw registration.error(`Cornerfill private registration ${property} must be one top-level rule with exactly three descriptors`);
+  }
   const descriptors = new Map<string, string[]>();
-  registration.walkDecls((declaration) => {
+  for (const node of registration.nodes) {
+    const declaration = node as Declaration;
+    if (declaration.important) {
+      throw declaration.error(`Cornerfill private registration ${property} descriptors cannot be important`);
+    }
     const name = decodedProperty(declaration);
     const values = descriptors.get(name) ?? [];
     values.push(declaration.value.trim());
     descriptors.set(name, values);
-  });
+  }
   const syntax = descriptors.get("syntax") ?? [];
   const inherits = descriptors.get("inherits") ?? [];
   const initial = descriptors.get("initial-value") ?? [];
@@ -460,7 +509,7 @@ function validateCarrierRegistration(registration: AtRule, property: string): vo
 function registerCarrier(root: Root, property: string, registered: Map<string, AtRule[]>): void {
   const existing = registered.get(property);
   if (existing) {
-    for (const registration of existing) validateCarrierRegistration(registration, property);
+    for (const registration of existing) validateCarrierRegistration(root, registration, property);
     return;
   }
   const registration = postcss.atRule({ name: "property", params: property });
@@ -582,6 +631,7 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
     const directMediaQueries = new Set<string>();
     const directObservations: Readonly<SelectorObservation>[] = [];
     const referencedCustomProperties = new Set<string>();
+    const inheritedReferencedCustomProperties = new Set<string>();
     const customProperties = new Map<string, MutableCustomProperty>();
     const generatedProperties = new Set<string>();
     const generatedCarriers = new WeakSet<Declaration>();
@@ -594,7 +644,7 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
     for (const [property, registrations] of registered) {
       if (AUTO_CARRIER_SET.has(property)) {
         for (const registration of registrations) {
-          validateCarrierRegistration(registration, property);
+          validateCarrierRegistration(root, registration, property);
         }
       }
     }
@@ -622,11 +672,13 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
         try { layerNames = completeLayerNames(atRule); } catch (error) {
           throw atRule.error(error instanceof Error ? error.message : String(error));
         }
+        const anonymousAncestor = hasAnonymousLayerAncestor(atRule);
         if (ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
-          if (layerNames.some((layerName) => !establishedLayers.has(layerKey(layerName)))) {
+          if (anonymousAncestor
+            || layerNames.some((layerName) => !establishedLayers.has(layerKey(layerName)))) {
             throw atRule.error("Cornerfill cannot compile conditional cascade-layer first establishment");
           }
-        } else {
+        } else if (!anonymousAncestor) {
           for (const layerName of layerNames) establishLayer(establishedLayers, layerName);
         }
       }
@@ -656,6 +708,8 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
         for (const reference of customPropertyReferences(authored.value)) {
           record.references.add(reference);
         }
+        const valueProblem = fallbackValueProblem(authored.value);
+        if (valueProblem) record.problems.add(valueProblem);
         const keyframes = ancestorAtRule(authored, KEYFRAME_AT_RULES);
         if (keyframes) {
           record.problems.add(`custom property ${property} is animated in @${keyframes.name}`);
@@ -694,6 +748,8 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
       }
 
       if (!rule || !standardPropertyAffectsOwnedPaint(property)) return;
+      const valueProblem = fallbackValueProblem(authored.value);
+      if (valueProblem) throw authored.error(`Cornerfill cannot compile ${property}: ${valueProblem}`);
       if (selectorTargetsPseudoElement(rule.selector)) {
         if (shape || all) validateRule(rule, authored);
         return;
@@ -707,6 +763,9 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
       rememberHostContextRule(rule);
       for (const reference of customPropertyReferences(authored.value)) {
         referencedCustomProperties.add(reference);
+        if (standardPropertyInheritsIntoOwnedPaint(property)) {
+          inheritedReferencedCustomProperties.add(reference);
+        }
       }
       if (!shape && !all) return;
       const allMayIntroduceShape = all && compiled.some(({ property: carrier, value }) => (
@@ -770,6 +829,7 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
       candidateSelectors,
       customProperties: serializedCustomProperties,
       hostContexts: directHostContexts.values(),
+      inheritedReferencedCustomProperties,
       mediaQueries: directMediaQueries,
       observation: mergeSelectorObservation(directObservations),
       referencedCustomProperties,
