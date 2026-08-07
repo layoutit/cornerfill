@@ -1,3 +1,5 @@
+import { validateTimerDelay } from "./timing.mjs";
+
 const CORNERFILL_IMAGE_CACHE_SCHEMA = "cornerfill-image-cache@3";
 export const DEFAULT_MAX_DECODED_IMAGE_PIXELS = 4_096 ** 2;
 
@@ -30,6 +32,10 @@ export interface ImageLease {
   readonly url: string;
 }
 
+function clearImageSource(image: HTMLImageElement): void {
+  image.src = "";
+}
+
 function waitForImage(
   image: HTMLImageElement,
   view: Window & typeof globalThis,
@@ -57,7 +63,7 @@ function waitForImage(
     cancel = (reason = new Error(`image load was cancelled: ${absoluteUrl}`)) => {
       if (settled) return;
       finish(reason);
-      image.src = "";
+      clearImageSource(image);
     };
     timer = view.setTimeout(() => cancel(
       new Error(`image load timed out after ${timeoutMs}ms: ${absoluteUrl}`),
@@ -71,6 +77,7 @@ function waitForImage(
       }
       image.addEventListener("load", loaded, { once: true });
       if (image.naturalWidth > 0) finish();
+      else if (image.complete) failed();
     };
     if (typeof image.decode === "function") {
       try {
@@ -116,9 +123,7 @@ export class ImageCache {
     if (!Number.isSafeInteger(maxDecodedPixels) || maxDecodedPixels < 0) {
       throw new TypeError("maxDecodedPixels must be a non-negative safe integer");
     }
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new TypeError("timeoutMs must be finite and positive");
-    }
+    validateTimerDelay(timeoutMs, "timeoutMs");
     this.document = document;
     this.records = new Map();
     this.zeroReferenceRecords = new Map();
@@ -153,7 +158,7 @@ export class ImageCache {
       if (record.state === "loading") {
         record.cancel(new Error(`image load was evicted before decode completed: ${record.absoluteUrl}`));
       } else {
-        record.image.src = "";
+        clearImageSource(record.image);
       }
       this.decodedPixels -= pixels;
       this.evictions += 1;
@@ -210,7 +215,7 @@ export class ImageCache {
         created.state = "error";
         created.error = error;
         if (this.records.get(key) === created) this.records.delete(key);
-        image.src = "";
+        clearImageSource(image);
         throw error;
       });
       created = {
@@ -278,7 +283,7 @@ export class ImageCache {
       if (record.state === "loading") {
         record.cancel(new Error(`image cache was destroyed before decode completed: ${record.absoluteUrl}`));
       } else {
-        record.image.src = "";
+        clearImageSource(record.image);
       }
     }
     this.records.clear();

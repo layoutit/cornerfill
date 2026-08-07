@@ -1,5 +1,9 @@
 import {
+  cssIdentifierAt,
   cssEscapeEnd,
+  replaceCssCommentsWithWhitespace,
+  scanCssSyntax,
+  skipCssTrivia,
   wholeCssFunction,
   wholeCssIdentifier,
 } from "./css-syntax.mjs";
@@ -108,7 +112,7 @@ function scanTopLevel(
 }
 
 export function splitTopLevelWhitespace(input: string): readonly string[] {
-  const value = String(input).trim();
+  const value = replaceCssCommentsWithWhitespace(String(input)).trim();
   if (!value) return Object.freeze([]);
   const parts = [];
   let start = 0;
@@ -127,7 +131,7 @@ export function splitTopLevelWhitespace(input: string): readonly string[] {
 }
 
 export function splitTopLevelCommas(input: string): readonly string[] {
-  const value = String(input).trim();
+  const value = replaceCssCommentsWithWhitespace(String(input)).trim();
   if (!value) return Object.freeze([]);
   const parts = [];
   let start = 0;
@@ -143,7 +147,7 @@ export function splitTopLevelCommas(input: string): readonly string[] {
 }
 
 function splitTopLevelSlash(input: string): readonly [string] | readonly [string, string] {
-  const value = String(input).trim();
+  const value = replaceCssCommentsWithWhitespace(String(input)).trim();
   const slashIndexes: number[] = [];
   scanTopLevel(value, (character, index, depth) => {
     if (character === "/" && depth === 0) slashIndexes.push(index);
@@ -174,30 +178,33 @@ function additiveCalcTerms(
   source: string,
   label: string,
 ): readonly Readonly<AdditiveCalcTerm>[] {
-  const first = new RegExp(`^\\s*([+-]?)(${NUMBER})(px|%)?`, "iu").exec(expression);
+  const firstPattern = new RegExp(`\\s*([+-]?)(${NUMBER})(px|%)?`, "iuy");
+  const first = firstPattern.exec(expression);
   if (!first) throw syntaxError(label, source, "uses unsupported calc() arithmetic");
-  const terms: AdditiveCalcTerm[] = [{
+  const terms: Readonly<AdditiveCalcTerm>[] = [Object.freeze({
     number: Number(`${first[1]}${first[2]}`),
     unit: (first[3] ?? "").toLowerCase(),
-  }];
+  })];
   let cursor = first[0].length;
-  const next = new RegExp(`^\\s+([+-])\\s+([+-]?)(${NUMBER})(px|%)?`, "iu");
+  const next = new RegExp(`\\s+([+-])\\s+([+-]?)(${NUMBER})(px|%)?`, "iuy");
   while (cursor < expression.length) {
-    const rest = expression.slice(cursor);
-    if (/^\s*$/u.test(rest)) {
+    let trailing = cursor;
+    while (/\s/u.test(expression[trailing] ?? "")) trailing += 1;
+    if (trailing === expression.length) {
       cursor = expression.length;
       break;
     }
-    const match = next.exec(rest);
+    next.lastIndex = cursor;
+    const match = next.exec(expression);
     if (!match) throw syntaxError(label, source, "uses unsupported calc() arithmetic");
     const binarySign = match[1] === "-" ? -1 : 1;
-    terms.push({
+    terms.push(Object.freeze({
       number: binarySign * Number(`${match[2]}${match[3]}`),
       unit: (match[4] ?? "").toLowerCase(),
-    });
-    cursor += match[0].length;
+    }));
+    cursor = next.lastIndex;
   }
-  return Object.freeze(terms.map((term) => Object.freeze(term)));
+  return Object.freeze(terms);
 }
 
 export function parseLengthPercentage(
@@ -205,7 +212,8 @@ export function parseLengthPercentage(
   { label = "length-percentage" }: { label?: string } = {},
 ): Readonly<LengthPercentage> {
   const source = String(input).trim();
-  const simple = SIMPLE_LENGTH_PERCENTAGE.exec(source);
+  const syntax = replaceCssCommentsWithWhitespace(source).trim();
+  const simple = SIMPLE_LENGTH_PERCENTAGE.exec(syntax);
   if (simple) {
     const number = Number(simple[1]);
     const unit = (simple[2] ?? "").toLowerCase();
@@ -215,7 +223,7 @@ export function parseLengthPercentage(
     return freezeLengthPercentage(unit === "%" ? 0 : number, unit === "%" ? number / 100 : 0, source);
   }
 
-  const match = /^calc\((.*)\)$/isu.exec(source);
+  const match = /^calc\((.*)\)$/isu.exec(syntax);
   if (!match) throw syntaxError(label, source, "is outside the supported px/% syntax");
   const expression = match[1]!;
   if (!expression.trim()) throw syntaxError(label, source, "contains an empty calc()");
@@ -228,6 +236,9 @@ export function parseLengthPercentage(
     }
     if (unit === "%") percent += number / 100;
     else px += number;
+  }
+  if (!Number.isFinite(px) || !Number.isFinite(percent)) {
+    throw syntaxError(label, source, "overflows the supported numeric range");
   }
   return freezeLengthPercentage(px, percent, source);
 }
@@ -243,7 +254,11 @@ export function resolveLengthPercentage(
   if (!parsed || !Number.isFinite(parsed.px) || !Number.isFinite(parsed.percent)) {
     throw new TypeError("invalid parsed length-percentage");
   }
-  return parsed.px + parsed.percent * reference;
+  const result = parsed.px + parsed.percent * reference;
+  if (!Number.isFinite(result)) {
+    throw new RangeError("resolved length-percentage exceeds the finite numeric range");
+  }
+  return result;
 }
 
 function expandFour<T>(values: readonly T[], label: string): Four<T> {
@@ -308,10 +323,21 @@ export function resolveParsedRadii(
   if (!Array.isArray(parsed) || parsed.length !== CORNER_COUNT) {
     throw new TypeError("parsed radii must contain four corners");
   }
-  return Object.freeze(parsed.map(({ rx, ry }) => Object.freeze({
-    rx: Math.max(0, resolveLengthPercentage(rx, width)),
-    ry: Math.max(0, resolveLengthPercentage(ry, height)),
-  }))) as Four<Readonly<ResolvedCornerRadius>>;
+  const resolve = (value: ParsedCornerRadius | undefined, index: number) => {
+    if (!value || typeof value !== "object") {
+      throw new TypeError(`parsed radii[${index}] must contain horizontal and vertical radii`);
+    }
+    return Object.freeze({
+      rx: Math.max(0, resolveLengthPercentage(value.rx, width)),
+      ry: Math.max(0, resolveLengthPercentage(value.ry, height)),
+    });
+  };
+  return Object.freeze([
+    resolve(parsed[0], 0),
+    resolve(parsed[1], 1),
+    resolve(parsed[2], 2),
+    resolve(parsed[3], 3),
+  ]);
 }
 
 export function resolveBorderRadius(
@@ -330,25 +356,116 @@ export function resolveCornerRadiusLonghands(
   if (!Array.isArray(values) || values.length !== CORNER_COUNT) {
     throw new TypeError("corner radius longhands must contain four values");
   }
+  for (let index = 0; index < CORNER_COUNT; index += 1) {
+    if (typeof values[index] !== "string") {
+      throw new TypeError(`corner radius longhands[${index}] must be a string`);
+    }
+  }
+  if (![width, height].every((reference) => Number.isFinite(reference) && reference >= 0)) {
+    throw new TypeError("length-percentage reference must be a finite non-negative number");
+  }
   const resolveComputedValue = (source: string, reference: number, label: string): number => {
     try {
       return resolveLengthPercentage(source, reference);
     } catch (originalError) {
-      const match = /^(min|max|clamp)\(([\s\S]*)\)$/iu.exec(source.trim());
-      if (!match) throw originalError;
-      const operation = match[1]!.toLowerCase();
-      const argumentsList = splitTopLevelCommas(match[2]!).map((argument) => (
-        resolveComputedValue(argument, reference, label)
-      ));
-      if (operation === "clamp") {
-        if (argumentsList.length !== 3) throw syntaxError(label, source, "requires three clamp() arguments");
-        return Math.max(argumentsList[0]!, Math.min(argumentsList[1]!, argumentsList[2]!));
+      const text = source.trim();
+      const closeByOpen = new Map<number, number>();
+      const commasByOpen = new Map<number, number[]>();
+      const openStack: number[] = [];
+      scanCssSyntax(text, 0, (index, character) => {
+        if (character === "(") {
+          openStack.push(index);
+          commasByOpen.set(index, []);
+        } else if (character === ")") {
+          const open = openStack.pop();
+          if (open !== undefined) closeByOpen.set(open, index);
+        } else if (character === "," && openStack.length > 0) {
+          commasByOpen.get(openStack[openStack.length - 1]!)!.push(index);
+        }
+      });
+
+      interface EvaluationFrame {
+        readonly end: number;
+        readonly start: number;
+        arguments?: readonly Readonly<{ end: number; start: number }>[];
+        nextArgument?: number;
+        operation?: "clamp" | "max" | "min";
+        values?: number[];
       }
-      if (argumentsList.length < 1) throw syntaxError(label, source, `requires ${operation}() arguments`);
-      return operation === "min" ? Math.min(...argumentsList) : Math.max(...argumentsList);
+      const frames: EvaluationFrame[] = [{ start: 0, end: text.length }];
+      let completed: number | undefined;
+      const commit = (value: number): void => {
+        frames.pop();
+        const parent = frames[frames.length - 1];
+        if (parent) parent.values!.push(value);
+        else completed = value;
+      };
+
+      while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!;
+        if (!frame.operation && !frame.arguments) {
+          const start = skipCssTrivia(text, frame.start);
+          const identifier = start < frame.end ? cssIdentifierAt(text, start) : null;
+          const operation = identifier?.value.toLowerCase();
+          const open = identifier?.end ?? -1;
+          const close = closeByOpen.get(open);
+          const wholeFunction = (operation === "min" || operation === "max" || operation === "clamp")
+            && text[open] === "("
+            && close !== undefined
+            && skipCssTrivia(text, close + 1) === frame.end;
+          if (!wholeFunction) {
+            try {
+              commit(resolveLengthPercentage(text.slice(frame.start, frame.end), reference));
+              continue;
+            } catch {
+              throw frames.length === 1 ? originalError : syntaxError(
+                label,
+                text.slice(frame.start, frame.end),
+                "contains an unsupported computed value",
+              );
+            }
+          }
+          const separators = commasByOpen.get(open) ?? [];
+          const bounds = [open, ...separators, close];
+          const argumentsList = bounds.slice(1).map((end, index) => Object.freeze({
+            start: bounds[index]! + 1,
+            end,
+          }));
+          if (argumentsList.some((argument) => skipCssTrivia(text, argument.start) >= argument.end)) {
+            throw syntaxError(label, source, `requires non-empty ${operation}() arguments`);
+          }
+          if (operation === "clamp" && argumentsList.length !== 3) {
+            throw syntaxError(label, source, "requires three clamp() arguments");
+          }
+          frame.operation = operation;
+          frame.arguments = argumentsList;
+          frame.nextArgument = 0;
+          frame.values = [];
+        }
+
+        if (frame.nextArgument! < frame.arguments!.length) {
+          const argument = frame.arguments![frame.nextArgument!]!;
+          frame.nextArgument! += 1;
+          frames.push({ start: argument.start, end: argument.end });
+          continue;
+        }
+        const resolved = frame.values!;
+        if (frame.operation === "clamp") {
+          commit(Math.max(resolved[0]!, Math.min(resolved[1]!, resolved[2]!)));
+          continue;
+        }
+        let result = resolved[0]!;
+        for (let index = 1; index < resolved.length; index += 1) {
+          result = frame.operation === "min"
+            ? Math.min(result, resolved[index]!)
+            : Math.max(result, resolved[index]!);
+        }
+        commit(result);
+      }
+      return completed!;
     }
   };
-  return Object.freeze(values.map((source) => {
+  const resolve = (source: string) => {
     const tokens = splitTopLevelWhitespace(source);
     if (tokens.length < 1 || tokens.length > 2) {
       throw syntaxError("corner radius", source, "requires one or two computed values");
@@ -357,7 +474,13 @@ export function resolveCornerRadiusLonghands(
       rx: Math.max(0, resolveComputedValue(tokens[0]!, width, "corner horizontal radius")),
       ry: Math.max(0, resolveComputedValue(tokens[1] ?? tokens[0]!, height, "corner vertical radius")),
     });
-  })) as Four<Readonly<ResolvedCornerRadius>>;
+  };
+  return Object.freeze([
+    resolve(values[0]!),
+    resolve(values[1]!),
+    resolve(values[2]!),
+    resolve(values[3]!),
+  ]);
 }
 
 const PHYSICAL_CORNER_INDEX = Object.freeze({
@@ -442,11 +565,12 @@ export function resolveBorderRadiusDeclarations({
 
 export function parseCornerShapeValue(input: string): number {
   const source = String(input).trim();
-  const identifier = wholeCssIdentifier(source)?.value.toLowerCase();
+  const syntax = replaceCssCommentsWithWhitespace(source).trim();
+  const identifier = wholeCssIdentifier(syntax)?.value.toLowerCase();
   if (identifier && Object.hasOwn(CORNER_SHAPE_PARAMETERS, identifier)) {
     return CORNER_SHAPE_PARAMETERS[identifier as keyof typeof CORNER_SHAPE_PARAMETERS];
   }
-  const functionToken = wholeCssFunction(source);
+  const functionToken = wholeCssFunction(syntax);
   if (functionToken?.name.toLowerCase() !== "superellipse") {
     throw syntaxError("corner-shape", input, "contains an unsupported value");
   }
@@ -568,10 +692,14 @@ export function resolveCornerShape(input: CornerShapeSource, {
 }: CornerWritingOptions = {}): Four<number> {
   if (typeof input === "string") return parseCornerShape(input);
   if (Array.isArray(input)) {
-    if (input.length !== CORNER_COUNT || input.some((value) => (
-      typeof value !== "number" || Number.isNaN(value)
-    ))) throw new TypeError("resolved corner shapes must contain four numeric parameters");
-    return Object.freeze([...input]) as Four<number>;
+    if (input.length !== CORNER_COUNT) {
+      throw new TypeError("resolved corner shapes must contain four numeric parameters");
+    }
+    const values = [input[0], input[1], input[2], input[3]];
+    if (values.some((value) => typeof value !== "number" || Number.isNaN(value))) {
+      throw new TypeError("resolved corner shapes must contain four numeric parameters");
+    }
+    return Object.freeze(values) as Four<number>;
   }
   if (input && typeof input === "object") {
     const declarations = input as CornerShapeDeclarations;
@@ -626,6 +754,9 @@ export function interpolateCornerShape(
 }
 
 export function serializeShapeParameter(value: number): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    throw new TypeError("corner-shape parameter must be numeric");
+  }
   if (value === Number.POSITIVE_INFINITY) return "square";
   if (value === Number.NEGATIVE_INFINITY) return "notch";
   const keyword = Object.entries(CORNER_SHAPE_PARAMETERS).find(([, parameter]) => Object.is(parameter, value));

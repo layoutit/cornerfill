@@ -100,6 +100,8 @@ test("nested support conditions share one decoded shape analysis", () => {
   assert(supportsConditionTestsShape(String.raw`\63orner-shape: bevel`));
   assert.match(carrierSupportsCondition(nested), /--cornerfill-supports-corner-shape/u);
   assert(!supportsConditionTestsShape('selector([data-token="corner-shape"])'));
+  const deep = `${"(".repeat(8_000)}corner-shape:bevel${")".repeat(8_000)}`;
+  assert.match(carrierSupportsCondition(deep), /--cornerfill-supports-corner-shape/u);
 });
 
 test("selector observation ignores selector text inside comments and attribute values", () => {
@@ -123,7 +125,6 @@ test("import URLs require browser-valid string or url tokens", () => {
     "@import /ghost.css;",
     '@import url ("ghost.css");',
     '@import url/**/("ghost.css");',
-    '@import url(/* comment */ "ghost.css");',
     '@import "ghost.css" supports (display:grid);',
   ]) assert.throws(() => parseImportStatement(source, "https://example.test/root.css"), SyntaxError);
 });
@@ -133,6 +134,11 @@ test("import parsing accepts CSS trivia around URL tokens", () => {
     '@import/**/"./child.css";',
     '@import /* before string */ "./child.css";',
     '@import /* before function */ url("./child.css");',
+    '@import url(/* inside function */ "./child.css");',
+    '@import url( /**/ /* multiple trivia */ "./child.css" /**/ );',
+    '@import url(/* before unquoted */ ./child.css);',
+    '@import url(./child.css /* after unquoted */);',
+    '@import url(/* before */ ./child.css /* after */);',
   ]) {
     assert.equal(
       parseImportStatement(source, "https://example.test/root.css").url,

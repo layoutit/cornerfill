@@ -118,7 +118,6 @@ interface NormalizedLayerCommon {
   readonly backgroundPositionSpec: BackgroundPositionSpec;
   readonly backgroundSizeSpec: BackgroundSizeSpec;
   readonly blendMode: BackgroundBlendMode;
-  readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly clip: BackgroundBox;
   readonly origin: BackgroundBox;
   readonly repeat: Readonly<BackgroundRepeat>;
@@ -170,21 +169,23 @@ export type NormalizedBackgroundLayer =
   | NormalizedRadialGradientLayer
   | NormalizedConicGradientLayer;
 
-interface SolidPaintDescriptor {
+interface PaintBoxInput {
   readonly box?: BackgroundBoxMetricsInput | undefined;
+}
+
+interface SolidPaintDescriptor extends PaintBoxInput {
   readonly clip: BackgroundBox;
   readonly color: string;
   readonly kind: "solid";
 }
 
-interface LayeredPaintDescriptor {
-  readonly box?: BackgroundBoxMetricsInput | undefined;
+interface LayeredPaintDescriptor extends PaintBoxInput {
   readonly color: string;
   readonly kind: "layers";
   readonly layers: readonly NormalizedBackgroundLayer[];
 }
 
-type SingleLayerPaintDescriptor = NormalizedBackgroundLayer & Readonly<{ color: string }>;
+type SingleLayerPaintDescriptor = NormalizedBackgroundLayer & PaintBoxInput & Readonly<{ color: string }>;
 export type NormalizedPaintDescriptor =
   | SolidPaintDescriptor
   | LayeredPaintDescriptor
@@ -199,7 +200,6 @@ interface BackgroundLayerInputCommon {
   readonly backgroundSize?: string | PixelPair | undefined;
   readonly backgroundSizeSpec?: BackgroundSizeSpec | undefined;
   readonly blendMode?: BackgroundBlendMode | undefined;
-  readonly box?: BackgroundBoxMetricsInput | undefined;
   readonly clip?: BackgroundBox | undefined;
   readonly origin?: BackgroundBox | undefined;
   readonly repeat?: string | Readonly<BackgroundRepeat> | undefined;
@@ -244,7 +244,7 @@ interface LayeredPaintDescriptorInput {
 export type PaintDescriptorInput =
   | SolidPaintDescriptorInput
   | LayeredPaintDescriptorInput
-  | (BackgroundLayerInput & Readonly<{ readonly color?: string | undefined }>);
+  | (BackgroundLayerInput & PaintBoxInput & Readonly<{ readonly color?: string | undefined }>);
 
 interface ResolvedLayerCommon {
   readonly backgroundPosition: PixelPair;
@@ -302,9 +302,12 @@ function frozenFour<T>(first: T, second: T, third: T, fourth: T): Four<T> {
 }
 
 function isFiniteSideTuple(values: readonly unknown[]): values is Four<number> {
-  return values.length === 4 && values.every((value) => (
-    typeof value === "number" && Number.isFinite(value) && value >= 0
-  ));
+  if (values.length !== 4) return false;
+  for (let index = 0; index < 4; index += 1) {
+    const value = values[index];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return false;
+  }
+  return true;
 }
 
 function parseCssUrl(input: unknown): string {
@@ -366,7 +369,7 @@ function parseEdgePair(edge: string, offset: string | undefined): Readonly<Posit
 
 export function parseBackgroundPosition(input: unknown): BackgroundPositionSpec {
   if (Array.isArray(input)) {
-    if (input.length !== 2 || !input.every(Number.isFinite)) {
+    if (input.length !== 2 || !Number.isFinite(input[0]) || !Number.isFinite(input[1])) {
       throw new TypeError("prepared background position must contain two finite pixels");
     }
     return Object.freeze({ kind: "prepared", x: input[0]!, y: input[1]! });
@@ -464,7 +467,9 @@ function sizeComponent(input: unknown, axis: "width" | "height"): BackgroundSize
 
 function parseBackgroundSize(input: unknown): BackgroundSizeSpec {
   if (Array.isArray(input)) {
-    if (input.length !== 2 || !input.every((value) => Number.isFinite(value) && value >= 0)) {
+    if (input.length !== 2
+      || !Number.isFinite(input[0]) || input[0] < 0
+      || !Number.isFinite(input[1]) || input[1] < 0) {
       throw new TypeError("prepared background size must contain two finite non-negative pixels");
     }
     return Object.freeze({ kind: "prepared", width: input[0]!, height: input[1]! });
@@ -480,6 +485,160 @@ function parseBackgroundSize(input: unknown): BackgroundSizeSpec {
     width: sizeComponent(tokens[0]!, "width"),
     height: sizeComponent(tokens[1] ?? "auto", "height"),
   });
+}
+
+function normalizedPixelPair(
+  input: unknown,
+  label: string,
+  { positive = false }: Readonly<{ positive?: boolean }> = {},
+): PixelPair {
+  if (!Array.isArray(input) || input.length !== 2
+    || typeof input[0] !== "number" || !Number.isFinite(input[0]) || (positive && input[0] <= 0)
+    || typeof input[1] !== "number" || !Number.isFinite(input[1]) || (positive && input[1] <= 0)) {
+    throw new TypeError(`${label} must contain two finite${positive ? " positive" : ""} numbers`);
+  }
+  return Object.freeze([input[0]!, input[1]!]);
+}
+
+function normalizedLengthPercentage(input: unknown, label: string): Readonly<LengthPercentage> {
+  if (!isRecord(input)
+    || typeof input.px !== "number" || !Number.isFinite(input.px)
+    || typeof input.percent !== "number" || !Number.isFinite(input.percent)
+    || typeof input.source !== "string") {
+    throw new TypeError(`${label} must be a finite normalized length-percentage`);
+  }
+  return Object.freeze({ px: input.px, percent: input.percent, source: input.source });
+}
+
+function normalizedPositionComponent(
+  input: unknown,
+  axis: BackgroundAxis,
+): BackgroundPositionComponent {
+  if (!isRecord(input) || typeof input.source !== "string") {
+    throw new TypeError(`background-position ${axis} requires a normalized component`);
+  }
+  if (input.kind === "position"
+    && typeof input.px === "number" && Number.isFinite(input.px)
+    && typeof input.percent === "number" && Number.isFinite(input.percent)) {
+    return Object.freeze({
+      kind: "position",
+      px: input.px,
+      percent: input.percent,
+      source: input.source,
+    });
+  }
+  const edgeMatchesAxis = axis === "x"
+    ? input.edge === "left" || input.edge === "right"
+    : input.edge === "top" || input.edge === "bottom";
+  if (input.kind === "edge-position" && edgeMatchesAxis) {
+    return Object.freeze({
+      kind: "edge-position",
+      edge: input.edge as EdgePositionComponent["edge"],
+      offset: normalizedLengthPercentage(input.offset, `background-position ${axis} edge offset`),
+      source: input.source,
+    });
+  }
+  throw new TypeError(`background-position ${axis} requires a normalized component`);
+}
+
+function normalizedBackgroundPositionSpec(input: unknown): BackgroundPositionSpec {
+  if (!isRecord(input)) throw new TypeError("background-position requires a normalized specification");
+  if (input.kind === "prepared"
+    && typeof input.x === "number" && Number.isFinite(input.x)
+    && typeof input.y === "number" && Number.isFinite(input.y)) {
+    return Object.freeze({ kind: "prepared", x: input.x, y: input.y });
+  }
+  if (input.kind === "components") {
+    return Object.freeze({
+      kind: "components",
+      x: normalizedPositionComponent(input.x, "x"),
+      y: normalizedPositionComponent(input.y, "y"),
+    });
+  }
+  throw new TypeError("background-position requires a normalized specification");
+}
+
+function normalizedSizeComponent(input: unknown, axis: "width" | "height"): BackgroundSizeComponent {
+  if (!isRecord(input) || typeof input.source !== "string") {
+    throw new TypeError(`background-size ${axis} requires a normalized component`);
+  }
+  if (input.kind === "auto") return Object.freeze({ kind: "auto", source: input.source });
+  if (input.kind === "length-percentage") {
+    return Object.freeze({
+      kind: "length-percentage",
+      source: input.source,
+      value: normalizedLengthPercentage(input.value, `background-size ${axis}`),
+    });
+  }
+  throw new TypeError(`background-size ${axis} requires a normalized component`);
+}
+
+function normalizedBackgroundSizeSpec(input: unknown): BackgroundSizeSpec {
+  if (!isRecord(input)) throw new TypeError("background-size requires a normalized specification");
+  if (input.kind === "prepared"
+    && typeof input.width === "number" && Number.isFinite(input.width) && input.width >= 0
+    && typeof input.height === "number" && Number.isFinite(input.height) && input.height >= 0) {
+    return Object.freeze({ kind: "prepared", width: input.width, height: input.height });
+  }
+  if (input.kind === "cover" || input.kind === "contain") return Object.freeze({ kind: input.kind });
+  if (input.kind === "components") {
+    return Object.freeze({
+      kind: "components",
+      width: normalizedSizeComponent(input.width, "width"),
+      height: normalizedSizeComponent(input.height, "height"),
+    });
+  }
+  throw new TypeError("background-size requires a normalized specification");
+}
+
+function normalizedLinearLine(input: unknown): LinearGradientLine {
+  if (!isRecord(input)) throw new TypeError("linear-gradient requires a normalized line");
+  if (input.kind === "angle" && typeof input.radians === "number" && Number.isFinite(input.radians)) {
+    return Object.freeze({ kind: "angle", radians: input.radians });
+  }
+  const horizontal = input.horizontal;
+  const vertical = input.vertical;
+  if (input.kind === "side"
+    && (horizontal === null || horizontal === "left" || horizontal === "right")
+    && (vertical === null || vertical === "top" || vertical === "bottom")
+    && (horizontal !== null || vertical !== null)) {
+    return Object.freeze({
+      kind: "side",
+      horizontal: horizontal as "left" | "right" | null,
+      vertical: vertical as "top" | "bottom" | null,
+    });
+  }
+  throw new TypeError("linear-gradient requires a normalized line");
+}
+
+const RADIAL_SIZE_KEYWORDS = new Set([
+  "closest-side",
+  "closest-corner",
+  "farthest-side",
+  "farthest-corner",
+]);
+
+function normalizedRadialSize(input: unknown, shape: RadialGradientShape): RadialGradientSize {
+  if (!isRecord(input)) throw new TypeError("radial-gradient requires a normalized size");
+  if (input.kind === "keyword" && typeof input.value === "string"
+    && RADIAL_SIZE_KEYWORDS.has(input.value)) {
+    return Object.freeze({
+      kind: "keyword",
+      value: input.value as Extract<RadialGradientSize, { kind: "keyword" }>["value"],
+    });
+  }
+  const expected = shape === "circle" ? 1 : 2;
+  const inputRadii = input.radii;
+  if (input.kind === "explicit" && Array.isArray(inputRadii) && inputRadii.length === expected) {
+    const radii = Object.freeze(Array.from({ length: expected }, (_value, index) => (
+      normalizedLengthPercentage(inputRadii[index], `radial-gradient radius ${index + 1}`)
+    )));
+    if (shape === "circle" && radii[0]!.percent !== 0) {
+      throw new TypeError("circle radial-gradient percentage radii are invalid");
+    }
+    return Object.freeze({ kind: "explicit", radii });
+  }
+  throw new TypeError(`radial-gradient ${shape} requires ${expected} normalized radius${expected === 1 ? "" : "es"}`);
 }
 
 const GRADIENT_KINDS: ReadonlySet<unknown> = new Set([
@@ -505,10 +664,12 @@ function normalizeLayerCommon(paint: Readonly<Record<string, unknown>>): Omit<No
     throw new TypeError(`unsupported background-blend-mode: ${blendMode}`);
   }
   if (attachment !== "scroll") throw new TypeError(`unsupported background-attachment: ${attachment}`);
-  const backgroundSizeSpec = (paint.backgroundSizeSpec
-    ?? parseBackgroundSize(paint.backgroundSize ?? "auto")) as BackgroundSizeSpec;
-  const backgroundPositionSpec = (paint.backgroundPositionSpec
-    ?? parseBackgroundPosition(paint.backgroundPosition ?? "0% 0%")) as BackgroundPositionSpec;
+  const backgroundSizeSpec = paint.backgroundSizeSpec === undefined
+    ? parseBackgroundSize(paint.backgroundSize ?? "auto")
+    : normalizedBackgroundSizeSpec(paint.backgroundSizeSpec);
+  const backgroundPositionSpec = paint.backgroundPositionSpec === undefined
+    ? parseBackgroundPosition(paint.backgroundPosition ?? "0% 0%")
+    : normalizedBackgroundPositionSpec(paint.backgroundPositionSpec);
   return Object.freeze({
     backgroundSizeSpec,
     backgroundPositionSpec,
@@ -530,48 +691,67 @@ function normalizeStops(stops: unknown, kind: string): readonly GradientStop[] {
   if (!Array.isArray(stops) || stops.length < 2) {
     throw new TypeError(`${kind} requires at least two normalized color stops`);
   }
-  return Object.freeze(stops.map((stop) => {
+  let previousOffset = 0;
+  return Object.freeze(Array.from({ length: stops.length }, (_value, index) => {
+    const stop = stops[index];
     if (!Array.isArray(stop) || stop.length !== 2
       || !Number.isFinite(stop[0]) || stop[0] < 0 || stop[0] > 1 || !stop[1]) {
       throw new TypeError(`invalid ${kind} color stop`);
     }
-    return Object.freeze([stop[0], String(stop[1])] as const);
+    const offset = Math.max(previousOffset, stop[0]);
+    previousOffset = offset;
+    return Object.freeze([offset, String(stop[1])] as const);
   }));
 }
 
 function normalizeGradientLayer(
   paint: Readonly<Record<string, unknown>>,
 ): NormalizedLinearGradientLayer | NormalizedRadialGradientLayer | NormalizedConicGradientLayer {
-  const parsed = paint.css && !paint.stops ? parseCssGradient(paint.css) : null;
+  const parsed = paint.css && !paint.stops ? parseCssGradient(String(paint.css)) : null;
   const source: Readonly<Record<string, unknown>> = parsed ? { ...parsed, ...paint } : paint;
   if (!GRADIENT_KINDS.has(source.kind)) throw new TypeError(`unsupported gradient kind: ${source.kind}`);
-  if (source.kind === "linear-gradient"
-    && !source.line
-    && !(Array.isArray(source.from) && Array.isArray(source.to))) {
-    throw new TypeError("linear-gradient requires a CSS direction or normalized from/to line");
+  const common = normalizeLayerCommon(source);
+  const base = {
+    ...common,
+    ...(source.css === undefined ? {} : { css: String(source.css) }),
+    stops: normalizeStops(source.stops, String(source.kind)),
+  };
+  if (source.kind === "linear-gradient") {
+    if (source.line !== undefined) {
+      return Object.freeze({ ...base, kind: source.kind, line: normalizedLinearLine(source.line) });
+    }
+    return Object.freeze({
+      ...base,
+      kind: source.kind,
+      from: normalizedPixelPair(source.from, "linear-gradient from"),
+      to: normalizedPixelPair(source.to, "linear-gradient to"),
+    });
   }
-  if (source.kind === "radial-gradient" && (!source.shape || !source.size)) {
-    throw new TypeError("radial-gradient requires normalized shape and size");
+  const centerSpec = source.centerSpec === undefined
+    ? parseBackgroundPosition(source.centerSource ?? "center")
+    : normalizedBackgroundPositionSpec(source.centerSpec);
+  if (source.kind === "radial-gradient") {
+    if (source.shape !== "circle" && source.shape !== "ellipse") {
+      throw new TypeError("radial-gradient requires a circle or ellipse shape");
+    }
+    return Object.freeze({
+      ...base,
+      kind: source.kind,
+      centerSpec,
+      shape: source.shape,
+      size: normalizedRadialSize(source.size, source.shape),
+    });
   }
-  if (source.kind === "conic-gradient" && !Number.isFinite(source.angle)) {
+  if (typeof source.angle !== "number" || !Number.isFinite(source.angle)) {
     throw new TypeError("conic-gradient requires a finite start angle");
   }
-  return Object.freeze({
-    ...source,
-    ...normalizeLayerCommon(source),
-    centerSpec: source.kind === "linear-gradient"
-      ? undefined
-      : source.centerSpec ?? parseBackgroundPosition(source.centerSource ?? "center"),
-    stops: normalizeStops(source.stops, String(source.kind)),
-  }) as NormalizedLinearGradientLayer
-    | NormalizedRadialGradientLayer
-    | NormalizedConicGradientLayer;
+  return Object.freeze({ ...base, kind: "conic-gradient", angle: source.angle, centerSpec });
 }
 
 function normalizeLayer(paint: unknown): NormalizedBackgroundLayer {
   if (!isRecord(paint)) throw new TypeError("background layer is required");
   if (paint.kind === "none") {
-    const layer = { ...paint, ...normalizeLayerCommon(paint) };
+    const layer = { kind: "none" as const, ...normalizeLayerCommon(paint) };
     if (layer.blendMode !== "normal") {
       throw new TypeError("multiply requires exactly one raster background image");
     }
@@ -586,9 +766,23 @@ function normalizeLayer(paint: unknown): NormalizedBackgroundLayer {
   }
   if (paint.kind !== "image") throw new TypeError(`unsupported background layer kind: ${paint.kind}`);
   if (!paint.image && !paint.url) throw new TypeError("image paint requires a decoded image or URL");
+  const crossOrigin = paint.crossOrigin === undefined || paint.crossOrigin === null
+    ? paint.crossOrigin as null | undefined
+    : String(paint.crossOrigin);
+  if (crossOrigin !== undefined && crossOrigin !== null
+    && crossOrigin !== "anonymous" && crossOrigin !== "use-credentials") {
+    throw new TypeError(`unsupported image crossOrigin mode: ${crossOrigin}`);
+  }
   return Object.freeze({
-    ...paint,
+    kind: "image",
     ...normalizeLayerCommon(paint),
+    ...(paint.image === undefined ? {} : { image: paint.image as CornerfillRasterSource }),
+    ...(paint.url === undefined ? {} : { url: String(paint.url) }),
+    ...(crossOrigin === undefined ? {} : { crossOrigin }),
+    ...(paint.sourceSize === undefined ? {} : {
+      sourceSize: normalizedPixelPair(paint.sourceSize, "image sourceSize", { positive: true }),
+    }),
+    ...(paint.opaque === undefined ? {} : { opaque: paint.opaque === true }),
     imageSmoothing: paint.imageSmoothing !== false,
   }) as NormalizedImageLayer;
 }
@@ -731,16 +925,21 @@ export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescrip
     });
   }
   if (paint.kind === "layers") {
-    if (!Array.isArray(paint.layers) || paint.layers.length < 1) {
+    const inputLayers = paint.layers;
+    if (!Array.isArray(inputLayers) || inputLayers.length < 1) {
       throw new TypeError("layered paint requires at least one background layer");
     }
     const blendModes = paint.blendMode === undefined
       ? []
       : Array.isArray(paint.blendMode) ? paint.blendMode : [paint.blendMode];
-    if (blendModes.some((mode) => String(mode).trim().toLowerCase() !== "normal")) {
+    if (Array.from({ length: blendModes.length }, (_value, index) => blendModes[index])
+      .some((mode) => String(mode).trim().toLowerCase() !== "normal")) {
       throw new TypeError("only normal background layer blending is supported");
     }
-    const layers = paint.layers.map((layer) => normalizeLayer(layer));
+    const layers = Array.from(
+      { length: inputLayers.length },
+      (_value, index) => normalizeLayer(inputLayers[index]),
+    );
     const descriptor = Object.freeze({
       kind: "layers",
       color: String(paint.color ?? "transparent"),
@@ -752,7 +951,7 @@ export function normalizePaintDescriptor(paint: unknown): NormalizedPaintDescrip
   }
   const layer = normalizeLayer(paint);
   const color = String(paint.color ?? "transparent");
-  const descriptor = Object.freeze({ ...layer, color });
+  const descriptor = Object.freeze({ ...layer, color, ...(box ? { box } : {}) });
   validateNormalizedBlend(descriptor);
   return descriptor;
 }
@@ -1201,7 +1400,6 @@ function backgroundLayerKey(
       repeat: descriptor.repeat,
       origin: descriptor.origin,
       clip: descriptor.clip,
-      box: descriptor.box ?? null,
       crossOrigin: descriptor.crossOrigin ?? null,
       smoothing: descriptor.imageSmoothing,
       opaque: descriptor.opaque === true,
@@ -1219,5 +1417,9 @@ export function paintDescriptorKey(descriptor: NormalizedPaintDescriptor): strin
     color: descriptor.color,
     layers: descriptor.layers.map(backgroundLayerKey),
   });
-  return JSON.stringify({ ...backgroundLayerKey(descriptor), color: descriptor.color });
+  return JSON.stringify({
+    ...backgroundLayerKey(descriptor),
+    color: descriptor.color,
+    box: descriptor.box ?? null,
+  });
 }

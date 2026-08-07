@@ -7,6 +7,7 @@ import {
   insetCornerGeometry,
   resolveRadii,
   sampleCanonicalCorner,
+  snapshotCornerGeometry,
 } from "../dist/geometry.mjs";
 
 const close = (actual, expected, epsilon = 1e-9) => {
@@ -51,6 +52,19 @@ test("ordinary radius overlap scaling is deterministic", () => {
   close(resolved[0].ry, 37.5);
 });
 
+test("finite extreme radii resolve without overflow", () => {
+  const maximum = Number.MAX_VALUE;
+  const resolved = resolveRadii(maximum, maximum, [
+    { rx: maximum, ry: maximum },
+    { rx: maximum, ry: maximum },
+    { rx: maximum, ry: maximum },
+    { rx: maximum, ry: maximum },
+  ]);
+  assert.ok(resolved.every(({ rx, ry }) => Number.isFinite(rx) && Number.isFinite(ry)));
+  assert.equal(resolved[0].rx, maximum * 0.5);
+  assert.equal(resolved[0].ry, maximum * 0.5);
+});
+
 test("keyword midpoint ordering follows square, round, bevel, scoop, notch", () => {
   const midpoint = (s) => {
     const points = sampleCanonicalCorner({ rx: 100, ry: 100, s }, { segments: 2 });
@@ -64,12 +78,91 @@ test("keyword midpoint ordering follows square, round, bevel, scoop, notch", () 
   assert.equal(midpoint(Number.NEGATIVE_INFINITY), 100);
 });
 
+test("finite shape limits produce the same outer and inset contours as square and notch", () => {
+  const geometry = (shape) => buildCornerGeometry({
+    width: 120,
+    height: 90,
+    borderRadius: "24px 18px 30px 12px",
+    cornerShape: [shape, shape, shape, shape],
+  });
+  for (const [finite, keyword] of [
+    [54, Number.POSITIVE_INFINITY],
+    [-54, Number.NEGATIVE_INFINITY],
+  ]) {
+    const finiteGeometry = geometry(finite);
+    const keywordGeometry = geometry(keyword);
+    assert.deepEqual(finiteGeometry.contour, keywordGeometry.contour);
+    assert.deepEqual(
+      insetCornerGeometry(finiteGeometry, [3, 5, 7, 9]).contour,
+      insetCornerGeometry(keywordGeometry, [3, 5, 7, 9]).contour,
+    );
+  }
+});
+
 test("bevel uses exact endpoints instead of sampled approximation", () => {
   assert.deepEqual(sampleCanonicalCorner({ rx: 40, ry: 25, s: 0 }), [[40, 0], [0, 25]]);
 });
 
-test("Mario fixture resolves to a triangular contour", () => {
-  const mario = {
+test("adaptive sampling rejects depths beyond the production point bound", () => {
+  assert.throws(
+    () => sampleCanonicalCorner({ rx: 40, ry: 25, s: 1 }, { maxDepth: 15 }),
+    /integer from 1 through 14/u,
+  );
+  assert.throws(
+    () => sampleCanonicalCorner({ rx: 0, ry: 0, s: 0 }, { tolerance: 0 }),
+    /finite positive number/u,
+  );
+});
+
+test("geometry entry points reject invalid resolution inputs before sampling", () => {
+  const radii = Array.from({ length: 4 }, () => ({ rx: 10, ry: 10 }));
+  const shapes = [1, 1, 1, 1];
+  assert.throws(
+    () => buildCornerGeometry({ width: 20, height: 20, borderRadius: radii, cornerShape: shapes, dpr: 0 }),
+    /dpr must be a finite positive number/u,
+  );
+  const geometry = buildCornerGeometry({
+    width: 20,
+    height: 20,
+    borderRadius: radii,
+    cornerShape: shapes,
+  });
+  assert.throws(() => insetCornerGeometry(geometry, 1, { tolerance: Number.NaN }), /finite positive number/u);
+  assert.throws(
+    () => buildCornerGeometry({ width: 20, height: 20, borderRadius: new Array(4), cornerShape: shapes }),
+    /radii\[0\]/u,
+  );
+  assert.throws(
+    () => buildCornerGeometry({ width: 20, height: 20, borderRadius: radii, cornerShape: new Array(4) }),
+    /cornerShape\[0\]/u,
+  );
+  assert.throws(() => convexPolygonsOverlap(new Array(3), [[0, 0], [1, 0], [0, 1]]), /first polygon\[0\]/u);
+});
+
+test("convex overlap distinguishes penetration, separation, and edge contact", () => {
+  const square = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  assert.equal(convexPolygonsOverlap(square, [[5, 5], [15, 5], [15, 15], [5, 15]]), true);
+  assert.equal(convexPolygonsOverlap(square, [[10, 0], [20, 0], [20, 10], [10, 10]]), false);
+  assert.equal(convexPolygonsOverlap(square, [[11, 0], [21, 0], [21, 10], [11, 10]]), false);
+  assert.throws(() => convexPolygonsOverlap(square, [[0, 0], [1, Number.NaN], [0, 1]]), /finite coordinates/u);
+});
+
+test("convex overlap remains stable for large finite coordinates", () => {
+  const scale = Number.MAX_VALUE / 4;
+  const polygon = (points) => points.map(([x, y]) => [x * scale, y * scale]);
+  const square = polygon([[0, 0], [1, 0], [1, 1], [0, 1]]);
+  assert.equal(
+    convexPolygonsOverlap(square, polygon([[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]])),
+    true,
+  );
+  assert.equal(
+    convexPolygonsOverlap(square, polygon([[1, 0], [2, 0], [2, 1], [1, 1]])),
+    false,
+  );
+});
+
+test("two bevel corners and two zero-radius corners resolve to a triangle", () => {
+  const fixture = {
     size: [64, 44],
     radii: [
       { rx: 32, ry: 44 },
@@ -80,10 +173,10 @@ test("Mario fixture resolves to a triangular contour", () => {
     shapeParameters: [0, 0, 1, 1],
   };
   const points = contourPoints({
-    width: mario.size[0],
-    height: mario.size[1],
-    radii: mario.radii,
-    shapeParameters: mario.shapeParameters,
+    width: fixture.size[0],
+    height: fixture.size[1],
+    radii: fixture.radii,
+    shapeParameters: fixture.shapeParameters,
   });
   const unique = [...new Map(points.map((point) => [point.join(","), point])).values()];
   assert.deepEqual(unique, [[32, 0], [64, 44], [0, 44]]);
@@ -99,6 +192,51 @@ test("built geometry does not retain mutable caller tuples", () => {
   assert.equal(geometry.shapeParameters[0], 0);
   assert.ok(Object.isFrozen(geometry.requestedRadii[0]));
   assert.ok(Object.isFrozen(geometry.shapeParameters));
+});
+
+test("shallow-frozen external geometry is revalidated after nested mutation", () => {
+  const built = buildCornerGeometry({
+    width: 100,
+    height: 80,
+    borderRadius: "20px",
+    cornerShape: "bevel",
+  });
+  const contour = built.contour.map((point) => [...point]);
+  const geometry = Object.freeze({ ...built, contour });
+  assert.doesNotThrow(() => insetCornerGeometry(geometry, 1));
+  const snapshot = snapshotCornerGeometry(geometry);
+  assert.equal(snapshotCornerGeometry(built), built);
+  contour[0][0] = Number.NaN;
+  assert.ok(Number.isFinite(snapshot.contour[0][0]));
+  assert.ok(Object.isFrozen(snapshot.contour[0]));
+  assert.throws(() => insetCornerGeometry(geometry, 1), /finite coordinates/u);
+  assert.throws(
+    () => insetCornerGeometry({ ...built, contour: new Array(65_542).fill([0, 0]) }, 1),
+    /production geometry point bound/u,
+  );
+
+  let accessorContour = built.contour;
+  const accessorGeometry = Object.freeze({
+    ...built,
+    get contour() { return accessorContour; },
+  });
+  assert.doesNotThrow(() => insetCornerGeometry(accessorGeometry, 1));
+  accessorContour = Object.freeze([
+    Object.freeze([Number.NaN, 0]),
+    ...built.contour.slice(1),
+  ]);
+  assert.throws(() => insetCornerGeometry(accessorGeometry, 1), /finite coordinates/u);
+  assert.throws(
+    () => snapshotCornerGeometry({ ...built, shapeParameters: new Array(4) }),
+    /shapeParameters\[0\]/u,
+  );
+  assert.throws(
+    () => snapshotCornerGeometry({
+      ...built,
+      contour: [[0, 0], [100, 80], [100, 0], [0, 80]],
+    }),
+    /contour is inconsistent/u,
+  );
 });
 
 test("adaptive contour points stay finite, bounded, and refine for device pixels", () => {

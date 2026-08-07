@@ -19,7 +19,6 @@ export async function attachProductionCandidate(element, oracleCase) {
     document,
     forceFallback: true,
     staticFallback: true,
-    idPrefix: `cornerfill-oracle-${oracleCase.id}`,
   });
   const handle = oracleCase.id === "mario-texel-face"
     ? controller.attachPrepared(element, {

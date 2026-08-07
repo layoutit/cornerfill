@@ -200,6 +200,7 @@ await runWithCleanup(async () => {
     declare const prepared: ReturnType<typeof runtime.attachPrepared>;
     prepared.update({ backgroundPosition: [0, 0] });
     prepared.resize({ cornerShape: "scoop", borderRadius: "5px" });
+    prepared.interpolateCornerShape("round", "bevel", 0.5);
     // @ts-expect-error prepared direct updates do not accept geometry fields.
     prepared.update({ cornerShape: "scoop" });
     // @ts-expect-error open roots must be registered through the document controller.

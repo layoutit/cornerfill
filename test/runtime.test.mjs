@@ -10,7 +10,21 @@ import {
   observeStylesheetMutations,
 } from "../dist/cssom-broker.mjs";
 
-const qualifiedNative = Object.freeze({ qualified: true });
+function nativeQualification(qualified) {
+  const requirement = () => Object.freeze({ supported: qualified, observable: true });
+  return Object.freeze({
+    schema: "cornerfill-native-qualification@2",
+    qualified,
+    requirements: Object.freeze({
+      syntax: requirement(),
+      computedValues: requirement(),
+      shapedHitTesting: requirement(),
+    }),
+    unresolved: Object.freeze(qualified ? [] : ["syntax", "computedValues", "shapedHitTesting"]),
+  });
+}
+
+const qualifiedNative = nativeQualification(true);
 
 class FakeStyle {
   constructor() {
@@ -80,14 +94,25 @@ test("runtime rejects non-finite resource budgets before creating state", async 
     "maxImageCacheEntries",
     "maxImageCachePixels",
     "imageTimeoutMs",
-    "webkitPoolEntriesPerPrefix",
-    "webkitPoolPrefixBuckets",
   ]) {
     assert.throws(
       () => installCornerfill({ document, [name]: Number.NaN }),
       new RegExp(name, "u"),
     );
   }
+  assert.throws(
+    () => installCornerfill({ document, imageTimeoutMs: 2_147_483_648 }),
+    /no greater than 2147483647/u,
+  );
+  assert.throws(
+    () => installCornerfill({ document, backend: "canvas-ish" }),
+    /unknown Cornerfill surface backend/u,
+  );
+  assert.throws(() => installCornerfill([]), /options must be an object/u);
+  assert.throws(
+    () => installCornerfill({ document, observe: "false" }),
+    /observe must be a boolean/u,
+  );
 });
 
 test("qualified native handles ignore fallback API availability and tear down cleanly", async () => {
@@ -118,6 +143,139 @@ test("qualified native handles ignore fallback API availability and tear down cl
   assert.equal(second.style.getPropertyValue("corner-shape"), "round");
   assert.equal(second.style.getPropertyValue("border-radius"), "5px");
   assert.equal(destroyController.stats().counters.detachments, 1);
+});
+
+test("native attachment claims an element before author-observable style writes", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-reentrant-claim-test");
+  const fixture = nativeDocument();
+  const element = fixture.element();
+  const first = installCornerfill({ document: fixture.document, nativeQualification: qualifiedNative });
+  const second = installCornerfill({ document: fixture.document, nativeQualification: qualifiedNative });
+  const setProperty = element.style.setProperty;
+  let attempted = false;
+  let reentrantError = null;
+  element.style.setProperty = function setPropertyWithReentry(property, value, priority) {
+    if (!attempted && property === "corner-shape") {
+      attempted = true;
+      try { second.attach(element, { cornerShape: "notch" }); } catch (error) { reentrantError = error; }
+    }
+    return setProperty.call(this, property, value, priority);
+  };
+  const handle = first.attach(element, { cornerShape: "bevel" });
+  assert.match(reentrantError?.message ?? "", /another Cornerfill controller/u);
+  assert.equal(first.stats().entries, 1);
+  assert.equal(second.stats().entries, 0);
+  handle.dispose();
+  first.destroy();
+  second.destroy();
+});
+
+test("native teardown retains its element claim through author-observable restoration", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-reentrant-release-test");
+  const fixture = nativeDocument();
+  const element = fixture.element();
+  element.style.setProperty("corner-shape", "round");
+  const first = installCornerfill({ document: fixture.document, nativeQualification: qualifiedNative });
+  const second = installCornerfill({ document: fixture.document, nativeQualification: qualifiedNative });
+  const handle = first.attach(element, { cornerShape: "bevel" });
+  const setProperty = element.style.setProperty;
+  let attempted = false;
+  let reentrantError = null;
+  element.style.setProperty = function setPropertyWithReentry(property, value, priority) {
+    if (!attempted && property === "corner-shape") {
+      attempted = true;
+      try { second.attach(element, { cornerShape: "notch" }); } catch (error) { reentrantError = error; }
+    }
+    return setProperty.call(this, property, value, priority);
+  };
+  handle.dispose();
+  assert.match(reentrantError?.message ?? "", /another Cornerfill controller/u);
+  assert.equal(element.style.getPropertyValue("corner-shape"), "round");
+  assert.equal(first.stats().entries, 0);
+  assert.equal(second.stats().entries, 0);
+  const replacement = second.attach(element, { cornerShape: "notch" });
+  replacement.dispose();
+  first.destroy();
+  second.destroy();
+});
+
+test("runtime owns an injected native qualification snapshot", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-qualification-snapshot-test");
+  const fixture = nativeDocument();
+  assert.throws(
+    () => installCornerfill({ document: fixture.document, nativeQualification: { qualified: true } }),
+    /requires schema/u,
+  );
+  assert.throws(
+    () => installCornerfill({
+      document: fixture.document,
+      nativeQualification: {
+        ...nativeQualification(false),
+        qualified: true,
+      },
+    }),
+    /contradicts its requirement evidence/u,
+  );
+  const unresolved = [];
+  const qualification = {
+    ...nativeQualification(true),
+    requirements: {
+      syntax: { supported: true, observable: true },
+      computedValues: { supported: true, observable: true },
+      shapedHitTesting: { supported: true, observable: true },
+    },
+    unresolved,
+  };
+  const controller = installCornerfill({
+    document: fixture.document,
+    nativeQualification: qualification,
+  });
+  qualification.qualified = false;
+  unresolved.push("syntax");
+  assert.equal(controller.capabilities.native.qualified, true);
+  assert.deepEqual(controller.capabilities.native.unresolved, []);
+  assert(Object.isFrozen(controller.capabilities.native));
+  assert(Object.isFrozen(controller.capabilities.native.unresolved));
+  const handle = controller.attach(fixture.element(), { cornerShape: "bevel" });
+  assert.equal(handle.mode, "native");
+  handle.dispose();
+  controller.destroy();
+});
+
+test("authored-style inspection captures a dense property list once", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?inspection-property-snapshot-test");
+  const fixture = nativeDocument();
+  const element = fixture.element();
+  element.style.setProperty("color", "red");
+  element.style.setProperty("background-color", "blue");
+  const controller = installCornerfill({
+    document: fixture.document,
+    nativeQualification: qualifiedNative,
+  });
+  const properties = ["color", "border-radius"];
+  let reads = 0;
+  Object.defineProperty(properties, 0, {
+    configurable: true,
+    get() {
+      reads += 1;
+      properties[1] = "background-color";
+      return reads === 1 ? "color" : "border-color";
+    },
+  });
+  const inspection = controller.inspectAuthoredStyle(element, properties);
+  assert.equal(reads, 1);
+  assert.deepEqual(inspection.values, {
+    color: "red",
+    "background-color": "blue",
+  });
+  assert(Object.isFrozen(inspection.values));
+  const sparse = ["corner-shape", "border-radius"];
+  delete sparse[0];
+  assert.throws(
+    () => controller.inspectAuthoredStyle(element, sparse),
+    /dense array of strings/u,
+  );
+  controller.destroy();
 });
 
 test("native teardown restores owned declarations without overwriting concurrent edits", async () => {
@@ -170,6 +328,93 @@ test("native teardown restores owned declarations without overwriting concurrent
     ],
   );
   controller.destroy();
+});
+
+test("native CSSOM failures preserve inline state and do not stop later teardown", async () => {
+  const { installCornerfill } = await import("../dist/runtime.mjs?native-cssom-failure-test");
+  const fixture = nativeDocument();
+  const first = fixture.element();
+  first.style.setProperty("color", "red");
+  first.style.setProperty("opacity", "0.5");
+  first.style.setProperty("corner-shape", "round");
+  first.style.setProperty("border-radius", "3px");
+  const originalOrder = Array.from(
+    { length: first.style.length },
+    (_value, index) => first.style.item(index),
+  );
+  const controller = installCornerfill({
+    document: fixture.document,
+    nativeQualification: qualifiedNative,
+  });
+
+  const originalSetProperty = first.style.setProperty;
+  let failWrite = true;
+  first.style.setProperty = function setPropertyWithFailure(property, value, priority) {
+    if (failWrite && property === "border-radius") {
+      failWrite = false;
+      throw new Error("injected native write failure");
+    }
+    return originalSetProperty.call(this, property, value, priority);
+  };
+  assert.throws(
+    () => controller.attach(first, { cornerShape: "bevel", borderRadius: "8px" }),
+    /injected native write failure/u,
+  );
+  first.style.setProperty = originalSetProperty;
+  assert.deepEqual(
+    Array.from({ length: first.style.length }, (_value, index) => first.style.item(index)),
+    originalOrder,
+  );
+  assert.equal(first.style.getPropertyValue("color"), "red");
+  assert.equal(first.style.getPropertyValue("opacity"), "0.5");
+  assert.equal(first.style.getPropertyValue("corner-shape"), "round");
+  assert.equal(first.style.getPropertyValue("border-radius"), "3px");
+  assert.equal(controller.stats().entries, 0);
+
+  const second = fixture.element();
+  second.style.setProperty("corner-shape", "round");
+  second.style.setProperty("border-radius", "4px");
+  const firstHandle = controller.attach(first, { cornerShape: "bevel", borderRadius: "8px" });
+  const secondHandle = controller.attach(second, { cornerShape: "notch", borderRadius: "9px" });
+  await Promise.all([firstHandle.ready, secondHandle.ready]);
+  failWrite = true;
+  first.style.setProperty = function setPropertyWithFailure(property, value, priority) {
+    if (failWrite && property === "border-radius") {
+      failWrite = false;
+      throw new Error("injected native update failure");
+    }
+    return originalSetProperty.call(this, property, value, priority);
+  };
+  assert.throws(
+    () => firstHandle.update({ cornerShape: "scoop", borderRadius: "11px" }),
+    /injected native update failure/u,
+  );
+  first.style.setProperty = originalSetProperty;
+  assert.equal(first.style.getPropertyValue("corner-shape"), "bevel");
+  assert.equal(first.style.getPropertyValue("border-radius"), "8px");
+  const originalRemoveProperty = first.style.removeProperty;
+  let failRestore = true;
+  first.style.removeProperty = function removePropertyWithFailure(property) {
+    if (failRestore && property === "corner-shape") {
+      failRestore = false;
+      throw new Error("injected native restore failure");
+    }
+    return originalRemoveProperty.call(this, property);
+  };
+  assert.throws(() => controller.destroy(), AggregateError);
+  first.style.removeProperty = originalRemoveProperty;
+  assert.equal(first.style.getPropertyValue("color"), "red");
+  assert.equal(first.style.getPropertyValue("opacity"), "0.5");
+  assert.equal(second.style.getPropertyValue("corner-shape"), "round");
+  assert.equal(second.style.getPropertyValue("border-radius"), "4px");
+  assert.equal(controller.stats().entries, 0);
+
+  const recovery = installCornerfill({
+    document: fixture.document,
+    nativeQualification: qualifiedNative,
+  });
+  await recovery.attach(first, { cornerShape: "scoop", borderRadius: "7px" }).ready;
+  assert.doesNotThrow(() => recovery.destroy());
 });
 
 test("query-distinct runtime modules share one per-document element owner registry", async () => {
@@ -320,4 +565,11 @@ test("disabled-state brokers notify every controller before surfacing an error",
   assert.match(reported[0].message, /first controller failed/u);
   releaseFirst();
   releaseSecond();
+  assert.equal(target.disabled, true);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(target, "disabled"), {
+    configurable: true,
+    enumerable: true,
+    value: true,
+    writable: true,
+  });
 });

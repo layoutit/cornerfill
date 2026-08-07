@@ -184,7 +184,10 @@ export function observeDisabledState(
   const setDisabled = (value: unknown) => {
     const before = read();
     write(value);
-    if (!Object.is(before, read())) notify<void>(globalObject, subscribers, undefined);
+    if ((descriptor.set !== undefined && descriptor.get === undefined)
+      || !Object.is(before, read())) {
+      notify<void>(globalObject, subscribers, undefined);
+    }
   };
   try {
     Object.defineProperty(target, "disabled", {
@@ -202,7 +205,16 @@ export function observeDisabledState(
     brokers.delete(target);
     const current = Object.getOwnPropertyDescriptor(target, "disabled");
     if (current?.get === getDisabled && current.set === setDisabled) {
-      restoreProperty(target, "disabled", ownDescriptor);
+      if (ownDescriptor && "value" in ownDescriptor) {
+        Object.defineProperty(target, "disabled", { ...ownDescriptor, value: read() });
+      } else if (!ownDescriptor && "value" in descriptor) {
+        Object.defineProperty(target, "disabled", {
+          configurable: true,
+          enumerable: true,
+          value: read(),
+          writable: true,
+        });
+      } else restoreProperty(target, "disabled", ownDescriptor);
     }
     subscribers.clear();
   };

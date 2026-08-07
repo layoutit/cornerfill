@@ -1,10 +1,22 @@
+import {
+  snapshotRegisterRootOptions,
+  snapshotRefreshOptions,
+  replacementStylesheetBaseUrl,
+  validateAdoptedStylesheetSource,
+  validateStylesheetSourceReplacement,
+  validateShadowRootRegistration,
+} from "./auto-contract.mjs";
+import type {
+  RegisterRootOptions,
+  RefreshOptions,
+  ReplaceStylesheetSourceOptions,
+} from "./auto-contract.mjs";
 import { qualifyNativeCornerShape } from "./native.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
 import { CORNERFILL_ORACLE_QUALIFICATION } from "./qualification.mjs";
 import type {
   CornerfillAutoControllerHandle,
   CornerfillAutoExplanation,
-  RegisterRootOptions,
 } from "./auto-runtime.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
@@ -13,9 +25,12 @@ type RuntimeDocument = Document & Readonly<{
 }>;
 
 interface NativeControllerOptions {
+  readonly autoObserve?: boolean | undefined;
   readonly document?: RuntimeDocument | undefined;
+  readonly includeAdoptedStyleSheets?: boolean | undefined;
   readonly parent?: NativeAutoController | null | undefined;
   readonly root?: Document | ShadowRoot | undefined;
+  readonly scopeRegistry?: Map<ShadowRoot, NativeAutoController> | undefined;
 }
 
 interface NativeAutoController extends CornerfillAutoControllerHandle {
@@ -28,10 +43,13 @@ interface NativeAutoController extends CornerfillAutoControllerHandle {
 function nativeController(
   nativeQualification: Readonly<CornerfillNativeQualification>,
   {
+  autoObserve = true,
   document = globalThis.document as RuntimeDocument,
+  includeAdoptedStyleSheets = false,
   parent = null,
   root = document,
-  }: Readonly<NativeControllerOptions> = {},
+  scopeRegistry = new Map(),
+}: Readonly<NativeControllerOptions> = {},
 ): NativeAutoController {
   let destroyed = false;
   const scopes = new Map<ShadowRoot, NativeAutoController>();
@@ -66,33 +84,37 @@ function nativeController(
   if (!initialExplanation) throw new Error("native Cornerfill explanation is unavailable");
   const controller: NativeAutoController = {
     ready: Promise.resolve(initialExplanation),
-    refresh(): Promise<Readonly<CornerfillAutoExplanation>> {
+    refresh(options: Readonly<RefreshOptions> = {}): Promise<Readonly<CornerfillAutoExplanation>> {
       if (destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
+      try {
+        snapshotRefreshOptions(options);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       const explanation = explain();
       if (!explanation) return Promise.reject(new Error("native Cornerfill explanation is unavailable"));
       return Promise.resolve(explanation);
     },
     explain,
-    registerRoot(shadowRoot: ShadowRoot, _options: Readonly<RegisterRootOptions> = {}): NativeAutoController {
+    registerRoot(shadowRoot: ShadowRoot, options: Readonly<RegisterRootOptions> = {}): NativeAutoController {
       if (destroyed) throw new Error("Cornerfill auto controller is destroyed");
-      const ShadowRoot = document.defaultView.ShadowRoot;
-      if (!(shadowRoot instanceof ShadowRoot) || shadowRoot.ownerDocument !== document) {
-        throw new TypeError("Cornerfill automatic scopes require an open ShadowRoot in the same document");
-      }
-      if (shadowRoot.host.shadowRoot !== shadowRoot) {
-        throw new TypeError("Cornerfill automatic scopes cannot register a closed ShadowRoot");
-      }
-      if (root !== document && shadowRoot.host.getRootNode() !== root) {
-        throw new TypeError("A shadow-root scope can register only a directly nested open ShadowRoot");
-      }
+      options = snapshotRegisterRootOptions(options);
+      validateShadowRootRegistration(document, root, autoObserve, shadowRoot, options.autoObserve);
       const existing = scopes.get(shadowRoot);
       if (existing) return existing;
+      if (scopeRegistry.has(shadowRoot)) {
+        throw new TypeError("This ShadowRoot is already registered by another automatic scope; unregister it first");
+      }
       const scope = nativeController(nativeQualification, {
         document,
+        autoObserve: options.autoObserve ?? autoObserve,
+        includeAdoptedStyleSheets: options.adoptedStyleSheets === true,
         parent: controller,
         root: shadowRoot,
+        scopeRegistry,
       });
       scopes.set(shadowRoot, scope);
+      scopeRegistry.set(shadowRoot, scope);
       return scope;
     },
     unregisterRoot(shadowRoot: ShadowRoot): boolean {
@@ -101,22 +123,32 @@ function nativeController(
       scope.destroy();
       return true;
     },
-    refreshAdoptedStyleSheet(_sheet: CSSStyleSheet, source: string) {
-      if (typeof source !== "string") {
-        return Promise.reject(new TypeError(
-          "refreshAdoptedStyleSheet() requires the exact standard CSS source",
-        ));
+    refreshAdoptedStyleSheet(sheet: CSSStyleSheet, source: string) {
+      if (destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
+      try {
+        validateAdoptedStylesheetSource(root, sheet, source, includeAdoptedStyleSheets);
+      } catch (error) {
+        return Promise.reject(error);
       }
       return controller.refresh();
     },
     replaceStylesheetSource(
-      _stylesheet: CSSStyleSheet | HTMLLinkElement | HTMLStyleElement,
+      stylesheet: CSSStyleSheet | HTMLLinkElement | HTMLStyleElement,
       source: string,
+      options: Readonly<ReplaceStylesheetSourceOptions> = {},
     ) {
-      if (typeof source !== "string") {
-        return Promise.reject(new TypeError(
-          "replaceStylesheetSource() requires the exact standard CSS source",
-        ));
+      if (destroyed) return Promise.reject(new Error("Cornerfill auto controller is destroyed"));
+      try {
+        const target = validateStylesheetSourceReplacement(
+          root,
+          document,
+          stylesheet,
+          source,
+          includeAdoptedStyleSheets,
+        );
+        replacementStylesheetBaseUrl(target.owner, document, options);
+      } catch (error) {
+        return Promise.reject(error);
       }
       return controller.refresh();
     },
@@ -126,6 +158,7 @@ function nativeController(
       for (const scope of [...scopes.values()]) scope.destroy();
       scopes.clear();
       if (parent && root instanceof document.defaultView.ShadowRoot) {
+        if (scopeRegistry.get(root) === controller) scopeRegistry.delete(root);
         parent._removeScope(root, controller);
       }
     },

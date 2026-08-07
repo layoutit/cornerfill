@@ -111,6 +111,89 @@ test("decoded image identity participates in the paint key", () => {
   assert.equal(paintDescriptorKey(first), paintDescriptorKey(first));
 });
 
+test("paint normalization owns nested public input and discards unrelated fields", () => {
+  const backgroundPositionSpec = {
+    kind: "components",
+    x: { kind: "position", px: 3, percent: 0, source: "3px" },
+    y: { kind: "position", px: 4, percent: 0, source: "4px" },
+  };
+  const backgroundSizeSpec = {
+    kind: "components",
+    width: {
+      kind: "length-percentage",
+      source: "20px",
+      value: { px: 20, percent: 0, source: "20px" },
+    },
+    height: { kind: "auto", source: "auto" },
+  };
+  const sourceSize = [30, 15];
+  const line = { kind: "angle", radians: Math.PI / 2 };
+  const unrelated = {};
+  unrelated.circular = unrelated;
+  const descriptor = normalizePaintDescriptor({
+    kind: "layers",
+    layers: [
+      {
+        kind: "image",
+        image,
+        backgroundPositionSpec,
+        backgroundSizeSpec,
+        sourceSize,
+        repeat: "no-repeat",
+      },
+      {
+        kind: "linear-gradient",
+        line,
+        stops: [[0, "red"], [1, "blue"]],
+        unrelated,
+      },
+    ],
+  });
+  const key = paintDescriptorKey(descriptor);
+  const resolved = resolvePaintForBox(descriptor, 100, 80);
+
+  backgroundPositionSpec.x.px = 99;
+  backgroundSizeSpec.width.value.px = 99;
+  sourceSize[0] = 99;
+  line.radians = 0;
+
+  assert.equal(paintDescriptorKey(descriptor), key);
+  assert.deepEqual(resolved.layers[0].backgroundPosition, [3, 4]);
+  assert.deepEqual(resolved.layers[0].backgroundSize, [20, 10]);
+  assert.deepEqual(descriptor.layers[0].sourceSize, [30, 15]);
+  assert.equal(descriptor.layers[1].line.radians, Math.PI / 2);
+  assert.equal("unrelated" in descriptor.layers[1], false);
+  assert.throws(() => normalizePaintDescriptor({
+    kind: "image",
+    image,
+    backgroundPositionSpec: { kind: "prepared", x: Infinity, y: 0 },
+  }), /normalized specification/u);
+  assert.throws(() => parseBackgroundPosition(new Array(2)), /finite pixels/u);
+  assert.throws(() => normalizePaintDescriptor({
+    kind: "image",
+    image,
+    sourceSize: new Array(2),
+  }), /finite positive numbers/u);
+  assert.throws(() => normalizePaintDescriptor({
+    kind: "layers",
+    layers: new Array(1),
+  }), /background layer is required/u);
+});
+
+test("normalized gradient stops use the CSS fixup order", () => {
+  const descriptor = normalizePaintDescriptor({
+    kind: "linear-gradient",
+    from: [0, 0],
+    to: [100, 0],
+    stops: [[0.8, "red"], [0.2, "green"], [1, "blue"]],
+  });
+  assert.deepEqual(descriptor.stops, [
+    [0.8, "red"],
+    [0.8, "green"],
+    [1, "blue"],
+  ]);
+});
+
 test("zero-sized raster backgrounds draw no tiles", () => {
   const resolved = resolvePaintForBox(normalizePaintDescriptor({
     kind: "image",

@@ -115,16 +115,29 @@ const INTERSECTION_EPSILON = 1e-9;
 const FLOATING_SHAPE_LIMIT = 54;
 const CONCAVE_SAFETY_SEGMENTS = 256;
 const CONCAVE_SAFETY_MARGIN = 1e-5;
+const MAX_ADAPTIVE_DEPTH = 14;
+const MAX_INSET_ADAPTIVE_DEPTH = 8;
 const MAX_INSET_CACHE_ENTRIES = 16;
+const MAX_ADAPTIVE_CURVE_POINTS = 2 ** MAX_ADAPTIVE_DEPTH + 1;
+const MAX_CONTOUR_POINTS = 1 + CORNER_COUNT * MAX_ADAPTIVE_CURVE_POINTS;
+const MAX_CARVE_OUT_POINTS = MAX_ADAPTIVE_CURVE_POINTS + 1;
 // 52 bisections reach the precision limit of a finite IEEE-754 mantissa.
 const INTERSECTION_BISECTION_ITERATIONS = 52;
 const UNSUPPORTED_INSET_TOPOLOGY = Symbol("unsupported inset topology");
 const INSET_TOPOLOGY_ERROR = "shaped inset contour self-intersects after clipping and is unsupported";
 const insetGeometryCache = new WeakMap<CornerGeometry, InsetCache>();
+const trustedCornerGeometries = new WeakSet<CornerGeometry>();
 
 function finiteNonNegative(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new TypeError(`${label} must be a finite non-negative number`);
+  }
+  return value;
+}
+
+function finitePositive(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`${label} must be a finite positive number`);
   }
   return value;
 }
@@ -154,6 +167,37 @@ function normalizedRadius(input: unknown, index: number): Radius {
   });
 }
 
+function normalizedRadii(radii: Four<Radius>): Four<Radius> {
+  if (!Array.isArray(radii) || radii.length !== CORNER_COUNT) {
+    throw new TypeError("radii must contain top-left, top-right, bottom-right, bottom-left");
+  }
+  const input: readonly unknown[] = radii;
+  return frozenFour(
+    normalizedRadius(input[0], 0),
+    normalizedRadius(input[1], 1),
+    normalizedRadius(input[2], 2),
+    normalizedRadius(input[3], 3),
+  );
+}
+
+function normalizedShapeParameters(input: unknown, label = "shapeParameters"): Four<number> {
+  if (!Array.isArray(input) || input.length !== CORNER_COUNT) {
+    throw new TypeError(`${label} must contain four values`);
+  }
+  return frozenFour(
+    validShapeParameter(input[0], `${label}[0]`),
+    validShapeParameter(input[1], `${label}[1]`),
+    validShapeParameter(input[2], `${label}[2]`),
+    validShapeParameter(input[3], `${label}[3]`),
+  );
+}
+
+function overlapRatio(available: number, first: number, second: number): number {
+  const scale = Math.max(first, second);
+  if (scale === 0) return 1;
+  return (available / scale) / (first / scale + second / scale);
+}
+
 export function resolveRadii(
   width: number,
   height: number,
@@ -161,21 +205,12 @@ export function resolveRadii(
 ): Four<Radius> {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
-  if (!Array.isArray(radii) || radii.length !== CORNER_COUNT) {
-    throw new TypeError("radii must contain top-left, top-right, bottom-right, bottom-left");
-  }
-  const input: readonly unknown[] = radii;
-  const values = frozenFour(
-    normalizedRadius(input[0], 0),
-    normalizedRadius(input[1], 1),
-    normalizedRadius(input[2], 2),
-    normalizedRadius(input[3], 3),
-  );
+  const values = normalizedRadii(radii);
   const ratios = [
-    values[0].rx + values[1].rx > 0 ? width / (values[0].rx + values[1].rx) : 1,
-    values[3].rx + values[2].rx > 0 ? width / (values[3].rx + values[2].rx) : 1,
-    values[0].ry + values[3].ry > 0 ? height / (values[0].ry + values[3].ry) : 1,
-    values[1].ry + values[2].ry > 0 ? height / (values[1].ry + values[2].ry) : 1,
+    overlapRatio(width, values[0].rx, values[1].rx),
+    overlapRatio(width, values[3].rx, values[2].rx),
+    overlapRatio(height, values[0].ry, values[3].ry),
+    overlapRatio(height, values[1].ry, values[2].ry),
   ];
   const scale = Math.min(1, ...ratios);
   const scaleRadius = ({ rx, ry }: Radius): Radius => Object.freeze({
@@ -203,10 +238,12 @@ function canonicalPoint(rx: number, ry: number, s: number, theta: number): Point
 function pointLineDistance(point: Point, start: Point, end: Point): number {
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared === 0) return Math.hypot(point[0] - start[0], point[1] - start[1]);
-  const areaTwice = Math.abs(dx * (start[1] - point[1]) - (start[0] - point[0]) * dy);
-  return areaTwice / Math.sqrt(lengthSquared);
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return Math.hypot(point[0] - start[0], point[1] - start[1]);
+  return Math.abs(
+    (dx / length) * (start[1] - point[1])
+    - (dy / length) * (start[0] - point[0]),
+  );
 }
 
 function sampleAdaptiveCurve(
@@ -268,6 +305,16 @@ export function sampleCanonicalCorner({ rx, ry, s }: CanonicalCorner, {
   finiteNonNegative(rx, "corner.rx");
   finiteNonNegative(ry, "corner.ry");
   validShapeParameter(s, "corner.s");
+  if (segments !== undefined) {
+    if (!Number.isInteger(segments) || segments < 1 || segments > 4096) {
+      throw new TypeError("segments must be an integer from 1 through 4096");
+    }
+  } else {
+    finitePositive(tolerance, "tolerance");
+    if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > MAX_ADAPTIVE_DEPTH) {
+      throw new TypeError(`maxDepth must be an integer from 1 through ${MAX_ADAPTIVE_DEPTH}`);
+    }
+  }
   if (rx === 0 || ry === 0) return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, ry)]);
   if (s === Number.POSITIVE_INFINITY || s >= FLOATING_SHAPE_LIMIT) {
     return Object.freeze([frozenPoint(rx, 0), frozenPoint(0, 0), frozenPoint(0, ry)]);
@@ -279,9 +326,6 @@ export function sampleCanonicalCorner({ rx, ry, s }: CanonicalCorner, {
 
   let points: Point[];
   if (segments !== undefined) {
-    if (!Number.isInteger(segments) || segments < 1 || segments > 4096) {
-      throw new TypeError("segments must be an integer from 1 through 4096");
-    }
     points = [];
     for (let index = 0; index <= segments; index += 1) {
       points.push(canonicalPoint(rx, ry, s, (index / segments) * Math.PI / 2));
@@ -289,12 +333,6 @@ export function sampleCanonicalCorner({ rx, ry, s }: CanonicalCorner, {
     points[0] = [rx, 0];
     points[points.length - 1] = [0, ry];
   } else {
-    if (!Number.isFinite(tolerance) || tolerance <= 0) {
-      throw new TypeError("tolerance must be a finite positive number");
-    }
-    if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 24) {
-      throw new TypeError("maxDepth must be an integer from 1 through 24");
-    }
     points = adaptiveCanonicalCorner(rx, ry, s, tolerance, maxDepth);
   }
   return Object.freeze(points.map(([x, y]) => frozenPoint(x, y)));
@@ -386,18 +424,92 @@ export function convexPolygonsOverlap(
   second: readonly Point[],
   epsilon = INTERSECTION_EPSILON,
 ): boolean {
-  if (first.length < 3 || second.length < 3) return false;
-  for (const polygon of [first, second]) {
-    for (let index = 0; index < polygon.length; index += 1) {
-      const current = polygon[index]!;
-      const next = polygon[(index + 1) % polygon.length]!;
-      const axis = normalizedAxis(current, next);
-      if (!axis) continue;
-      const [axisX, axisY] = axis;
-      const [firstMin, firstMax] = projection(first, axisX, axisY);
-      const [secondMin, secondMax] = projection(second, axisX, axisY);
-      if (firstMax <= secondMin + epsilon || secondMax <= firstMin + epsilon) return false;
+  finiteNonNegative(epsilon, "epsilon");
+  const finitePoints = (points: readonly Point[], label: string): Point[] => {
+    if (!Array.isArray(points)) throw new TypeError(`${label} must be an array of points`);
+    const result = new Array<Point>(points.length);
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      if (!Array.isArray(point) || point.length !== 2
+        || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+        throw new TypeError(`${label}[${index}] must contain two finite coordinates`);
+      }
+      result[index] = [point[0], point[1]];
     }
+    return result;
+  };
+  const firstPoints = finitePoints(first, "first polygon");
+  const secondPoints = finitePoints(second, "second polygon");
+  let coordinateScale = 1;
+  for (const points of [firstPoints, secondPoints]) {
+    for (const [x, y] of points) {
+      coordinateScale = Math.max(coordinateScale, Math.abs(x), Math.abs(y));
+    }
+  }
+  const scaledHull = (points: readonly Point[]): Point[] => convexHull(points.map(([x, y]) => (
+    [x / coordinateScale, y / coordinateScale]
+  )));
+  const firstHull = scaledHull(firstPoints);
+  const secondHull = scaledHull(secondPoints);
+  const scaledEpsilon = epsilon / coordinateScale;
+  if (firstHull.length < 3 || secondHull.length < 3) return false;
+
+  // The origin is inside A + (-B) exactly when the two convex polygons overlap.
+  // Merging the already angle-ordered hull edges keeps this O(n log n) overall
+  // (the hull sorts dominate) instead of projecting every vertex onto every edge.
+  const rotatedFromLowest = (polygon: readonly Point[]): Point[] => {
+    let start = 0;
+    for (let index = 1; index < polygon.length; index += 1) {
+      const point = polygon[index]!;
+      const current = polygon[start]!;
+      if (point[1] < current[1] || (point[1] === current[1] && point[0] < current[0])) start = index;
+    }
+    return [...polygon.slice(start), ...polygon.slice(0, start)];
+  };
+  const firstOrdered = rotatedFromLowest(firstHull);
+  const secondOrdered = rotatedFromLowest(secondHull.map(([x, y]) => [-x, -y]));
+  const edges = (polygon: readonly Point[]): Point[] => polygon.map((point, index) => {
+    const next = polygon[(index + 1) % polygon.length]!;
+    return [next[0] - point[0], next[1] - point[1]];
+  });
+  const firstEdges = edges(firstOrdered);
+  const secondEdges = edges(secondOrdered);
+  const half = ([x, y]: Point): number => (y > 0 || (y === 0 && x >= 0) ? 0 : 1);
+  const edgeOrder = (firstEdge: Point, secondEdge: Point): number => {
+    const halfDifference = half(firstEdge) - half(secondEdge);
+    if (halfDifference !== 0) return halfDifference;
+    const cross = firstEdge[0] * secondEdge[1] - firstEdge[1] * secondEdge[0];
+    return cross > 0 ? -1 : cross < 0 ? 1 : 0;
+  };
+  let firstIndex = 0;
+  let secondIndex = 0;
+  let current: Point = [
+    firstOrdered[0]![0] + secondOrdered[0]![0],
+    firstOrdered[0]![1] + secondOrdered[0]![1],
+  ];
+  const difference: Point[] = [current];
+  while (firstIndex < firstEdges.length || secondIndex < secondEdges.length) {
+    const firstEdge = firstEdges[firstIndex];
+    const secondEdge = secondEdges[secondIndex];
+    const order = firstEdge && secondEdge ? edgeOrder(firstEdge, secondEdge) : firstEdge ? -1 : 1;
+    const edge: Point = order === 0
+      ? [firstEdge![0] + secondEdge![0], firstEdge![1] + secondEdge![1]]
+      : order < 0 ? firstEdge! : secondEdge!;
+    if (order <= 0) firstIndex += 1;
+    if (order >= 0) secondIndex += 1;
+    current = [current[0] + edge[0], current[1] + edge[1]];
+    difference.push(current);
+  }
+  difference.pop();
+  for (let index = 0; index < difference.length; index += 1) {
+    const point = difference[index]!;
+    const next = difference[(index + 1) % difference.length]!;
+    const edgeX = next[0] - point[0];
+    const edgeY = next[1] - point[1];
+    const length = Math.hypot(edgeX, edgeY);
+    if (length <= INTERSECTION_EPSILON) continue;
+    const inwardDistance = (edgeX * -point[1] - edgeY * -point[0]) / length;
+    if (inwardDistance <= scaledEpsilon) return false;
   }
   return true;
 }
@@ -523,16 +635,17 @@ export function oppositeCornerScaleFactor(
 ): number {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
-  if (!Array.isArray(radii) || radii.length !== CORNER_COUNT
-    || !Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
+  if (!Array.isArray(radii) || radii.length !== CORNER_COUNT) {
     throw new TypeError("opposite-corner inputs must contain four corners");
   }
+  const values = normalizedRadii(radii);
+  const shapes = normalizedShapeParameters(shapeParameters);
   const diagonalPairs = [[0, 2], [1, 3]] as const;
   let result = 1;
   for (const [first, second] of diagonalPairs) {
-    if (!(shapeParameters[first] < 0 || shapeParameters[second] < 0)) continue;
-    const firstHull = mappedInnerHull(first, width, height, radii[first], shapeParameters[first]);
-    const secondHull = mappedInnerHull(second, width, height, radii[second], shapeParameters[second]);
+    if (!(shapes[first] < 0 || shapes[second] < 0)) continue;
+    const firstHull = mappedInnerHull(first, width, height, values[first], shapes[first]);
+    const secondHull = mappedInnerHull(second, width, height, values[second], shapes[second]);
     result = Math.min(result, highestNonOverlappingScale(firstHull, secondHull, result));
 
     // The editor's current tangent hull has a known concave-direction defect.
@@ -542,15 +655,15 @@ export function oppositeCornerScaleFactor(
       first,
       width,
       height,
-      radii[first],
-      shapeParameters[first],
+      values[first],
+      shapes[first],
     );
     const secondCarveOut = mappedCarveOutHull(
       second,
       width,
       height,
-      radii[second],
-      shapeParameters[second],
+      values[second],
+      shapes[second],
     );
     const safeScale = highestNonOverlappingScale(firstCarveOut, secondCarveOut, result);
     if (safeScale < result) result = Math.max(0, safeScale - CONCAVE_SAFETY_MARGIN);
@@ -564,15 +677,13 @@ export function resolveCornerRadii(
   radii: Four<Radius>,
   shapeParameters: Four<number>,
 ): Readonly<ResolvedCornerRadii> {
-  const ordinary = resolveRadii(width, height, radii);
-  if (!Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
-    throw new TypeError("shapeParameters must contain four values");
-  }
-  shapeParameters.forEach((value, index) => validShapeParameter(value, `shapeParameters[${index}]`));
-  const oppositeScale = oppositeCornerScaleFactor(width, height, ordinary, shapeParameters);
+  const requested = normalizedRadii(radii);
+  const ordinary = resolveRadii(width, height, requested);
+  const shapes = normalizedShapeParameters(shapeParameters);
+  const oppositeScale = oppositeCornerScaleFactor(width, height, ordinary, shapes);
   return Object.freeze({
     ordinaryScaleApplied: ordinary.some((radius, index) => (
-      radius.rx !== radii[index]!.rx || radius.ry !== radii[index]!.ry
+      radius.rx !== requested[index]!.rx || radius.ry !== requested[index]!.ry
     )),
     oppositeScale,
     radii: Object.freeze(ordinary.map(({ rx, ry }) => Object.freeze({
@@ -583,6 +694,7 @@ export function resolveCornerRadii(
 }
 
 function samplingOptions({ segments, tolerance, dpr = 1 }: SamplingOptions = {}): CornerSamplingOptions {
+  finitePositive(dpr, "dpr");
   if (segments !== undefined) return { segments };
   return { tolerance: tolerance ?? 0.125 / Math.max(1, dpr) };
 }
@@ -597,13 +709,17 @@ export function cornerCarveOuts({
   dpr = 1,
   radiiAreResolved = false,
 }: CornerContourOptions): Four<readonly Point[]> {
+  finiteNonNegative(width, "width");
+  finiteNonNegative(height, "height");
+  const shapes = normalizedShapeParameters(shapeParameters);
+  const values = normalizedRadii(radii);
   const resolved = radiiAreResolved
-    ? Object.freeze({ radii, oppositeScale: 1 })
-    : resolveCornerRadii(width, height, radii, shapeParameters);
+    ? Object.freeze({ radii: values, oppositeScale: 1 })
+    : resolveCornerRadii(width, height, values, shapes);
   const options = samplingOptions({ segments, tolerance, dpr });
   return Object.freeze(resolved.radii.map((radius, index) => Object.freeze([
     outerCorner(index, width, height),
-    ...cornerCurve(index, width, height, radius, shapeParameters[index]!, options),
+    ...cornerCurve(index, width, height, radius, shapes[index]!, options),
   ]))) as Four<readonly Point[]>;
 }
 
@@ -619,19 +735,18 @@ export function contourPoints({
 }: CornerContourOptions): readonly Point[] {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
-  if (!Array.isArray(shapeParameters) || shapeParameters.length !== CORNER_COUNT) {
-    throw new TypeError("shapeParameters must contain four values");
-  }
+  const shapes = normalizedShapeParameters(shapeParameters);
+  const values = normalizedRadii(radii);
   const resolved = radiiAreResolved
-    ? radii
-    : resolveCornerRadii(width, height, radii, shapeParameters).radii;
+    ? values
+    : resolveCornerRadii(width, height, values, shapes).radii;
   const options = samplingOptions({ segments, tolerance, dpr });
   const curves = resolved.map((radius, index) => cornerCurve(
     index,
     width,
     height,
     radius,
-    shapeParameters[index]!,
+    shapes[index]!,
     options,
   ));
   const topLeft = resolved[0]!;
@@ -665,21 +780,16 @@ export function buildCornerGeometry({
 }: CornerGeometryOptions): Readonly<CornerGeometry> {
   finiteNonNegative(width, "width");
   finiteNonNegative(height, "height");
+  finitePositive(dpr, "dpr");
   const radiusInput = typeof borderRadius === "string"
     ? resolveBorderRadius(borderRadius, width, height)
     : borderRadius;
-  if (!Array.isArray(radiusInput) || radiusInput.length !== CORNER_COUNT) {
-    throw new TypeError("borderRadius must contain four corners");
-  }
-  const requestedRadii = Object.freeze(radiusInput.map(({ rx, ry }) => Object.freeze({ rx, ry }))) as Four<Radius>;
+  const requestedRadii = normalizedRadii(radiusInput);
   const shapeInput = typeof cornerShape === "string" ? parseCornerShape(cornerShape) : cornerShape;
-  if (!Array.isArray(shapeInput) || shapeInput.length !== CORNER_COUNT) {
-    throw new TypeError("cornerShape must contain four values");
-  }
-  const shapeParameters = Object.freeze([...shapeInput]) as Four<number>;
+  const shapeParameters = normalizedShapeParameters(shapeInput, "cornerShape");
   const resolved = resolveCornerRadii(width, height, requestedRadii, shapeParameters);
   const options = { width, height, radii: resolved.radii, shapeParameters, dpr, tolerance, radiiAreResolved: true };
-  return Object.freeze({
+  const geometry = Object.freeze({
     width,
     height,
     dpr,
@@ -691,6 +801,193 @@ export function buildCornerGeometry({
     contour: contourPoints(options),
     carveOuts: cornerCarveOuts(options),
   });
+  trustedCornerGeometries.add(geometry);
+  return geometry;
+}
+
+function assertCornerGeometry(geometry: CornerGeometry): void {
+  if (!geometry || typeof geometry !== "object") throw new TypeError("outer corner geometry is required");
+  if (trustedCornerGeometries.has(geometry)) return;
+
+  finiteNonNegative(geometry.width, "geometry.width");
+  finiteNonNegative(geometry.height, "geometry.height");
+  finitePositive(geometry.dpr, "geometry.dpr");
+  if (typeof geometry.ordinaryScaleApplied !== "boolean") {
+    throw new TypeError("geometry.ordinaryScaleApplied must be boolean");
+  }
+  if (!Number.isFinite(geometry.oppositeScale)
+    || geometry.oppositeScale < 0 || geometry.oppositeScale > 1) {
+    throw new TypeError("geometry.oppositeScale must be finite and between zero and one");
+  }
+
+  const assertFour = (value: unknown, label: string): readonly unknown[] => {
+    if (!Array.isArray(value) || value.length !== CORNER_COUNT) {
+      throw new TypeError(`${label} must contain four corners`);
+    }
+    return value;
+  };
+  for (const label of ["requestedRadii", "radii"] as const) {
+    const values = assertFour(geometry[label], `geometry.${label}`);
+    for (let index = 0; index < CORNER_COUNT; index += 1) {
+      const value = values[index];
+      const radius = value !== null && typeof value === "object" ? value as Partial<Radius> : null;
+      finiteNonNegative(radius?.rx, `geometry.${label}[${index}].rx`);
+      finiteNonNegative(radius?.ry, `geometry.${label}[${index}].ry`);
+    }
+  }
+  const shapeParameters = assertFour(geometry.shapeParameters, "geometry.shapeParameters");
+  for (let index = 0; index < CORNER_COUNT; index += 1) {
+    validShapeParameter(shapeParameters[index] as number, `geometry.shapeParameters[${index}]`);
+  }
+
+  const assertPoints = (value: unknown, label: string, maximum: number): void => {
+    if (!Array.isArray(value)) throw new TypeError(`${label} must be an array of points`);
+    if (value.length > maximum) {
+      throw new RangeError(`${label} exceeds the production geometry point bound of ${maximum}`);
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const point = value[index];
+      if (!Array.isArray(point) || point.length !== 2
+        || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+        throw new TypeError(`${label}[${index}] must contain two finite coordinates`);
+      }
+    }
+  };
+  assertPoints(geometry.contour, "geometry.contour", MAX_CONTOUR_POINTS);
+  const carveOuts = assertFour(geometry.carveOuts, "geometry.carveOuts");
+  for (let index = 0; index < CORNER_COUNT; index += 1) {
+    assertPoints(
+      carveOuts[index],
+      `geometry.carveOuts[${index}]`,
+      MAX_CARVE_OUT_POINTS,
+    );
+  }
+  assertCornerGeometryContourStructure(geometry);
+}
+
+function assertCornerGeometryContourStructure(geometry: CornerGeometry): void {
+  const epsilon = Math.max(1, geometry.width, geometry.height) * 1e-9;
+  const samePoint = (first: Point, second: Point): boolean => (
+    Math.abs(first[0] - second[0]) <= epsilon
+    && Math.abs(first[1] - second[1]) <= epsilon
+  );
+  const canonicalPointForCorner = (index: number, point: Point): Point => {
+    if (index === 0) return [point[0], point[1]];
+    if (index === 1) return [geometry.width - point[0], point[1]];
+    if (index === 2) return [geometry.width - point[0], geometry.height - point[1]];
+    return [point[0], geometry.height - point[1]];
+  };
+  const curves: Point[][] = [];
+  for (let index = 0; index < CORNER_COUNT; index += 1) {
+    const carveOut = geometry.carveOuts[index]!;
+    if (carveOut.length < 3 || !samePoint(carveOut[0]!, outerCorner(index, geometry.width, geometry.height))) {
+      throw new TypeError(`geometry.carveOuts[${index}] is not a Cornerfill corner carve-out`);
+    }
+    const curve = carveOut.slice(1) as Point[];
+    const canonical = curve.map((point) => canonicalPointForCorner(index, point));
+    if (index === 2) canonical.reverse();
+    const radius = geometry.radii[index]!;
+    if (!samePoint(canonical[0]!, [radius.rx, 0])
+      || !samePoint(canonical.at(-1)!, [0, radius.ry])) {
+      throw new TypeError(`geometry.carveOuts[${index}] does not meet its resolved corner radius`);
+    }
+    for (let pointIndex = 0; pointIndex < canonical.length; pointIndex += 1) {
+      const point = canonical[pointIndex]!;
+      if (point[0] < -epsilon || point[0] > radius.rx + epsilon
+        || point[1] < -epsilon || point[1] > radius.ry + epsilon) {
+        throw new TypeError(`geometry.carveOuts[${index}] leaves its resolved corner bounds`);
+      }
+      const previous = canonical[pointIndex - 1];
+      if (previous && (point[0] > previous[0] + epsilon || point[1] < previous[1] - epsilon)) {
+        throw new TypeError(`geometry.carveOuts[${index}] is not a monotonic corner curve`);
+      }
+    }
+    curves.push(curve);
+  }
+
+  const [topLeft, topRight, bottomRight, bottomLeft] = geometry.radii;
+  const expected: Point[] = [[topLeft.rx, 0], [geometry.width - topRight.rx, 0]];
+  append(expected, curves[1]!);
+  expected.push([geometry.width, geometry.height - bottomRight.ry]);
+  append(expected, curves[2]!);
+  expected.push([bottomLeft.rx, geometry.height]);
+  append(expected, curves[3]!);
+  expected.push([0, topLeft.ry]);
+  append(expected, [...curves[0]!].reverse());
+  if (expected.length > 1 && samePoint(expected[0]!, expected.at(-1)!)) expected.pop();
+  if (geometry.contour.length !== expected.length
+    || geometry.contour.some((point, index) => !samePoint(point, expected[index]!))) {
+    throw new TypeError("geometry.contour is inconsistent with its corner carve-outs");
+  }
+}
+
+export function snapshotCornerGeometry(geometry: CornerGeometry): Readonly<CornerGeometry> {
+  if (!geometry || typeof geometry !== "object") throw new TypeError("outer corner geometry is required");
+  if (trustedCornerGeometries.has(geometry)) return geometry;
+  const four = (value: unknown, label: string): readonly unknown[] => {
+    if (!Array.isArray(value) || value.length !== CORNER_COUNT) {
+      throw new TypeError(`${label} must contain four corners`);
+    }
+    return [value[0], value[1], value[2], value[3]];
+  };
+  const radii = (value: unknown, label: string): Four<Radius> => {
+    const values = four(value, label);
+    const captured = values.map((candidate, index) => {
+      if (!candidate || typeof candidate !== "object") {
+        throw new TypeError(`${label}[${index}] must contain radius coordinates`);
+      }
+      const radius = candidate as Partial<Radius>;
+      const rx = radius.rx;
+      const ry = radius.ry;
+      return Object.freeze({ rx, ry }) as Radius;
+    });
+    return frozenFour(captured[0]!, captured[1]!, captured[2]!, captured[3]!);
+  };
+  const points = (value: unknown, label: string, maximum: number): readonly Point[] => {
+    if (!Array.isArray(value)) throw new TypeError(`${label} must be an array of points`);
+    const length = value.length;
+    if (length > maximum) {
+      throw new RangeError(`${label} exceeds the production geometry point bound of ${maximum}`);
+    }
+    const captured = new Array<Point>(length);
+    for (let index = 0; index < length; index += 1) {
+      const point = value[index];
+      if (!Array.isArray(point) || point.length !== 2) {
+        throw new TypeError(`${label}[${index}] must contain two finite coordinates`);
+      }
+      captured[index] = frozenPoint(point[0], point[1]);
+    }
+    return Object.freeze(captured);
+  };
+  const requestedRadii = radii(geometry.requestedRadii, "geometry.requestedRadii");
+  const resolvedRadii = radii(geometry.radii, "geometry.radii");
+  const shapeValues = four(geometry.shapeParameters, "geometry.shapeParameters");
+  const carveValues = four(geometry.carveOuts, "geometry.carveOuts");
+  const snapshot = Object.freeze({
+    width: geometry.width,
+    height: geometry.height,
+    dpr: geometry.dpr,
+    oppositeScale: geometry.oppositeScale,
+    ordinaryScaleApplied: geometry.ordinaryScaleApplied,
+    requestedRadii,
+    radii: resolvedRadii,
+    shapeParameters: frozenFour(
+      shapeValues[0] as number,
+      shapeValues[1] as number,
+      shapeValues[2] as number,
+      shapeValues[3] as number,
+    ),
+    contour: points(geometry.contour, "geometry.contour", MAX_CONTOUR_POINTS),
+    carveOuts: frozenFour(
+      points(carveValues[0], "geometry.carveOuts[0]", MAX_CARVE_OUT_POINTS),
+      points(carveValues[1], "geometry.carveOuts[1]", MAX_CARVE_OUT_POINTS),
+      points(carveValues[2], "geometry.carveOuts[2]", MAX_CARVE_OUT_POINTS),
+      points(carveValues[3], "geometry.carveOuts[3]", MAX_CARVE_OUT_POINTS),
+    ),
+  });
+  assertCornerGeometry(snapshot);
+  trustedCornerGeometries.add(snapshot);
+  return snapshot;
 }
 
 function pointAdd(point: Point, vector: Point): Point {
@@ -895,7 +1192,7 @@ function rememberInsetGeometry(
   key: string,
   value: InsetCacheValue,
 ): void {
-  if (!Object.isFrozen(geometry)) return;
+  if (!trustedCornerGeometries.has(geometry)) return;
   const nextCache = cache ?? new Map();
   nextCache.set(key, value);
   while (nextCache.size > MAX_INSET_CACHE_ENTRIES) nextCache.delete(nextCache.keys().next().value!);
@@ -1017,10 +1314,10 @@ function adjustedGeneral(
 ): CornerVertices {
   let strokeA: number;
   let strokeB: number;
-  if (shapeParameter === Number.NEGATIVE_INFINITY) {
+  if (shapeParameter <= -FLOATING_SHAPE_LIMIT) {
     strokeA = -1;
     strokeB = 1;
-  } else if (shapeParameter === Number.POSITIVE_INFINITY) {
+  } else if (shapeParameter >= FLOATING_SHAPE_LIMIT) {
     strokeA = 0;
     strokeB = 1;
   } else {
@@ -1120,11 +1417,11 @@ function sampleAdjustedCorner(
   corner: AdjustedCornerVertices,
   shapeParameter: number,
   tolerance: number,
-  maxDepth = 14,
+  maxDepth = MAX_INSET_ADAPTIVE_DEPTH,
 ): Point[] {
   if (shapeParameter === 0) return [corner.start, corner.end];
-  if (shapeParameter === Number.POSITIVE_INFINITY) return [corner.start, corner.outer, corner.end];
-  if (shapeParameter === Number.NEGATIVE_INFINITY) return [corner.start, corner.center, corner.end];
+  if (shapeParameter >= FLOATING_SHAPE_LIMIT) return [corner.start, corner.outer, corner.end];
+  if (shapeParameter <= -FLOATING_SHAPE_LIMIT) return [corner.start, corner.center, corner.end];
   if (shapeParameter === -1 && corner.scoopRadii) {
     return sampleAdjustedScoop(corner, corner.scoopRadii, tolerance, maxDepth);
   }
@@ -1152,19 +1449,22 @@ function normalizeInsets(insets: CornerInsets): Four<number> {
         (insets as Exclude<CornerInsets, number | Four<number>>)?.bottom,
         (insets as Exclude<CornerInsets, number | Four<number>>)?.left,
       ];
-  if (values.length !== 4 || values.some((value) => !Number.isFinite(value) || value! < 0)) {
+  const captured = [values[0], values[1], values[2], values[3]];
+  if (values.length !== 4 || captured.some((value) => !Number.isFinite(value) || value! < 0)) {
     throw new TypeError("contour insets must contain four finite non-negative sides");
   }
-  return values as Four<number>;
+  return frozenFour(captured[0]!, captured[1]!, captured[2]!, captured[3]!);
 }
 
 export function insetCornerGeometry(geometry: CornerGeometry, insets: CornerInsets, {
-  tolerance = 0.125 / Math.max(1, geometry?.dpr ?? 1),
+  tolerance: requestedTolerance,
 }: { tolerance?: number } = {}): Readonly<InsetCornerGeometry> {
-  if (!geometry || typeof geometry !== "object") throw new TypeError("outer corner geometry is required");
+  geometry = snapshotCornerGeometry(geometry);
+  const tolerance = requestedTolerance ?? 0.125 / Math.max(1, geometry.dpr);
+  finitePositive(tolerance, "tolerance");
   const [top, right, bottom, left] = normalizeInsets(insets);
   const cacheKey = `${top}\n${right}\n${bottom}\n${left}\n${tolerance}`;
-  const cache = Object.isFrozen(geometry) ? insetGeometryCache.get(geometry) : null;
+  const cache = trustedCornerGeometries.has(geometry) ? insetGeometryCache.get(geometry) : null;
   const cached = cache?.get(cacheKey);
   if (cached !== undefined) {
     cache!.delete(cacheKey);

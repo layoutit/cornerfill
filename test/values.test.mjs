@@ -13,6 +13,8 @@ import {
   resolveCornerRadiusLonghands,
   resolveCornerShape,
   resolveCornerShapeDeclarations,
+  resolveLengthPercentage,
+  serializeShapeParameter,
   shapeParameterToDiagonal,
 } from "../dist/values.mjs";
 
@@ -25,6 +27,8 @@ test("border-radius expands one through four values and slash axes", () => {
     { rx: 20, ry: 30 },
   ]);
   assert.equal(parseBorderRadius("12px").length, 4);
+  assert.throws(() => resolveBorderRadius(new Array(4), 20, 20), /parsed radii\[0\]/u);
+  assert.throws(() => resolveCornerRadiusLonghands(new Array(4), 20, 20), /longhands\[0\]/u);
 });
 
 test("supported calc length-percentages resolve without evaluation", () => {
@@ -33,6 +37,21 @@ test("supported calc length-percentages resolve without evaluation", () => {
   const resolved = resolveBorderRadius("calc(50% - 10px)", 200, 100);
   assert.equal(resolved[0].rx, 90);
   assert.equal(resolved[0].ry, 40);
+});
+
+test("CSS comments form token boundaries in supported values", () => {
+  assert.deepEqual(resolveBorderRadius("5px/**/10px / calc(50%/**/ - 5px)", 100, 80), [
+    { rx: 5, ry: 35 },
+    { rx: 10, ry: 35 },
+    { rx: 5, ry: 35 },
+    { rx: 10, ry: 35 },
+  ]);
+  assert.deepEqual(parseCornerShape("bevel/**/scoop superellipse(/**/2/**/)"), [
+    0,
+    -1,
+    2,
+    -1,
+  ]);
 });
 
 test("browser-computed corner radii resolve min, max, and clamp", () => {
@@ -49,6 +68,16 @@ test("browser-computed corner radii resolve min, max, and clamp", () => {
   ]);
 });
 
+test("deep computed radius math resolves without recursive stack growth", () => {
+  const nested = `${"min(100px,".repeat(6_000)}25%${")".repeat(6_000)}`;
+  assert.deepEqual(resolveCornerRadiusLonghands([nested, nested, nested, nested], 200, 100), [
+    { rx: 50, ry: 25 },
+    { rx: 50, ry: 25 },
+    { rx: 50, ry: 25 },
+    { rx: 50, ry: 25 },
+  ]);
+});
+
 test("corner-shape expands keywords and arbitrary superellipse parameters", () => {
   assert.deepEqual(parseCornerShape("bevel scoop squircle"), [0, -1, 2, -1]);
   assert.deepEqual(parseCornerShape("notch superellipse(-1.5) square round"), [
@@ -57,6 +86,7 @@ test("corner-shape expands keywords and arbitrary superellipse parameters", () =
     Number.POSITIVE_INFINITY,
     1,
   ]);
+  assert.throws(() => resolveCornerShape(new Array(4)), /four numeric parameters/u);
 });
 
 test("logical corner longhands resolve through writing mode and direction", () => {
@@ -154,5 +184,11 @@ test("unsupported value grammar is rejected explicitly", () => {
   assert.throws(() => parseCornerShape("superellipse(calc(infinity))"), /unsupported calc/u);
   assert.throws(() => parseLengthPercentage("calc(10px+2%)"), /unsupported calc/u);
   assert.throws(() => parseLengthPercentage("calc(10px * 2)"), /unsupported calc/u);
+  assert.throws(() => parseLengthPercentage("calc(1e308px + 1e308px)"), /overflows/u);
+  assert.throws(
+    () => resolveLengthPercentage({ px: 1e308, percent: 1, source: "oversized" }, 1e308),
+    /finite numeric range/u,
+  );
+  assert.throws(() => serializeShapeParameter(Number.NaN), /must be numeric/u);
   assert.throws(() => logicalCornerToPhysical("start-start", { direction: "auto" }), /unsupported direction/u);
 });

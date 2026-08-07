@@ -25,6 +25,13 @@ function document() {
   };
 }
 
+test("image cache rejects timer delays that browsers would overflow", () => {
+  assert.throws(
+    () => new ImageCache(document(), { timeoutMs: 2_147_483_648 }),
+    /no greater than 2147483647/u,
+  );
+});
+
 test("decoded image cache shares active atlas leases", async () => {
   const cache = new ImageCache(document());
   const first = cache.acquire("atlas.webp");
@@ -144,5 +151,25 @@ test("image cache waits for load when decode rejects before loading completes", 
   DecodeFallbackImage.current.complete = true;
   DecodeFallbackImage.current.emit("load");
   assert.equal(await lease.promise, DecodeFallbackImage.current);
+  lease.release();
+});
+
+test("image cache rejects a completed broken image immediately after decode fails", async () => {
+  class BrokenImage extends FakeImage {
+    constructor() {
+      super();
+      this.naturalWidth = 0;
+      this.naturalHeight = 0;
+    }
+
+    decode() { return Promise.reject(new DOMException("The source image cannot be decoded.", "EncodingError")); }
+  }
+  const cache = new ImageCache({
+    baseURI: "https://cornerfill.test/",
+    defaultView: { Image: BrokenImage, clearTimeout, setTimeout },
+  }, { timeoutMs: 10_000 });
+  const lease = cache.acquire("broken.webp");
+  await assert.rejects(lease.promise, /image failed to load/u);
+  assert.equal(cache.stats().entries, 0);
   lease.release();
 });

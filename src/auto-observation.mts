@@ -1,5 +1,10 @@
 import { cssDeclarationSignature } from "./css-syntax.mjs";
 import { colorProbeMutation } from "./colors.mjs";
+import {
+  isStylesheetSourceElement,
+  mutationTouchesStylesheetSource,
+  nodeContainsStylesheetSource,
+} from "./auto-contract.mjs";
 
 export interface AutomaticMutationPlan {
   readonly attachments: boolean;
@@ -10,6 +15,7 @@ export interface AutomaticMutationPlan {
 }
 
 interface AutomaticMutationContext {
+  readonly candidateAttributes: ReadonlySet<string>;
   readonly candidates: ReadonlySet<Element>;
   readonly characterData: boolean;
   readonly conservative: boolean;
@@ -18,7 +24,7 @@ interface AutomaticMutationContext {
   readonly HTMLElement: typeof HTMLElement;
   readonly inline: ReadonlyMap<HTMLElement, unknown>;
   readonly rawStyleSelector: boolean;
-  readonly selectors: () => ReadonlySet<string>;
+  readonly selectors: ReadonlySet<string>;
 }
 
 const ROOT_SENSITIVE_CHILD_LIST_SELECTOR = /(?:[+~]|:(?:empty|first-(?:child|of-type)|focus-within|has|host-context|last-(?:child|of-type)|nth-(?:last-)?(?:child|col|of-type)|only-(?:child|of-type)|scope)\b)/iu;
@@ -70,13 +76,14 @@ function trackedSubtree(root: Element, context: Readonly<AutomaticMutationContex
 
 function addedSubtreeMayContainCandidate(
   root: Element,
-  selectors: ReadonlySet<string>,
+  selectorList: string,
   context: Readonly<AutomaticMutationContext>,
 ): boolean {
-  if (context.hasAuthoredInlineShape(root)
-    || [...root.querySelectorAll("[style]")].some(context.hasAuthoredInlineShape)) return true;
-  if (selectors.size === 0) return false;
-  const selectorList = [...selectors].join(",");
+  if (context.hasAuthoredInlineShape(root)) return true;
+  for (const element of root.querySelectorAll("[style]")) {
+    if (context.hasAuthoredInlineShape(element)) return true;
+  }
+  if (!selectorList) return false;
   try {
     return root.matches(selectorList) || Boolean(root.querySelector(selectorList));
   } catch {
@@ -109,6 +116,7 @@ export function planAutomaticMutations(
   let baseChanged = false;
   let childListChanged = false;
   let selectors: ReadonlySet<string> | null = null;
+  let selectorList: string | null = null;
   let rootSensitiveSelectors: boolean | null = null;
   const placementTargets = new Set<Element>();
   for (const record of records) {
@@ -127,13 +135,15 @@ export function planAutomaticMutations(
         candidates = true;
         continue;
       }
-      if (target.localName === "style" || target.localName === "link") {
+      if (mutationTouchesStylesheetSource(record)) {
         sources = true;
         candidates = true;
         continue;
       }
       if (record.attributeName !== "style") {
-        candidates = true;
+        candidates ||= Boolean(
+          record.attributeName && context.candidateAttributes.has(record.attributeName),
+        );
         continue;
       }
       const currentStyle = target.getAttribute("style");
@@ -153,7 +163,8 @@ export function planAutomaticMutations(
       continue;
     }
     if (record.type === "characterData") {
-      if (record.target.parentElement?.localName === "style") {
+      const stylesheet = record.target.parentElement;
+      if (stylesheet && isStylesheetSourceElement(stylesheet)) {
         sources = true;
         candidates = true;
         continue;
@@ -163,7 +174,7 @@ export function planAutomaticMutations(
       continue;
     }
     const mutationTarget = record.target as Element;
-    if (mutationTarget.localName === "style") {
+    if (mutationTarget.nodeType === 1 && isStylesheetSourceElement(mutationTarget)) {
       sources = true;
       candidates = true;
       continue;
@@ -174,10 +185,7 @@ export function planAutomaticMutations(
       node.localName === "base" || Boolean(node.querySelector("base"))
     ));
     if (baseNodes) baseChanged = true;
-    const sourceNodes = baseNodes || elements.some((node) => (
-      /^(?:style|link)$/u.test(node.localName)
-      || Boolean(node.querySelector("style,link[rel~=stylesheet]"))
-    ));
+    const sourceNodes = baseNodes || nodes.some(nodeContainsStylesheetSource);
     if (sourceNodes) {
       sources = true;
       candidates = true;
@@ -188,13 +196,14 @@ export function planAutomaticMutations(
         && (context.characterData || trackedElement(mutationTarget, context));
       continue;
     }
-    selectors ??= context.selectors();
+    selectors ??= context.selectors;
+    selectorList ??= [...selectors].join(",");
     rootSensitiveSelectors ??= context.conservative
       || [...selectors].some(selectorRequiresRootChildListReconciliation);
     const added = [...record.addedNodes].filter((node): node is Element => node.nodeType === 1);
     const removed = [...record.removedNodes].filter((node): node is Element => node.nodeType === 1);
     candidates ||= rootSensitiveSelectors
-      || added.some((element) => addedSubtreeMayContainCandidate(element, selectors!, context))
+      || added.some((element) => addedSubtreeMayContainCandidate(element, selectorList!, context))
       || removed.some((element) => trackedSubtree(element, context));
     attachments ||= !candidates && context.candidates.has(mutationTarget);
   }

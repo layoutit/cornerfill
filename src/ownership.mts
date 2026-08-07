@@ -174,7 +174,7 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     this.document = document;
     this.view = document.defaultView;
     this.nonce = nonce;
-    this.id = nextDocumentId(document, "controller", "cornerfill-controller");
+    this.id = nextDocumentId(document, "controller");
   }
 
   private stylesheetIsConnected(root: OwnershipRoot): boolean {
@@ -203,11 +203,28 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
   private releaseSurfaceRule(entry: Entry): void {
     const record = this.surfaceRules.get(entry);
     if (!record) return;
-    this.surfaceRules.delete(entry);
     const style = this.stylesheets.get(record.root);
-    if (!style?.isConnected || record.rule.parentStyleSheet !== style.sheet) return;
-    record.rule.selectorText = ":not(*)";
-    record.rule.style.removeProperty(LIVE_IMAGE_PROPERTY);
+    if (!style?.isConnected || record.rule.parentStyleSheet !== style.sheet) {
+      this.surfaceRules.delete(entry);
+      return;
+    }
+    try {
+      record.rule.selectorText = ":not(*)";
+      record.rule.style.removeProperty(LIVE_IMAGE_PROPERTY);
+    } catch (error) {
+      try {
+        const index = [...style.sheet!.cssRules].indexOf(record.rule);
+        if (index >= 0) style.sheet!.deleteRule(index);
+        this.surfaceRules.delete(entry);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Cornerfill ownership rule release failed",
+        );
+      }
+      throw error;
+    }
+    this.surfaceRules.delete(entry);
     let free = this.freeRules.get(record.root);
     if (!free) {
       free = [];
@@ -227,14 +244,41 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     if (free?.length === 0) this.freeRules.delete(surface.root);
     const selector = this.selector(entry);
     if (!rule) {
-      const index = sheet.insertRule(`${selector}{${LIVE_IMAGE_PROPERTY}:${surface.image}!important}`);
-      rule = sheet.cssRules[index] as CSSStyleRule | undefined ?? null;
-    } else {
+      let index: number | null = null;
+      try {
+        index = sheet.insertRule(`${selector}{${LIVE_IMAGE_PROPERTY}:${surface.image}!important}`);
+        rule = sheet.cssRules[index] as CSSStyleRule | undefined ?? null;
+        if (!rule) throw new Error("Cornerfill ownership rule was not created");
+      } catch (error) {
+        if (index === null) throw error;
+        try {
+          sheet.deleteRule(index);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Cornerfill ownership rule creation failed",
+          );
+        }
+        throw error;
+      }
+      this.surfaceRules.set(entry, Object.freeze({ root: surface.root, rule }));
+      return;
+    }
+    this.surfaceRules.set(entry, Object.freeze({ root: surface.root, rule }));
+    try {
       rule.selectorText = selector;
       rule.style.setProperty(LIVE_IMAGE_PROPERTY, surface.image, "important");
+    } catch (error) {
+      try {
+        this.releaseSurfaceRule(entry);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Cornerfill ownership rule reuse failed",
+        );
+      }
+      throw error;
     }
-    if (!rule) throw new Error("Cornerfill ownership rule was not created");
-    this.surfaceRules.set(entry, Object.freeze({ root: surface.root, rule }));
   }
 
   private ensureStylesheet(root: OwnershipRoot): HTMLStyleElement {
@@ -378,7 +422,8 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
     if (this.destroyed) return Promise.resolve();
     this.verificationEntries.set(entry, isCurrent);
     if (!this.verification) {
-      this.verification = new Promise<Map<Entry, unknown>>((resolve) => {
+      let verification: Promise<Map<Entry, unknown>>;
+      verification = new Promise<Map<Entry, unknown>>((resolve) => {
         const failures = new Map<Entry, unknown>();
         let pending = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
         let settled = false;
@@ -390,17 +435,15 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
           this.view.cancelAnimationFrame(frame);
           this.view.clearTimeout(timer);
           this.cancelVerification = null;
+          if (this.verification === verification) this.verification = null;
           resolve(failures);
         };
-        const drain = () => {
+        const verify = () => {
+          if (settled) return;
           for (const [candidate, current] of this.verificationEntries) {
             pending.set(candidate, Object.freeze({ attempts: 0, current }));
           }
           this.verificationEntries.clear();
-        };
-        const verify = () => {
-          if (settled) return;
-          drain();
           const retry = new Map<Entry, Readonly<{ attempts: number; current: () => boolean }>>();
           for (const [candidate, state] of pending) {
             if (!state.current() || !candidate.surface) continue;
@@ -412,23 +455,17 @@ export class OwnershipManager<Entry extends OwnershipEntry> {
                   attempts: state.attempts + 1,
                   current: state.current,
                 }));
-              } else {
-                failures.set(candidate, error);
-              }
+              } else failures.set(candidate, error);
             }
           }
           pending = retry;
-          if (pending.size === 0) {
-            finish();
-            return;
-          }
-          frame = this.view.requestAnimationFrame(verify);
+          if (pending.size === 0) finish();
+          else frame = this.view.requestAnimationFrame(verify);
         };
         this.cancelVerification = finish;
         timer = this.view.setTimeout(verify, 0);
-      }).finally(() => {
-        this.verification = null;
       });
+      this.verification = verification;
     }
     return this.verification.then((failures) => {
       const failure = failures.get(entry);

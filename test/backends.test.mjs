@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSurface, getSurfaceResourceStats } from "../dist/backends.mjs";
 
-function webkitDocument({ releaseClearThrows = false } = {}) {
+function webkitDocument({ allocationMismatch = false, releaseClearThrows = false } = {}) {
   const contexts = new Map();
   const calls = [];
-  const state = { restores: 0, saves: 0 };
+  const state = { failAllocations: false, restores: 0, saves: 0 };
   return {
     calls,
     state,
@@ -15,8 +15,14 @@ function webkitDocument({ releaseClearThrows = false } = {}) {
     },
     getCSSCanvasContext(_kind, id, width, height) {
       calls.push({ id, width, height });
+      if (state.failAllocations && width !== 1) {
+        throw new Error("injected WebKit allocation failure");
+      }
       const context = {
-        canvas: { width, height },
+        canvas: {
+          width: allocationMismatch && width !== 1 ? width * 2 : width,
+          height,
+        },
         save() { state.saves += 1; },
         restore() { state.restores += 1; },
         setTransform() {},
@@ -32,13 +38,12 @@ function webkitDocument({ releaseClearThrows = false } = {}) {
   };
 }
 
-test("disposed WebKit named canvas identifiers are reused per document and prefix", () => {
+test("disposed WebKit named canvas identifiers are reused per document", () => {
   const document = webkitDocument();
   const first = createSurface(document, {
     backend: "webkit-canvas",
     cssWidth: 10,
     cssHeight: 10,
-    idPrefix: "reuse-proof",
   });
   const firstId = first.id;
   first.dispose();
@@ -46,20 +51,15 @@ test("disposed WebKit named canvas identifiers are reused per document and prefi
   assert.deepEqual(getSurfaceResourceStats(document).webkit, {
     activeCanvases: 0,
     activePixels: 0,
-    namedCanvases: 1,
     peakActiveCanvases: 1,
     pooledCanvases: 1,
     pooledPixels: 1,
-    retainedCanvases: 1,
-    retainedPixels: 1,
-    prefixes: 1,
     shrinkFailures: 0,
   });
   const second = createSurface(document, {
     backend: "webkit-canvas",
     cssWidth: 20,
     cssHeight: 5,
-    idPrefix: "reuse-proof",
   });
   assert.equal(second.id, firstId);
   assert.deepEqual(second.size, {
@@ -78,7 +78,6 @@ test("failed WebKit release restores Canvas state before pooling its identifier"
     backend: "webkit-canvas",
     cssWidth: 10,
     cssHeight: 10,
-    idPrefix: "failed-release-proof",
   });
   const id = first.id;
   first.dispose();
@@ -89,13 +88,70 @@ test("failed WebKit release restores Canvas state before pooling its identifier"
     backend: "webkit-canvas",
     cssWidth: 5,
     cssHeight: 5,
-    idPrefix: "failed-release-proof",
   });
   assert.equal(second.id, id);
   second.dispose();
 });
 
-function firefoxDocument({ context = {}, registrationThrows = false, unregisterThrows = false } = {}) {
+test("failed WebKit reactivation retains the pooled canvas pixel ledger", () => {
+  const document = webkitDocument({ releaseClearThrows: true });
+  const first = createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 10,
+    cssHeight: 10,
+  });
+  first.dispose();
+  assert.equal(getSurfaceResourceStats(document).webkit.pooledPixels, 100);
+  document.state.failAllocations = true;
+  assert.throws(() => createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 5,
+    cssHeight: 5,
+  }), /injected WebKit allocation failure/u);
+  const stats = getSurfaceResourceStats(document).webkit;
+  assert.equal(stats.activeCanvases, 0);
+  assert.equal(stats.pooledCanvases, 1);
+  assert.equal(stats.pooledPixels, 100);
+});
+
+test("failed WebKit size validation retains the largest observed canvas allocation", () => {
+  const document = webkitDocument({ allocationMismatch: true, releaseClearThrows: true });
+  assert.throws(() => createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 5,
+    cssHeight: 5,
+  }), /backing size mismatch/u);
+  const stats = getSurfaceResourceStats(document).webkit;
+  assert.equal(stats.activeCanvases, 0);
+  assert.equal(stats.pooledCanvases, 1);
+  assert.equal(stats.pooledPixels, 50);
+  assert.equal(stats.shrinkFailures, 1);
+});
+
+test("failed WebKit resize exposes its conservative retained allocation", () => {
+  const document = webkitDocument();
+  const surface = createSurface(document, {
+    backend: "webkit-canvas",
+    cssWidth: 5,
+    cssHeight: 5,
+  });
+  assert.equal(surface.allocationPixels, 25);
+  document.state.failAllocations = true;
+  assert.throws(() => surface.resize(10, 10, 1), /injected WebKit allocation failure/u);
+  assert.equal(surface.allocationPixels, 100);
+  assert.equal(getSurfaceResourceStats(document).webkit.activePixels, 100);
+  document.state.failAllocations = false;
+  assert.equal(surface.resize(5, 5, 1), true);
+  assert.equal(surface.allocationPixels, 25);
+  assert.equal(getSurfaceResourceStats(document).webkit.activePixels, 25);
+  surface.dispose();
+});
+
+function firefoxDocument({
+  context = {},
+  registrationThrows = false,
+  unregisterThrows = false,
+} = {}) {
   const registrations = [];
   const canvas = {
     id: "",
@@ -218,37 +274,30 @@ test("Firefox teardown completes and reports an unregister failure", () => {
   });
 });
 
-test("WebKit overflow IDs remain reusable and every released canvas is shrunk", () => {
+test("every released WebKit canvas remains reusable and shrunk", () => {
   const document = webkitDocument();
   const surfaces = Array.from({ length: 3 }, () => createSurface(document, {
     backend: "webkit-canvas",
     cssWidth: 20,
     cssHeight: 20,
-    idPrefix: "bounded",
-    webkitPoolEntriesPerPrefix: 1,
-    webkitPoolPrefixBuckets: 1,
   }));
   const originalIds = new Set(surfaces.map(({ id }) => id));
   for (const surface of surfaces) surface.dispose();
   const stats = getSurfaceResourceStats(document).webkit;
   assert.equal(stats.pooledCanvases, 3);
-  assert.equal(stats.namedCanvases, 3);
   assert.equal(stats.peakActiveCanvases, 3);
-  assert.equal(stats.retainedPixels, 3);
+  assert.equal(stats.pooledPixels, 3);
   assert.equal(stats.shrinkFailures, 0);
   const reused = Array.from({ length: 3 }, () => createSurface(document, {
     backend: "webkit-canvas",
     cssWidth: 10,
     cssHeight: 10,
-    idPrefix: "different-prefix",
-    webkitPoolEntriesPerPrefix: 1,
-    webkitPoolPrefixBuckets: 1,
   }));
   assert.deepEqual(new Set(reused.map(({ id }) => id)), originalIds);
   const activeStats = getSurfaceResourceStats(document).webkit;
   assert.equal(activeStats.activeCanvases, 3);
   assert.equal(activeStats.activePixels, 300);
-  assert.equal(activeStats.retainedPixels, 300);
+  assert.equal(activeStats.pooledCanvases, 0);
   for (const surface of reused) surface.dispose();
 });
 

@@ -76,6 +76,16 @@ test("prepared opaque updates reject positions that expose stale pixels", () => 
     () => drawPreparedOpaqueImage(contextRecorder(), program, 1, 0),
     /no longer covers/u,
   );
+  assert.throws(() => createPreparedOpaqueImageProgram({
+    geometry: { width: 10, height: 10, dpr: 1 },
+    paint: {
+      kind: "image",
+      image: { width: 10, height: 10 },
+      opaque: true,
+      backgroundSize: new Array(2),
+      backgroundPosition: [0, 0],
+    },
+  }), /finite resolved size/u);
 });
 
 test("prepared retained-surface crop hot path is exactly one draw call", () => {

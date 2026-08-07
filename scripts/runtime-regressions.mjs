@@ -98,6 +98,29 @@ async function startServer() {
       }, Number.isFinite(delay) && delay > 0 ? delay : 0);
       return;
     }
+    if (url.pathname === "/bench/imports/redirect-root.css") {
+      response.writeHead(302, {
+        "cache-control": "no-store",
+        location: "/bench/redirect-target/root.css",
+      });
+      response.end();
+      return;
+    }
+    if (url.pathname === "/bench/redirect-target/root.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end("/* redirected stylesheet root */");
+      return;
+    }
+    if (url.pathname === "/bench/redirect-target/child.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-redirect-relative{corner-shape:bevel;border-radius:5px;background:red}");
+      return;
+    }
+    if (url.pathname === "/bench/alternate-target/child.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(".cornerfill-redirect-relative{corner-shape:scoop;border-radius:5px;background:red}");
+      return;
+    }
     if (/^\/cornerfill-shadow-base-[ab]\/theme\.css$/u.test(url.pathname)) {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(".cornerfill-shadow-base{corner-shape:bevel}");

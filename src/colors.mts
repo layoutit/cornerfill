@@ -19,6 +19,7 @@ export interface ElementColorContext {
   readonly customProperties: readonly Readonly<{
     readonly name: string;
     readonly priority: string;
+    readonly valid: boolean;
     readonly value: string;
   }>[];
   readonly forcedColorAdjust: string;
@@ -42,6 +43,17 @@ interface TypedColorProperties {
   readonly second: string;
 }
 
+interface VariableProbeProperties extends TypedColorProperties {
+  readonly firstFallback: string;
+  readonly secondFallback: string;
+}
+
+interface IndexedColorSource {
+  readonly closeByOpen: ReadonlyMap<number, number>;
+  readonly commaByOpen: ReadonlyMap<number, number>;
+  readonly text: string;
+}
+
 type RegisterableCss = typeof CSS & Readonly<{
   registerProperty?: ((definition: PropertyDefinition) => void) | undefined;
 }>;
@@ -57,6 +69,7 @@ const COLOR_CACHE_ENTRIES = 256;
 const ABSOLUTE_COLOR_FUNCTIONS = new Set(["rgb", "rgba", "hsl", "hsla"]);
 const probeRoots = new WeakMap<Node, ColorProbeRootState>();
 const typedColorProperties = new WeakMap<Document, TypedColorProperties>();
+const variableProbeProperties = new WeakMap<Document, VariableProbeProperties>();
 
 function colorProbeNode(node: Node): boolean {
   for (let current: Node | null = node; current; current = current.parentNode) {
@@ -76,76 +89,165 @@ function hostAttributeDependentColor(source: string): boolean {
   return cssFunctions(source).some(({ name }) => name === "attr");
 }
 
-function colorFunctionEnd(source: string, open: number): number {
-  let end = -1;
-  scanCssSyntax(source, open, (index, character, parentheses) => {
-    if (character !== ")" || parentheses !== 1) return;
-    end = index;
+function firstColorDependencyFunction(
+  source: Readonly<IndexedColorSource>,
+  start: number,
+  end: number,
+): Readonly<{ name: "attr" | "var"; open: number; start: number }> | null {
+  let dependency: Readonly<{ name: "attr" | "var"; open: number; start: number }> | null = null;
+  let skipThrough = -1;
+  scanCssSyntax(source.text, start, (index) => {
+    if (index >= end) return false;
+    if (index < skipThrough) return;
+    const identifier = cssIdentifierAt(source.text, index);
+    if (!identifier || identifier.end > end) return;
+    skipThrough = identifier.end;
+    const name = identifier.value.toLowerCase();
+    if ((name !== "attr" && name !== "var") || source.text[identifier.end] !== "(") return;
+    dependency = Object.freeze({ name, open: identifier.end, start: identifier.start });
     return false;
   });
-  return end;
+  return dependency;
 }
 
-function varFallback(body: string, nameEnd: number): string {
-  let comma = -1;
-  scanCssSyntax(body, nameEnd, (index, character, parentheses, brackets, blocks) => {
-    if (character !== "," || parentheses !== 0 || brackets !== 0 || blocks !== 0) return;
-    comma = index;
-    return false;
+function indexColorSource(text: string): Readonly<IndexedColorSource> {
+  const closeByOpen = new Map<number, number>();
+  const commaByOpen = new Map<number, number>();
+  const stack: number[] = [];
+  scanCssSyntax(text, 0, (index, character) => {
+    if (character === "(") stack.push(index);
+    else if (character === ")") {
+      const open = stack.pop();
+      if (open !== undefined) closeByOpen.set(open, index);
+    } else if (character === "," && stack.length > 0) {
+      const open = stack[stack.length - 1]!;
+      if (!commaByOpen.has(open)) commaByOpen.set(open, index);
+    }
   });
-  return comma < 0 ? "" : body.slice(comma + 1);
+  return Object.freeze({
+    closeByOpen,
+    commaByOpen,
+    text,
+  });
 }
 
 function collectActiveColorDependencies(
   source: string,
   computed: CSSStyleDeclaration,
+  customPropertyIsValid: (name: string) => boolean,
   customProperties: Set<string>,
-  stack: ReadonlySet<string> = new Set(),
 ): boolean {
-  const variable = cssFunctions(source).find(({ name }) => name === "var");
-  if (!variable) return hostAttributeDependentColor(source);
-  const end = colorFunctionEnd(source, variable.open);
-  if (end < 0) return hostAttributeDependentColor(source);
-  if (collectActiveColorDependencies(
-    source.slice(0, variable.start),
-    computed,
-    customProperties,
-    stack,
-  )) return true;
-  const body = source.slice(variable.open + 1, end);
-  const name = cssIdentifierAt(body, skipCssTrivia(body, 0));
-  if (!name?.value.startsWith("--")) return hostAttributeDependentColor(source);
-  customProperties.add(name.value);
-  const value = computed.getPropertyValue(name.value);
-  const selected = value !== "" ? value : varFallback(body, name.end);
-  if (selected) {
-    if (stack.has(name.value)) return hostAttributeDependentColor(selected);
-    const nextStack = new Set(stack);
-    nextStack.add(name.value);
-    if (collectActiveColorDependencies(selected, computed, customProperties, nextStack)) return true;
+  type DependencyTask = Readonly<
+    | { readonly kind: "exit"; readonly name: string }
+    | {
+      readonly end: number;
+      readonly kind: "source";
+      readonly source: Readonly<IndexedColorSource>;
+      readonly start: number;
+    }
+  >;
+  const active = new Set<string>();
+  const indexed = new Map<string, Readonly<IndexedColorSource>>();
+  const sourceIndex = (text: string): Readonly<IndexedColorSource> => {
+    let value = indexed.get(text);
+    if (!value) {
+      value = indexColorSource(text);
+      indexed.set(text, value);
+    }
+    return value;
+  };
+  const initial = sourceIndex(source);
+  const pending: DependencyTask[] = [{
+    kind: "source",
+    source: initial,
+    start: 0,
+    end: initial.text.length,
+  }];
+  while (pending.length > 0) {
+    const task = pending.pop()!;
+    if (task.kind === "exit") {
+      active.delete(task.name);
+      continue;
+    }
+    const dependency = firstColorDependencyFunction(task.source, task.start, task.end);
+    if (!dependency) continue;
+    if (dependency.name === "attr") return true;
+    const end = task.source.closeByOpen.get(dependency.open);
+    if (end === undefined || end >= task.end) {
+      return hostAttributeDependentColor(task.source.text.slice(task.start, task.end));
+    }
+    const name = cssIdentifierAt(
+      task.source.text,
+      skipCssTrivia(task.source.text, dependency.open + 1),
+    );
+    if (!name || name.end > end || !name.value.startsWith("--")) {
+      return hostAttributeDependentColor(task.source.text.slice(task.start, task.end));
+    }
+    customProperties.add(name.value);
+    let selectedSource: Readonly<IndexedColorSource>;
+    let selectedStart: number;
+    let selectedEnd: number;
+    if (customPropertyIsValid(name.value)) {
+      const selected = computed.getPropertyValue(name.value);
+      selectedSource = sourceIndex(selected);
+      selectedStart = 0;
+      selectedEnd = selected.length;
+    } else {
+      const comma = task.source.commaByOpen.get(dependency.open);
+      selectedSource = task.source;
+      selectedStart = comma === undefined ? end : comma + 1;
+      selectedEnd = end;
+    }
+    if (end + 1 < task.end) {
+      pending.push({
+        kind: "source",
+        source: task.source,
+        start: end + 1,
+        end: task.end,
+      });
+    }
+    if (skipCssTrivia(selectedSource.text, selectedStart) >= selectedEnd) continue;
+    if (active.has(name.value)) {
+      if (hostAttributeDependentColor(selectedSource.text.slice(selectedStart, selectedEnd))) return true;
+      continue;
+    }
+    active.add(name.value);
+    pending.push({ kind: "exit", name: name.value });
+    pending.push({
+      kind: "source",
+      source: selectedSource,
+      start: selectedStart,
+      end: selectedEnd,
+    });
   }
-  return collectActiveColorDependencies(
-    source.slice(end + 1),
-    computed,
-    customProperties,
-    stack,
-  );
+  return false;
 }
 
 export function captureElementColorContext(
+  element: Element,
   computed: CSSStyleDeclaration,
   values: Iterable<string> = [],
 ): Readonly<ElementColorContext> {
+  const validity = new Map<string, boolean>();
+  const customPropertyIsValid = (name: string) => {
+    const known = validity.get(name);
+    if (known !== undefined) return known;
+    const value = computed.getPropertyValue(name);
+    const valid = value !== "" || ambiguousCustomPropertyIsValid(element, name);
+    validity.set(name, valid);
+    return valid;
+  };
   const pending = new Set<string>();
   for (const value of values) {
     const source = String(value);
-    if (collectActiveColorDependencies(source, computed, pending)) {
+    if (collectActiveColorDependencies(source, computed, customPropertyIsValid, pending)) {
       throw new TypeError("explicit attr() colors require host-attribute resolution");
     }
   }
   const customProperties: Readonly<{
     readonly name: string;
     readonly priority: string;
+    readonly valid: boolean;
     readonly value: string;
   }>[] = [];
   for (const name of pending) {
@@ -153,6 +255,7 @@ export function captureElementColorContext(
     customProperties.push(Object.freeze({
       name,
       priority: computed.getPropertyPriority(name),
+      valid: customPropertyIsValid(name),
       value,
     }));
   }
@@ -163,7 +266,7 @@ export function captureElementColorContext(
     color,
     colorScheme,
     forcedColorAdjust,
-    ...customProperties.flatMap(({ name, value }) => [name, value]),
+    ...customProperties.flatMap(({ name, valid, value }) => [name, String(valid), value]),
   ].join("\u0000");
   return Object.freeze({
     color,
@@ -184,7 +287,7 @@ function registeredColorProperties(
   if (typeof registerProperty !== "function") {
     throw new TypeError("contextual CSS colors require CSS.registerProperty()");
   }
-  const id = nextDocumentId(document, "color-probe", "cornerfill-color-probe");
+  const id = nextDocumentId(document, "color-probe");
   const properties = Object.freeze({ first: `--${id}-a`, second: `--${id}-b` });
   registerProperty.call(view.CSS, {
     name: properties.first,
@@ -200,6 +303,62 @@ function registeredColorProperties(
   });
   typedColorProperties.set(document, properties);
   return properties;
+}
+
+function registeredVariableProbeProperties(
+  view: Window & typeof globalThis,
+  document: Document,
+): Readonly<VariableProbeProperties> {
+  const existing = variableProbeProperties.get(document);
+  if (existing) return existing;
+  const registerProperty = (view.CSS as RegisterableCss).registerProperty;
+  if (typeof registerProperty !== "function") {
+    throw new TypeError("contextual CSS colors require CSS.registerProperty()");
+  }
+  const id = nextDocumentId(document, "variable-probe");
+  const properties = Object.freeze({
+    first: `--${id}-a`,
+    firstFallback: `${id}-missing-a`,
+    second: `--${id}-b`,
+    secondFallback: `${id}-missing-b`,
+  });
+  registerProperty.call(view.CSS, {
+    name: properties.first,
+    syntax: "*",
+    inherits: false,
+    initialValue: properties.firstFallback,
+  });
+  registerProperty.call(view.CSS, {
+    name: properties.second,
+    syntax: "*",
+    inherits: false,
+    initialValue: properties.secondFallback,
+  });
+  variableProbeProperties.set(document, properties);
+  return properties;
+}
+
+function ambiguousCustomPropertyIsValid(element: Element, name: string): boolean {
+  const document = element.ownerDocument;
+  const view = document.defaultView as (Window & typeof globalThis) | null;
+  if (!view || typeof element.animate !== "function") {
+    throw new TypeError("empty custom-property colors require Web Animations");
+  }
+  const properties = registeredVariableProbeProperties(view, document);
+  const keyframe: Record<string, string> = {
+    [properties.first]: `var(${name}, ${properties.firstFallback})`,
+    [properties.second]: `var(${name}, ${properties.secondFallback})`,
+  };
+  const animation = element.animate([keyframe, keyframe], { duration: 1, fill: "both" });
+  try {
+    animation.pause();
+    animation.currentTime = 0;
+    const resolved = view.getComputedStyle(element);
+    return resolved.getPropertyValue(properties.first)
+      === resolved.getPropertyValue(properties.second);
+  } finally {
+    animation.cancel();
+  }
 }
 
 function createProbePair(document: Document): ColorProbePair {
@@ -276,8 +435,8 @@ export function withElementColorResolver<T>(
     pair.parent.style.setProperty("color", context.color, "important");
     pair.parent.style.setProperty("color-scheme", context.colorScheme, "important");
     pair.parent.style.setProperty("forced-color-adjust", context.forcedColorAdjust, "important");
-    for (const { name, priority, value } of context.customProperties) {
-      const copied = value || "initial";
+    for (const { name, priority, valid, value } of context.customProperties) {
+      const copied = valid ? (value || " ") : "initial";
       pair.first.style.setProperty(name, copied, priority || "important");
       pair.second.style.setProperty(name, copied, priority || "important");
     }

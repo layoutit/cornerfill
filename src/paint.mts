@@ -1,5 +1,6 @@
 import {
   insetCornerGeometry,
+  snapshotCornerGeometry,
 } from "./geometry.mjs";
 import { rasterSourceDimensions } from "./background.mjs";
 import type { CornerGeometry, Point } from "./geometry.mjs";
@@ -319,8 +320,9 @@ function drawNoRepeatImage(
   const [intrinsicWidth, intrinsicHeight] = verifiedImageDimensions(paint);
   const [backgroundWidth, backgroundHeight] = paint.backgroundSize ?? [intrinsicWidth, intrinsicHeight];
   const [positionX, positionY] = paint.backgroundPosition ?? [0, 0];
-  if (![backgroundWidth, backgroundHeight].every((value) => Number.isFinite(value) && value >= 0)
-    || ![positionX, positionY].every(Number.isFinite)) {
+  if (!Number.isFinite(backgroundWidth) || backgroundWidth < 0
+    || !Number.isFinite(backgroundHeight) || backgroundHeight < 0
+    || !Number.isFinite(positionX) || !Number.isFinite(positionY)) {
     throw new TypeError("raster background size and position must resolve to finite non-negative pixels");
   }
   const destinationLeft = Math.max(0, positionX);
@@ -428,18 +430,6 @@ type GradientPaintState =
   | LinearGradientPaintState
   | RadialGradientPaintState
   | ConicGradientPaintState;
-type GradientTile = readonly [x: number, y: number, width: number, height: number];
-
-function gradientTiles(paint: GradientPaintState, width: number, height: number): readonly GradientTile[] {
-  const [tileWidth, tileHeight] = paint.backgroundSize ?? [width, height];
-  const xPositions = paint.tilePlan?.x ?? [0];
-  const yPositions = paint.tilePlan?.y ?? [0];
-  const tiles: GradientTile[] = [];
-  if (tileWidth > 0 && tileHeight > 0) {
-    for (const y of yPositions) for (const x of xPositions) tiles.push([x, y, tileWidth, tileHeight]);
-  }
-  return tiles;
-}
 
 function linearVector(line: LinearGradientLine, width: number, height: number): PixelPair {
   if (line.kind === "angle") {
@@ -572,17 +562,25 @@ function paintGradient(
   width: number,
   height: number,
 ): Readonly<GradientLayerPaintResult> {
-  const tiles = gradientTiles(paint, width, height);
-  for (const [x, y, tileWidth, tileHeight] of tiles) {
-    if (paint.kind === "linear-gradient") {
-      paintLinearGradientTile(context, paint, x, y, tileWidth, tileHeight);
-    } else if (paint.kind === "radial-gradient") {
-      paintRadialGradientTile(context, paint, x, y, tileWidth, tileHeight);
-    } else {
-      paintConicGradientTile(context, paint, x, y, tileWidth, tileHeight);
+  const [tileWidth, tileHeight] = paint.backgroundSize ?? [width, height];
+  const xPositions = paint.tilePlan?.x ?? [0];
+  const yPositions = paint.tilePlan?.y ?? [0];
+  let tilesDrawn = 0;
+  if (tileWidth > 0 && tileHeight > 0) {
+    for (const y of yPositions) {
+      for (const x of xPositions) {
+        if (paint.kind === "linear-gradient") {
+          paintLinearGradientTile(context, paint, x, y, tileWidth, tileHeight);
+        } else if (paint.kind === "radial-gradient") {
+          paintRadialGradientTile(context, paint, x, y, tileWidth, tileHeight);
+        } else {
+          paintConicGradientTile(context, paint, x, y, tileWidth, tileHeight);
+        }
+        tilesDrawn += 1;
+      }
     }
   }
-  return Object.freeze({ kind: paint.kind, tilesDrawn: tiles.length });
+  return Object.freeze({ kind: paint.kind, tilesDrawn });
 }
 
 export function paintOwnedLayer(
@@ -630,8 +628,8 @@ export function isPreparedOpaqueImageEligible(
   const backgroundSize = paint.backgroundSize;
   const backgroundPosition = paint.backgroundPosition;
   if (!backgroundSize || !backgroundPosition
-    || !backgroundSize.every(Number.isFinite)
-    || !backgroundPosition.every(Number.isFinite)) return false;
+    || !Number.isFinite(backgroundSize[0]) || !Number.isFinite(backgroundSize[1])
+    || !Number.isFinite(backgroundPosition[0]) || !Number.isFinite(backgroundPosition[1])) return false;
   const [backgroundWidth, backgroundHeight] = backgroundSize;
   const [positionX, positionY] = backgroundPosition;
   return positionX <= 0
@@ -658,8 +656,9 @@ export function createPreparedOpaqueImageProgram({
   const backgroundSize = paint.backgroundSize;
   const backgroundPosition = paint.backgroundPosition;
   if (!backgroundSize || !backgroundPosition
-    || backgroundSize.some((value) => !Number.isFinite(value) || value <= 0)
-    || !backgroundPosition.every(Number.isFinite)) {
+    || !Number.isFinite(backgroundSize[0]) || backgroundSize[0] <= 0
+    || !Number.isFinite(backgroundSize[1]) || backgroundSize[1] <= 0
+    || !Number.isFinite(backgroundPosition[0]) || !Number.isFinite(backgroundPosition[1])) {
     throw new TypeError("prepared image paint requires finite resolved size and position values");
   }
   const [backgroundWidth, backgroundHeight] = backgroundSize;
@@ -825,14 +824,21 @@ function supportedBorder(
   border: Readonly<BorderPaintState> | null | undefined,
 ): Readonly<OwnedBorderPaintState> | null {
   if (!border) return null;
-  const widths = border.widths ?? [border.width, border.width, border.width, border.width];
-  if (!Array.isArray(widths) || widths.length !== 4
-    || widths.some((width) => typeof width !== "number" || !Number.isFinite(width) || width < 0)
+  const input = border.widths ?? [border.width, border.width, border.width, border.width];
+  if (!Array.isArray(input) || input.length !== 4) {
+    throw new TypeError("border requires four non-negative widths and one color");
+  }
+  const widths = [input[0], input[1], input[2], input[3]];
+  if (widths.some((width) => typeof width !== "number" || !Number.isFinite(width) || width < 0)
     || widths.every((width) => width === 0) || !border.color) {
     throw new TypeError("border requires four non-negative widths and one color");
   }
-  if (border.styles?.some((style, index) => widths[index]! > 0 && style !== "solid")) {
-    throw new TypeError("painted border sides must use solid style");
+  if (border.styles) {
+    for (let index = 0; index < 4; index += 1) {
+      if (widths[index]! > 0 && border.styles[index] !== "solid") {
+        throw new TypeError("painted border sides must use solid style");
+      }
+    }
   }
   return Object.freeze({
     widths: Object.freeze([...widths]) as Four<number>,
@@ -975,7 +981,7 @@ export function validateCornerfillTopology({
   shadow = null,
   outline = null,
 }: Readonly<CornerfillPaintOptions>): void {
-  if (!geometry || typeof geometry !== "object") throw new TypeError("resolved geometry is required");
+  geometry = snapshotCornerGeometry(geometry);
   contourAtInsets(geometry, ZERO_INSETS);
   const ownedBorder = supportedBorder(border);
   if (ownedBorder) contourAtInsets(geometry, ownedBorder.widths);
@@ -1051,14 +1057,13 @@ function paintBackground(
   return layer;
 }
 
-export function paintCornerfill(context: CanvasRenderingContext2D, {
-  geometry,
-  paint,
-  border = null,
-  shadow = null,
-  outline = null,
-  dpr = geometry?.dpr ?? 1,
-}: Readonly<CornerfillPaintOptions>) {
+export function paintCornerfill(
+  context: CanvasRenderingContext2D,
+  options: Readonly<CornerfillPaintOptions>,
+) {
+  const geometry = snapshotCornerGeometry(options.geometry);
+  const { paint, border = null, shadow = null, outline = null } = options;
+  const dpr = options.dpr ?? geometry.dpr;
   validateCornerfillTopology({ geometry, paint, border, shadow, outline, dpr });
   const { width, height } = geometry;
   const ownedBorder = supportedBorder(border);

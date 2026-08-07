@@ -153,6 +153,7 @@ export interface PreparedEntry<Explanation> extends FallbackEntryBase<Explanatio
   needsFullPaint: boolean;
   outlineSource: Readonly<ContainedOutlinePaintState> | null;
   paintProgram: Readonly<PreparedOpaqueImageProgram> | null;
+  positionRevision: number;
   positionX: number;
   positionY: number;
   radiusSource: RadiusSource | undefined;
@@ -300,6 +301,7 @@ export function createPreparedEntry<Explanation>(
     needsFullPaint: false,
     outlineSource: null,
     paintProgram: null,
+    positionRevision: 0,
     positionX: 0,
     positionY: 0,
     radiusSource: seed.radiusSource,

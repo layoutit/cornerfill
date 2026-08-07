@@ -2,6 +2,11 @@ import { cssDeclarationSignature } from "./css-syntax.mjs";
 import { LIVE_IMAGE_PROPERTY } from "./ownership.mjs";
 import type { CornerfillElement } from "./ownership.mjs";
 import { ALL_CARRIERS } from "./style.mjs";
+import {
+  isStylesheetSourceElement,
+  mutationTouchesStylesheetSource,
+} from "./auto-contract.mjs";
+import { propertyAffectsOwnedPaint } from "./paint-properties.mjs";
 
 interface RuntimeAnimationEvent extends Event {
   readonly animationName: string;
@@ -13,45 +18,6 @@ interface RuntimeAnimation extends Animation {
   readonly effect: (AnimationEffect & {
     getKeyframes?: (() => readonly Record<string, unknown>[]) | undefined;
   }) | null;
-}
-
-const ANIMATED_PAINT_PROPERTIES = new Set([
-  "-webkit-appearance",
-  "-webkit-backdrop-filter",
-  "appearance",
-  "backdrop-filter",
-  "border-collapse",
-  "box-shadow",
-  "box-sizing",
-  "color",
-  "content",
-  "direction",
-  "display",
-  "height",
-  "image-rendering",
-  "text-orientation",
-  "visibility",
-  "width",
-  "writing-mode",
-]);
-
-const ANIMATED_PAINT_PREFIXES = [
-  "background",
-  "border",
-  "corner",
-  "font",
-  "list-style",
-  "outline",
-  "overflow",
-  "padding",
-];
-
-function animatedPropertyAffectsPaint(property: string): boolean {
-  return property.startsWith("--")
-    || ANIMATED_PAINT_PROPERTIES.has(property)
-    || ANIMATED_PAINT_PREFIXES.some((prefix) => (
-      property === prefix || property.startsWith(`${prefix}-`)
-    ));
 }
 
 function animationEvent(event: Event): RuntimeAnimationEvent {
@@ -95,14 +61,6 @@ function positionAffectingInlineSignature(value: unknown): string {
   ));
 }
 
-function nodeContainsStylesheetSource(node: Node): boolean {
-  const element = node.nodeType === 1 ? node as Element : null;
-  return Boolean(element) && (
-    /^(?:style|link)$/u.test(element!.localName)
-    || Boolean(element!.querySelector("style,link[rel~=stylesheet]"))
-  );
-}
-
 export function inlineCarrierSignature(element: CornerfillElement): string {
   return ALL_CARRIERS
     .map((property) => `${property}:${element.style.getPropertyValue(property)}`)
@@ -127,15 +85,15 @@ export function styleMutationMayAffectPaint(
 export function mutationStylesheetRoot(record: MutationRecord): Node | null {
   if (record.type === "characterData") {
     const style = record.target.parentElement;
-    return style?.localName === "style" ? style.getRootNode() : null;
+    return style && isStylesheetSourceElement(style) ? style.getRootNode() : null;
   }
   if (record.type === "attributes") {
     const target = record.target as Element;
-    return /^(?:style|link)$/u.test(target.localName) ? target.getRootNode() : null;
+    return mutationTouchesStylesheetSource(record) ? target.getRootNode() : null;
   }
   const target = record.target as Element;
-  if (target.localName === "style"
-    || [...record.addedNodes, ...record.removedNodes].some(nodeContainsStylesheetSource)) {
+  if ((target.nodeType === 1 && isStylesheetSourceElement(target))
+    || mutationTouchesStylesheetSource(record)) {
     return target.getRootNode();
   }
   return null;
@@ -173,7 +131,7 @@ export function animationToken(event: Event): string {
 export function animationAffectsPaint(element: CornerfillElement, event: Event): boolean {
   const runtimeEvent = animationEvent(event);
   if (event.type.startsWith("transition")) {
-    return animatedPropertyAffectsPaint(runtimeEvent.propertyName);
+    return propertyAffectsOwnedPaint(normalizeAnimatedProperty(runtimeEvent.propertyName));
   }
   const animations = (element.getAnimations?.() ?? []) as RuntimeAnimation[];
   const matching = animations.filter((animation) => (
@@ -186,7 +144,7 @@ export function animationAffectsPaint(element: CornerfillElement, event: Event):
     return keyframes.some((keyframe) => (
       Object.keys(keyframe).some((property) => {
         const normalized = normalizeAnimatedProperty(property);
-        return animatedPropertyAffectsPaint(normalized);
+        return propertyAffectsOwnedPaint(normalized);
       })
     ));
   });

@@ -76,7 +76,7 @@ Unsupported syntax is reported or left native rather than approximated.
 - A contained painted outline requires an empty, paint-owned host. Any open shadow root counts as foreground content because later shadow-tree mutations cannot safely preserve that contract.
 - Cross-origin raster images without CORS are unsupported even when native CSS could display them.
 - Explicit colors that depend on `attr()` are rejected because detached color probes cannot preserve host-attribute evaluation.
-- Default fallback budgets are 512 automatic entries (2,048 through the explicit runtime), `2048²` pixels per surface, and `4096²` pixels each for total live surfaces and decoded images per controller. Explicit runtime options can change these limits.
+- Default fallback budgets are 512 automatic entries and matched candidate elements (2,048 entries through the explicit runtime), `2048²` pixels per surface, and `4096²` pixels each for total live surfaces and decoded images per controller. Runtime and automatic options can change these limits.
 - Linked and imported CSS source is recovered through a separate `fetch()`, so CSP must permit it through `connect-src`. A blocked or unreadable source fails automatic ownership closed for its root; dynamically varying responses require exact source handoff.
 - CSS animations and transitions of shape or paint inputs do not reproduce native timing.
 - Direct `dir` changes are observed. Content-driven direction changes under `dir=auto` are not tracked across arbitrary descendant text and require an explicit refresh.
@@ -84,7 +84,7 @@ Unsupported syntax is reported or left native rather than approximated.
 - Automatic ownership also fails closed for `@scope`, anonymous layer blocks/import layers, namespace bindings or qualified selectors, and other valid cascade contexts Cornerfill cannot preserve.
 - In registered shadow roots, a host pseudo must lead its selector branch. Nested host pseudos and complex relative chains after `:host >` fail that root closed.
 - `insertRule()` and `deleteRule()` are observed only on the top-level `CSSStyleSheet` owned by a readable `<style>` or `<link>` element. Imported child sheets and adopted stylesheets still require their documented explicit source handoff.
-- Direct mutation of existing CSSOM declarations, selectors, grouping rules, or media lists requires exact authored source through `replaceStylesheetSource()`; generic `refresh()` cannot reconstruct source the browser no longer exposes.
+- Direct mutation of existing CSSOM declarations, selectors, grouping rules, or media lists requires exact authored source through `replaceStylesheetSource()`; generic `refresh()` cannot reconstruct source the browser no longer exposes. For an unreadable redirected link, pass its final response URL as `{ baseUrl }` so relative URLs keep their authored base.
 - The explicit `cornerfill/runtime` observer covers host class, inline style, content, size, and readable stylesheet-source changes in observed containing trees. Call `handle.refresh()` or `controller.refresh()` after other cascade inputs change.
 
 ## Development

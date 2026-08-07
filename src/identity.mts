@@ -30,11 +30,9 @@ function registry(document: Document): DocumentIdRegistry {
   return value;
 }
 
-export function nextDocumentId(document: Document, channel: string, prefix = "cornerfill"): string {
-  const safePrefix = String(prefix).replace(/[^a-z0-9_-]/giu, "-");
+export function nextDocumentId(document: Document, channel: string): string {
   const state = registry(document);
-  const key = `${channel}\n${safePrefix}`;
-  const next = (state.counters.get(key) ?? 0) + 1;
-  state.counters.set(key, next);
-  return `${safePrefix}-${state.namespace}-${next}`;
+  const next = (state.counters.get(channel) ?? 0) + 1;
+  state.counters.set(channel, next);
+  return `cornerfill-${channel}-${state.namespace}-${next}`;
 }

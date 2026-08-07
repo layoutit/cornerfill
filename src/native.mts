@@ -66,6 +66,7 @@ type CssSupportWindow = Window & {
 type RequirementDetails = Omit<CornerfillNativeRequirement, "supported">;
 
 const CACHE = new WeakMap<Document, Readonly<CornerfillNativeQualification>>();
+const TRUSTED_QUALIFICATIONS = new WeakSet<object>();
 const PHYSICAL_LONGHANDS = Object.freeze([
   "corner-top-left-shape",
   "corner-top-right-shape",
@@ -140,7 +141,7 @@ function qualification(
     fullNativeQualified: false,
   });
   const qualified = tiers.observableShapeQualified;
-  return Object.freeze({
+  const result = Object.freeze({
     schema: CORNERFILL_NATIVE_QUALIFICATION_SCHEMA,
     qualified,
     capabilities: Object.freeze({
@@ -163,6 +164,115 @@ function qualification(
       : `Native corner-shape is unqualified: ${unresolved.join(", ") || "probe failure"}.`,
     ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
   });
+  TRUSTED_QUALIFICATIONS.add(result);
+  return result;
+}
+
+function snapshotRequirement(
+  input: unknown,
+  name: keyof CornerfillNativeRequirements,
+): Readonly<CornerfillNativeRequirement> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError(`native qualification requirement ${name} must be a record`);
+  }
+  const {
+    supported,
+    observable,
+    probes: inputProbes,
+    shorthand,
+    longhands: inputLonghands,
+    bevelExcludes,
+    roundIncludes,
+  } = input as Readonly<Record<string, unknown>>;
+  if (typeof supported !== "boolean") {
+    throw new TypeError(`native qualification requirement ${name} requires a boolean supported result`);
+  }
+  if (observable !== undefined && typeof observable !== "boolean") {
+    throw new TypeError(`native qualification requirement ${name} observable result must be boolean`);
+  }
+  if (supported && observable === false) {
+    throw new TypeError(`native qualification requirement ${name} cannot be supported when unobserved`);
+  }
+  let probes: Readonly<CornerfillNativeSyntaxProbes> | undefined;
+  if (inputProbes !== undefined) {
+    if (!inputProbes || typeof inputProbes !== "object" || Array.isArray(inputProbes)) {
+      throw new TypeError(`native qualification requirement ${name} probes must be a record`);
+    }
+    const values = inputProbes as Readonly<Record<keyof CornerfillNativeSyntaxProbes, unknown>>;
+    if ([values.aliases, values.shorthand, values.longhand, values.convexSuperellipse,
+      values.concaveSuperellipse].some((value) => typeof value !== "boolean")) {
+      throw new TypeError(`native qualification requirement ${name} probes must be boolean`);
+    }
+    probes = Object.freeze({
+      aliases: values.aliases as boolean,
+      shorthand: values.shorthand as boolean,
+      longhand: values.longhand as boolean,
+      convexSuperellipse: values.convexSuperellipse as boolean,
+      concaveSuperellipse: values.concaveSuperellipse as boolean,
+    });
+  }
+  let longhands: readonly string[] | undefined;
+  if (inputLonghands !== undefined) {
+    if (!Array.isArray(inputLonghands) || inputLonghands.some((value) => typeof value !== "string")) {
+      throw new TypeError(`native qualification requirement ${name} longhands must be strings`);
+    }
+    longhands = Object.freeze([...inputLonghands]);
+  }
+  for (const [label, value] of [["bevelExcludes", bevelExcludes], ["roundIncludes", roundIncludes]] as const) {
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new TypeError(`native qualification requirement ${name} ${label} result must be boolean`);
+    }
+  }
+  if (shorthand !== undefined && typeof shorthand !== "string") {
+    throw new TypeError(`native qualification requirement ${name} shorthand must be a string`);
+  }
+  const capturedBevelExcludes = bevelExcludes as boolean | undefined;
+  const capturedRoundIncludes = roundIncludes as boolean | undefined;
+  return requirement(supported, {
+    ...(observable === undefined ? {} : { observable }),
+    ...(probes === undefined ? {} : { probes }),
+    ...(shorthand === undefined ? {} : { shorthand }),
+    ...(longhands === undefined ? {} : { longhands }),
+    ...(capturedBevelExcludes === undefined ? {} : { bevelExcludes: capturedBevelExcludes }),
+    ...(capturedRoundIncludes === undefined ? {} : { roundIncludes: capturedRoundIncludes }),
+  });
+}
+
+export function snapshotNativeQualification(
+  input: Readonly<CornerfillNativeQualification>,
+): Readonly<CornerfillNativeQualification> {
+  if (input === null || typeof input !== "object") {
+    throw new TypeError("native qualification must be a record");
+  }
+  if (TRUSTED_QUALIFICATIONS.has(input as object)) return input;
+  const { schema, qualified, requirements: inputRequirements, unresolved, error } = input;
+  if (schema !== CORNERFILL_NATIVE_QUALIFICATION_SCHEMA) {
+    throw new TypeError(`native qualification requires schema ${CORNERFILL_NATIVE_QUALIFICATION_SCHEMA}`);
+  }
+  if (typeof qualified !== "boolean") {
+    throw new TypeError("native qualification requires a boolean qualified result");
+  }
+  if (!inputRequirements || typeof inputRequirements !== "object" || Array.isArray(inputRequirements)) {
+    throw new TypeError("native qualification requires requirement evidence");
+  }
+  const requirements = Object.freeze({
+    syntax: snapshotRequirement(inputRequirements.syntax, "syntax"),
+    computedValues: snapshotRequirement(inputRequirements.computedValues, "computedValues"),
+    shapedHitTesting: snapshotRequirement(inputRequirements.shapedHitTesting, "shapedHitTesting"),
+  });
+  if (error !== undefined && typeof error !== "string") {
+    throw new TypeError("native qualification error must be a string");
+  }
+  const result = qualification(requirements, error ?? null);
+  if (qualified !== result.qualified) {
+    throw new TypeError("native qualification result contradicts its requirement evidence");
+  }
+  if (!Array.isArray(unresolved)
+    || unresolved.length !== result.unresolved.length
+    || result.unresolved.some((name, index) => unresolved[index] !== name)) {
+    throw new TypeError("native qualification unresolved requirements contradict its requirement evidence");
+  }
+  return result;
 }
 
 function syntaxRequirement(view: Window): Readonly<CornerfillNativeRequirement> {

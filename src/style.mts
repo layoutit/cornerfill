@@ -68,15 +68,15 @@ function isRadius(value: unknown): value is Radius {
 }
 
 export function isRadiusTuple(value: unknown): value is Four<Radius> {
-  return Array.isArray(value) && value.length === 4 && value.every(isRadius);
+  return Array.isArray(value) && value.length === 4
+    && isRadius(value[0]) && isRadius(value[1]) && isRadius(value[2]) && isRadius(value[3]);
 }
 
 function isShapeTuple(value: unknown): value is Four<number> {
-  return Array.isArray(value)
-    && value.length === 4
-    && value.every((corner): corner is number => (
-      typeof corner === "number" && !Number.isNaN(corner)
-    ));
+  if (!Array.isArray(value) || value.length !== 4) return false;
+  return [value[0], value[1], value[2], value[3]].every((corner): corner is number => (
+    typeof corner === "number" && !Number.isNaN(corner)
+  ));
 }
 
 export const RADIUS_LONGHANDS = Object.freeze([
@@ -287,7 +287,8 @@ export function nativeRadiusDeclarations(
     if (!isRecord(source)) throw new TypeError("unsupported native border-radius source");
     if (source.kind === "longhands") {
       if (!Array.isArray(source.values) || source.values.length !== 4
-        || !source.values.every((value) => typeof value === "string")) {
+        || typeof source.values[0] !== "string" || typeof source.values[1] !== "string"
+        || typeof source.values[2] !== "string" || typeof source.values[3] !== "string") {
         throw new TypeError("native radius longhands must contain four CSS strings");
       }
       const values = source.values as readonly string[];
@@ -350,45 +351,115 @@ export function nativeShapeDeclarations(
   return Object.freeze(declarations.map((declaration) => Object.freeze(declaration)));
 }
 
+interface InlineStyleSnapshot {
+  readonly declarations: ReadonlyMap<string, Readonly<{ priority: string; value: string }>>;
+  readonly order: readonly string[];
+}
+
+function captureInlineStyle(style: CSSStyleDeclaration): Readonly<InlineStyleSnapshot> {
+  const order = Array.from({ length: style.length }, (_value, index) => style.item(index));
+  return Object.freeze({
+    order: Object.freeze(order),
+    declarations: new Map(order.map((property) => [property, Object.freeze({
+      value: style.getPropertyValue(property),
+      priority: style.getPropertyPriority(property),
+    })])),
+  });
+}
+
+function rewriteInlineStyle(
+  style: CSSStyleDeclaration,
+  order: readonly string[],
+  declarations: ReadonlyMap<string, Readonly<{ priority: string; value: string }>>,
+): void {
+  const currentOrder = Array.from({ length: style.length }, (_value, index) => style.item(index));
+  for (const property of currentOrder) style.removeProperty(property);
+  for (const property of order) {
+    const declaration = declarations.get(property);
+    if (declaration) style.setProperty(property, declaration.value, declaration.priority);
+  }
+}
+
+function rethrowAfterInlineRollback(
+  style: CSSStyleDeclaration,
+  snapshot: Readonly<InlineStyleSnapshot>,
+  error: unknown,
+  message: string,
+): never {
+  try {
+    rewriteInlineStyle(style, snapshot.order, snapshot.declarations);
+  } catch (rollbackError) {
+    throw new AggregateError([error, rollbackError], message);
+  }
+  throw error;
+}
+
 export function writeNativeDeclarations(
   entry: NativeDeclarationOwner,
   properties: readonly string[],
   declarations: readonly (readonly [property: string, value: string])[],
 ): void {
+  writeNativeDeclarationGroups(entry, [Object.freeze({ properties, declarations })]);
+}
+
+export function writeNativeDeclarationGroups(
+  entry: NativeDeclarationOwner,
+  groups: readonly Readonly<{
+    readonly declarations: readonly (readonly [property: string, value: string])[];
+    readonly properties: readonly string[];
+  }>[],
+): void {
   const saved = entry.saved;
   if (!saved) throw new Error("native declaration ownership is unavailable");
+  const before = captureInlineStyle(entry.element.style);
+  const savedBefore = new Map(saved);
   const declared = Array.from(
     { length: entry.element.style.length },
     (_value, index) => entry.element.style.item(index),
   );
   const originalOrder = entry.savedDeclarationOrder ?? declared;
-  for (const property of properties) {
-    if (!saved.has(property)) {
-      const order = originalOrder.indexOf(property);
+  try {
+    const touched = new Set<string>();
+    for (const { properties, declarations } of groups) {
+      for (const property of properties) {
+        touched.add(property);
+        if (!saved.has(property)) {
+          const order = originalOrder.indexOf(property);
+          saved.set(property, Object.freeze({
+            present: order >= 0,
+            value: entry.element.style.getPropertyValue(property),
+            priority: entry.element.style.getPropertyPriority(property),
+            ownedPresent: false,
+            ownedValue: "",
+            ownedPriority: "",
+          }));
+        }
+      }
+      for (const property of properties) entry.element.style.removeProperty(property);
+      for (const [property, value] of declarations) entry.element.style.setProperty(property, value);
+    }
+    const ownedDeclarations = new Set(Array.from(
+      { length: entry.element.style.length },
+      (_value, index) => entry.element.style.item(index),
+    ));
+    for (const property of touched) {
+      const original = saved.get(property)!;
       saved.set(property, Object.freeze({
-        present: order >= 0,
-        value: entry.element.style.getPropertyValue(property),
-        priority: entry.element.style.getPropertyPriority(property),
-        ownedPresent: false,
-        ownedValue: "",
-        ownedPriority: "",
+        ...original,
+        ownedPresent: ownedDeclarations.has(property),
+        ownedValue: entry.element.style.getPropertyValue(property),
+        ownedPriority: entry.element.style.getPropertyPriority(property),
       }));
     }
-  }
-  for (const property of properties) entry.element.style.removeProperty(property);
-  for (const [property, value] of declarations) entry.element.style.setProperty(property, value);
-  const ownedDeclarations = new Set(Array.from(
-    { length: entry.element.style.length },
-    (_value, index) => entry.element.style.item(index),
-  ));
-  for (const property of properties) {
-    const original = saved.get(property)!;
-    saved.set(property, Object.freeze({
-      ...original,
-      ownedPresent: ownedDeclarations.has(property),
-      ownedValue: entry.element.style.getPropertyValue(property),
-      ownedPriority: entry.element.style.getPropertyPriority(property),
-    }));
+  } catch (error) {
+    saved.clear();
+    for (const [property, record] of savedBefore) saved.set(property, record);
+    rethrowAfterInlineRollback(
+      entry.element.style,
+      before,
+      error,
+      "Cornerfill native declaration write and inline-style rollback failed",
+    );
   }
 }
 
@@ -400,15 +471,10 @@ export function restoreNativeDeclarationGroup(
   const originalOrder = entry.savedDeclarationOrder;
   if (!saved || !originalOrder) return;
   const style = entry.element.style;
-  const currentOrder = Array.from(
-    { length: style.length },
-    (_value, index) => style.item(index),
-  );
+  const inlineBefore = captureInlineStyle(style);
+  const currentOrder = inlineBefore.order;
   const currentProperties = new Set(currentOrder);
-  const desired = new Map(currentOrder.map((property) => [property, Object.freeze({
-    value: style.getPropertyValue(property),
-    priority: style.getPropertyPriority(property),
-  })]));
+  const desired = new Map(inlineBefore.declarations);
   const records = properties.flatMap((property) => {
     const record = saved.get(property);
     return record ? [Object.freeze({ property, record })] : [];
@@ -434,25 +500,61 @@ export function restoreNativeDeclarationGroup(
   const reposition = new Set(records
     .filter(({ property, record }) => record.present && desired.has(property))
     .map(({ property }) => property));
-  const order = currentOrder.filter((property) => desired.has(property) && !reposition.has(property));
-  for (let index = 0; index < originalOrder.length; index += 1) {
+  const baseOrder = currentOrder.filter((property) => (
+    desired.has(property) && !reposition.has(property)
+  ));
+  const baseProperties = new Set(baseOrder);
+  const before = new Map<string, string[]>();
+  const after = new Map<string, string[]>();
+  const trailing: string[] = [];
+  const nextAnchor = new Map<string, string | null>();
+  let anchor: string | null = null;
+  for (let index = originalOrder.length - 1; index >= 0; index -= 1) {
     const property = originalOrder[index]!;
-    if (!reposition.has(property)) continue;
-    const next = originalOrder.slice(index + 1).find((candidate) => order.includes(candidate));
-    if (next) {
-      order.splice(order.indexOf(next), 0, property);
+    if (reposition.has(property)) nextAnchor.set(property, anchor);
+    else if (baseProperties.has(property)) anchor = property;
+  }
+  let previousAnchor: string | null = null;
+  for (const property of originalOrder) {
+    if (!reposition.has(property)) {
+      if (baseProperties.has(property)) previousAnchor = property;
       continue;
     }
-    const previous = originalOrder.slice(0, index).reverse().find((candidate) => order.includes(candidate));
-    if (previous) order.splice(order.indexOf(previous) + 1, 0, property);
-    else order.push(property);
+    const next = nextAnchor.get(property) ?? null;
+    if (next) {
+      const bucket = before.get(next);
+      if (bucket) bucket.push(property);
+      else before.set(next, [property]);
+    } else if (previousAnchor) {
+      const bucket = after.get(previousAnchor);
+      if (bucket) bucket.push(property);
+      else after.set(previousAnchor, [property]);
+    } else trailing.push(property);
   }
-  for (const property of desired.keys()) if (!order.includes(property)) order.push(property);
+  const order: string[] = [];
+  const emitted = new Set<string>();
+  const emit = (property: string) => {
+    if (emitted.has(property) || !desired.has(property)) return;
+    emitted.add(property);
+    order.push(property);
+  };
+  for (const property of baseOrder) {
+    for (const restored of before.get(property) ?? []) emit(restored);
+    emit(property);
+    for (const restored of after.get(property) ?? []) emit(restored);
+  }
+  for (const property of trailing) emit(property);
+  for (const property of desired.keys()) emit(property);
 
-  for (const property of currentOrder) style.removeProperty(property);
-  for (const property of order) {
-    const declaration = desired.get(property)!;
-    style.setProperty(property, declaration.value, declaration.priority);
+  try {
+    rewriteInlineStyle(style, order, desired);
+  } catch (error) {
+    rethrowAfterInlineRollback(
+      style,
+      inlineBefore,
+      error,
+      "Cornerfill native declaration restoration and inline-style rollback failed",
+    );
   }
 }
 

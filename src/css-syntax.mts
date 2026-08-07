@@ -67,6 +67,43 @@ function cssSyntaxEscapeEnd(source: string, start: number): number {
   return cssEscapeEnd(source, start);
 }
 
+export function replaceCssCommentsWithWhitespace(source: string): string {
+  const firstComment = source.indexOf("/*");
+  if (firstComment < 0) return source;
+
+  let result = "";
+  let copiedThrough = 0;
+  let quote: "\"" | "'" | null = null;
+  for (let index = 0; index < source.length;) {
+    const character = source[index]!;
+    if (character === "\\") {
+      index = cssSyntaxEscapeEnd(source, index);
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    if (character !== "/" || source[index + 1] !== "*") {
+      index += 1;
+      continue;
+    }
+
+    result += `${source.slice(copiedThrough, index)} `;
+    const end = source.indexOf("*/", index + 2);
+    if (end < 0) return result;
+    index = end + 2;
+    copiedThrough = index;
+  }
+  return `${result}${source.slice(copiedThrough)}`;
+}
+
 function cssNameStart(character: string): boolean {
   const codePoint = character.codePointAt(0);
   return /[a-z_]/iu.test(character) || (codePoint !== undefined && codePoint >= 0x80);
