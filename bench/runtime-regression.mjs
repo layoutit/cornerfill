@@ -138,32 +138,97 @@ await test("compiled CSS drives the production runtime without source reconstruc
   const report = await compiled.ready;
   const entry = compiled.explain(element);
   const expectedBackend = backend === "static-data-url" ? "native-corner-shape" : backend;
+  const compiledShapeParameter = (scope, target) => {
+    const geometry = scope.explain(target)?.geometry;
+    if (geometry) return geometry.shapeParameters[0];
+    const computed = getComputedStyle(target);
+    const value = [
+      "--cornerfill-corner-shape",
+      "--cornerfill-corner-top-left-shape",
+      "--cornerfill-corner-start-start-shape",
+    ].map((property) => computed.getPropertyValue(property).trim())
+      .find((candidate) => candidate && candidate !== "__cornerfill_unset__");
+    return value === "scoop" ? -1 : value === "bevel" ? 0 : null;
+  };
   assert(report.manifests === 2, `compiled manifest count was ${report.manifests}`);
   assert(report.candidates === 1, `compiled candidate count was ${report.candidates}`);
   assert(report.attached === 1, `compiled attachment count was ${report.attached}`);
   assert(entry?.status === "active", `compiled entry was not active: ${JSON.stringify(entry)}`);
   assert(entry.backend === expectedBackend, `compiled entry selected ${entry.backend}, expected ${expectedBackend}`);
 
+  const localStyle = "display:block;width:36px;height:28px;border-radius:12px;background:rgb(220,40,40)";
+  const localGood = document.createElement("div");
+  localGood.className = "cornerfill-compiled-local";
+  localGood.style.cssText = localStyle;
+  const localZero = document.createElement("div");
+  localZero.className = "cornerfill-compiled-local";
+  localZero.style.cssText = `${localStyle};height:0`;
+  const localRadius = document.createElement("div");
+  localRadius.className = "cornerfill-compiled-local";
+  localRadius.style.cssText = `${localStyle};border-radius:0`;
+  const caseSensitive = document.createElement("div");
+  caseSensitive.className = "cornerfill-compiled-case";
+  caseSensitive.style.cssText = `${localStyle};--Shape:bevel`;
+  document.body.append(localGood, localZero, localRadius, caseSensitive);
+  await waitFor(() => compiled.explain(localGood)?.status === "active",
+    "a zero-size sibling blocked a valid compiled target");
+  assert(compiled.explain().status === "active" && compiled.explain(localZero) === null,
+    "a zero-size target failed closed its compiled root");
+  localZero.style.height = "28px";
+  await waitFor(() => compiled.explain(localZero)?.status === "active",
+    "a measurable potential target did not activate");
+  assert(compiled.explain(localRadius) === null,
+    "a zero-radius potential target attached before its radius changed");
+  localRadius.style.borderRadius = "12px";
+  await waitFor(() => compiled.explain(localRadius)?.status === "active",
+    "an inline radius change did not activate a potential target");
+  await waitFor(() => compiled.explain(caseSensitive)?.status === "active",
+    "a case-sensitive custom-property carrier did not attach");
+  caseSensitive.setAttribute("style", `${localStyle};--shape:bevel`);
+  await waitFor(() => compiled.explain(caseSensitive) === null,
+    "a case-only custom-property replacement retained a stale surface");
+  caseSensitive.setAttribute("style", `${localStyle};--Shape:scoop`);
+  await waitFor(() => compiled.explain(caseSensitive)?.status === "active"
+    && getComputedStyle(caseSensitive)
+      .getPropertyValue("--cornerfill-corner-shape").trim() === "scoop",
+  "a case-sensitive custom-property restoration did not reattach");
+
+  const logicalParent = document.createElement("section");
+  logicalParent.dir = "rtl";
+  const logicalPotential = document.createElement("div");
+  logicalPotential.className = "cornerfill-compiled-logical-potential";
+  logicalParent.append(logicalPotential);
+  document.body.append(logicalParent);
+  await new Promise(requestAnimationFrame);
+  assert(compiled.explain(logicalPotential) === null,
+    "a direction-dependent potential target attached on a zero-radius corner");
+  logicalParent.dir = "ltr";
+  await waitFor(() => compiled.explain(logicalPotential)?.status === "active",
+    "an ancestor direction change did not activate a potential target");
+
   element.classList.add("cornerfill-compiled-reset");
   let changed = await compiled.refresh();
-  assert(changed.attached === 0, "compiled all: unset retained paint ownership");
   assert(compiled.explain(element) === null, "compiled all: unset retained a runtime entry");
   element.classList.remove("cornerfill-compiled-reset");
   changed = await compiled.refresh();
-  assert(changed.attached === 1, "compiled shape did not reattach after all reset removal");
+  assert(compiled.explain(element)?.status === "active",
+    "compiled shape did not reattach after all reset removal");
 
   element.classList.add("cornerfill-compiled-round");
   changed = await compiled.refresh();
-  assert(changed.attached === 0, "compiled corner-shape: initial retained paint ownership");
+  assert(compiled.explain(element) === null,
+    "compiled corner-shape: initial retained paint ownership");
   element.classList.remove("cornerfill-compiled-round");
   await compiled.refresh();
 
   element.classList.add("cornerfill-compiled-important-shape", "cornerfill-compiled-reset");
   changed = await compiled.refresh();
-  assert(changed.attached === 1, "normal all reset overrode an important shape");
+  assert(compiled.explain(element)?.status === "active",
+    "normal all reset overrode an important shape");
   element.classList.add("cornerfill-compiled-important-reset");
   changed = await compiled.refresh();
-  assert(changed.attached === 0, "important all reset did not override an important shape");
+  assert(compiled.explain(element) === null,
+    "important all reset did not override an important shape");
   element.classList.remove(
     "cornerfill-compiled-important-shape",
     "cornerfill-compiled-important-reset",
@@ -173,14 +238,16 @@ await test("compiled CSS drives the production runtime without source reconstruc
 
   element.classList.add("cornerfill-compiled-variable-reset");
   changed = await compiled.refresh();
-  assert(changed.attached === 0, "safe all: var(...unset) retained paint ownership");
+  assert(compiled.explain(element) === null,
+    "safe all: var(...unset) retained paint ownership");
   assert(changed.errors.length === 0, `safe all substitution failed: ${JSON.stringify(changed.errors)}`);
   element.classList.remove("cornerfill-compiled-variable-reset");
   await compiled.refresh();
 
   element.classList.add("cornerfill-compiled-logical");
   changed = await compiled.refresh();
-  assert(changed.attached === 0, "mixed physical/logical shape retained ambiguous ownership");
+  assert(compiled.explain(element) === null,
+    "mixed physical/logical shape retained ambiguous ownership");
   assert(changed.errors.some((message) => message.includes("physical and logical")),
     `mixed physical/logical shape was not diagnosed: ${JSON.stringify(changed.errors)}`);
   element.classList.remove("cornerfill-compiled-logical");
@@ -358,6 +425,13 @@ await test("compiled CSS drives the production runtime without source reconstruc
   variableShapeParent.style.removeProperty("--cornerfill-compiled-dynamic-shape");
   await waitFor(() => compiled.explain(variableShape) === null,
     "removing an inherited inline custom property did not detach its candidate");
+  variableShapeParent.style.setProperty(
+    "--cornerfill-compiled-dynamic-shape",
+    "var(--cornerfill-compiled-indirect-shape)",
+  );
+  await waitFor(() => compiled.explain(variableShape)?.status === "active"
+    && compiledShapeParameter(compiled, variableShape) === 0,
+    "an inline var() edge did not resolve through transformed CSS");
 
   const added = document.createElement("div");
   added.className = "cornerfill-compiled-dynamic active";
@@ -394,6 +468,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await waitFor(() => compiled.explain(media)?.status === "active", "compiled media attachment");
   await waitFor(() => compiled.explain(conditional)?.status === "active",
     "stylesheet-level media condition did not discover its manifest on activation");
+  await waitFor(() => compiledShapeParameter(compiled, variableShape) === -1,
+    "an inline var() edge missed its transformed media dependency");
   await waitFor(() => /20,\s*40,\s*220/u.test(compiledPaintColor(crossFile)),
     "metadata-only custom property media did not repaint its cross-file target");
   mediaDriver.stage = "compiled-media-light-ready";
@@ -404,6 +480,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
   ));
   await waitFor(() => compiled.explain(conditional) === null,
     "stylesheet-level media condition did not detach on deactivation");
+  await waitFor(() => compiledShapeParameter(compiled, variableShape) === 0,
+    "an inline var() edge did not restore after media deactivation");
   await waitFor(() => /(?:220,\s*40,\s*40|red)/u.test(
     compiledPaintColor(crossFile)
   ), "metadata-only custom property media did not restore its cross-file target");
@@ -523,7 +601,10 @@ await test("compiled CSS drives the production runtime without source reconstruc
   ]);
   const theme = document.createElement("section");
   const shadowHost = host(theme);
-  shadowHost.classList.add("cornerfill-compiled-shared-host");
+  shadowHost.classList.add(
+    "cornerfill-compiled-shared-host",
+    "cornerfill-compiled-inherited-host",
+  );
   const shadow = shadowHost.attachShadow({ mode: "open" });
   const shadowStyle = document.createElement("style");
   shadowStyle.textContent = shadowCss;
@@ -533,7 +614,9 @@ await test("compiled CSS drives the production runtime without source reconstruc
   shadowHostChild.className = "cornerfill-compiled-shadow-host-child";
   const shadowContext = document.createElement("div");
   shadowContext.className = "cornerfill-compiled-shadow-context";
-  shadow.append(shadowStyle, shadowElement, shadowHostChild, shadowContext);
+  const shadowInherited = document.createElement("div");
+  shadowInherited.className = "cornerfill-compiled-shadow-inherited";
+  shadow.append(shadowStyle, shadowElement, shadowHostChild, shadowContext, shadowInherited);
   document.body.append(theme);
   await waitFor(() => compiled.explain(shadowHost)?.status === "active",
     "document scope did not claim the shared shadow host");
@@ -562,6 +645,9 @@ await test("compiled CSS drives the production runtime without source reconstruc
   assert(shadowScope.explain(shadowHostChild) === null, "inactive compiled :host() attached early");
   assert(shadowScope.explain(shadowContext) === null,
     "inactive compiled :host-context() attached early");
+  assert(shadowScope.explain(shadowInherited)?.status === "active"
+    && compiledShapeParameter(shadowScope, shadowInherited) === 0,
+    "a registered root missed an inherited outer custom-property definition");
   assert(!unregisteredElement.hasAttribute("data-cornerfill-owned"),
     "registered-root discovery leaked into another shadow root");
 
@@ -585,6 +671,18 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await waitFor(() => !shadowHost.hasAttribute(hostContextMarker)
     && shadowScope.explain(shadowContext) === null,
   "compiled :host-context() accepted an external marker while its context was false");
+
+  const inheritedMediaDriver = { stage: "compiled-media-dark-ready" };
+  globalThis.__CORNERFILL_POINTER_DRIVER__ = inheritedMediaDriver;
+  await waitFor(() => inheritedMediaDriver.stage === "compiled-media-dark-driven",
+    "compiled inherited dark-media driver");
+  await waitFor(() => compiledShapeParameter(shadowScope, shadowInherited) === -1,
+    "a registered root missed an inherited outer media dependency");
+  inheritedMediaDriver.stage = "compiled-media-light-ready";
+  await waitFor(() => inheritedMediaDriver.stage === "compiled-media-light-driven",
+    "compiled inherited light-media driver");
+  await waitFor(() => compiledShapeParameter(shadowScope, shadowInherited) === 0,
+    "a registered root did not restore an inherited outer media dependency");
 
   const shadowManifestProperty = Array.from({ length: getComputedStyle(shadowHost).length },
     (_value, index) => getComputedStyle(shadowHost).item(index))
@@ -633,6 +731,18 @@ await test("compiled CSS drives the production runtime without source reconstruc
   shadowLink.media = "all";
   await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
     "compiled shadow link media activation");
+  shadowLink.removeAttribute("rel");
+  await waitFor(() => shadowScope.explain(shadowElement) === null,
+    "compiled shadow link rel deactivation");
+  shadowLink.rel = "stylesheet";
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow link rel activation");
+  shadowLink.type = "text/plain";
+  await waitFor(() => shadowScope.explain(shadowElement) === null,
+    "compiled shadow link type deactivation");
+  shadowLink.type = "text/css";
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow link type activation");
   shadowLink.remove();
 
   const adoptedBase = new CSSStyleSheet();
@@ -664,6 +774,38 @@ await test("compiled CSS drives the production runtime without source reconstruc
   assert(shadowScope.explain(shadowElement)?.status === "active",
     "explicit refresh did not restore replaced compiled CSS");
 
+  const adoptedConditional = new CSSStyleSheet({
+    media: "(prefers-color-scheme: dark)",
+  });
+  adoptedConditional.replaceSync(shadowCss);
+  shadow.adoptedStyleSheets = [adoptedConditional];
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement) === null,
+    "an inactive constructed-sheet media condition attached early");
+  const adoptedMediaDriver = { stage: "compiled-media-dark-ready" };
+  globalThis.__CORNERFILL_POINTER_DRIVER__ = adoptedMediaDriver;
+  await waitFor(() => adoptedMediaDriver.stage === "compiled-media-dark-driven",
+    "compiled adopted dark-media driver");
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "constructed-sheet media activation was not observed");
+  adoptedMediaDriver.stage = "compiled-media-light-ready";
+  await waitFor(() => adoptedMediaDriver.stage === "compiled-media-light-driven",
+    "compiled adopted light-media driver");
+  await waitFor(() => shadowScope.explain(shadowElement) === null,
+    "constructed-sheet media deactivation was not observed");
+  adoptedConditional.media.mediaText = "all";
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "explicit refresh missed a CSSStyleSheet.media edit");
+  adoptedConditional.media.mediaText = "not all";
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement) === null,
+    "explicit refresh retained an inactive CSSStyleSheet.media edit");
+  shadow.adoptedStyleSheets = [adoptedBase];
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "compiled adopted sheet did not recover after media testing");
+
   const disconnectedHost = document.createElement("section");
   const disconnectedRoot = disconnectedHost.attachShadow({ mode: "open" });
   const disconnectedStyle = document.createElement("style");
@@ -681,17 +823,25 @@ await test("compiled CSS drives the production runtime without source reconstruc
 
   const outerHost = document.createElement("section");
   const outerRoot = outerHost.attachShadow({ mode: "open" });
+  document.body.append(outerHost);
+  const outerScope = compiled.registerRoot(outerRoot);
+  await outerScope.ready;
   const innerHost = document.createElement("article");
-  outerRoot.append(innerHost);
   const innerRoot = innerHost.attachShadow({ mode: "open" });
   const innerStyle = document.createElement("style");
   innerStyle.textContent = shadowCss;
+  const nestedElement = document.createElement("div");
+  nestedElement.className = "cornerfill-compiled-shadow";
   const nestedContext = document.createElement("div");
   nestedContext.className = "cornerfill-compiled-shadow-context";
-  innerRoot.append(innerStyle, nestedContext);
-  document.body.append(outerHost);
+  innerRoot.append(innerStyle, nestedElement, nestedContext);
   const innerScope = compiled.registerRoot(innerRoot);
   await innerScope.ready;
+  assert(innerScope.explain(nestedElement) === null,
+    "a disconnected nested root attached before connection");
+  outerRoot.append(innerHost);
+  await waitFor(() => innerScope.explain(nestedElement)?.status === "active",
+    "a disconnected root inserted into a registered outer root was not rebound");
   assert(innerScope.explain(nestedContext) === null,
     "nested :host-context() attached before its document ancestor matched");
   document.body.classList.add("cornerfill-compiled-shadow-theme");
@@ -701,9 +851,28 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await waitFor(() => innerScope.explain(nestedContext) === null,
     "nested :host-context() missed outer-document deactivation");
   innerScope.destroy();
+  outerScope.destroy();
   disconnectedScope.destroy();
   outerHost.remove();
   disconnectedHost.remove();
+
+  const refreshFailure = document.createElement("style");
+  refreshFailure.textContent = `:root{${manifestProperty}:"malformed"!important}`;
+  document.head.append(refreshFailure);
+  await waitFor(() => compiled.explain().status === "blocked-recoverable",
+    "compiled refresh-all failure fixture did not block the document scope");
+  const shadowReadsBeforeFailure = shadowScope.explain().counters.manifestReads;
+  let refreshFailureError;
+  try { await compiled.refresh(); } catch (error) { refreshFailureError = error; }
+  assert(refreshFailureError instanceof AggregateError,
+    "controller-wide refresh did not aggregate a failing scope");
+  assert(shadowScope.explain().counters.manifestReads > shadowReadsBeforeFailure,
+    "controller-wide refresh stopped before a later healthy scope");
+  refreshFailure.remove();
+  await compiled.refresh();
+  assert(compiled.explain().status === "active"
+    && shadowScope.explain(shadowElement)?.status === "active",
+  "controller-wide refresh did not recover its scopes");
 
   shadowScope.destroy();
   assert(!shadowElement.hasAttribute("data-cornerfill-owned"),
@@ -791,7 +960,35 @@ await test("compiled CSS drives the production runtime without source reconstruc
   const budgetReport = await budgetController.ready;
   assert(budgetReport.candidates === 1 && budgetReport.potentialCandidates > 512,
     "an inactive conditional selector still consumed the active candidate budget");
+  budgetFrame.width = "40";
+  await waitFor(() => budgetDocument.defaultView.matchMedia("(max-width: 50px)").matches,
+    "compiled budget iframe media activation");
+  await waitFor(() => budgetController.explain().status === "blocked-recoverable",
+    () => `a conditional budget failure did not fail closed: ${JSON.stringify(
+      budgetController.explain(),
+    )}`);
+  budgetFrame.width = "300";
+  await waitFor(() => !budgetDocument.defaultView.matchMedia("(max-width: 50px)").matches,
+    "compiled budget iframe media deactivation");
+  await waitFor(() => budgetController.explain().status === "active"
+    && budgetController.explain().candidates === 1,
+  "nested media deactivation did not recover a failed compiled scope");
   budgetController.destroy();
+
+  const potentialLimited = installCornerfillCompiled({
+    document: budgetDocument,
+    backend,
+    staticFallback: backend === "static-data-url",
+    maxCandidateElements: 1,
+    maxPotentialCandidates: 512,
+  });
+  await potentialLimited.ready.then(
+    () => { throw new Error("compiled potential-candidate budget did not fail closed"); },
+    () => undefined,
+  );
+  assert(potentialLimited.explain().errors.some((message) => message.includes("maximum potential")),
+    "compiled potential-candidate budget was not diagnosed");
+  potentialLimited.destroy();
   budgetFrame.remove();
 
   const traversalLimited = installCornerfillCompiled({
@@ -821,6 +1018,11 @@ await test("compiled CSS drives the production runtime without source reconstruc
   assert(candidateLimited.explain().errors.some((message) => message.includes("maximum candidate")),
     "compiled candidate budget was not diagnosed");
   candidateLimited.destroy();
+  localGood.remove();
+  localZero.remove();
+  localRadius.remove();
+  caseSensitive.remove();
+  logicalParent.remove();
   element.remove();
   parent.remove();
   layered.remove();

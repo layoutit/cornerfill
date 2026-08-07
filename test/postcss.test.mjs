@@ -227,6 +227,12 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
     ["@container (width > 20px) { .card { corner-shape: bevel } }", /dynamic @container/u],
     ["@scope (.shell) { > .card { corner-shape: bevel } }", /relative selectors/u],
     ["@keyframes morph { from { corner-shape: bevel } }", /inside keyframes/u],
+    ["@keyframes morph { to { border-radius: 12px } }", /fallback-relevant border-radius inside keyframes/u],
+    [":scope .card { corner-shape: bevel }", /unsupported stylesheet scoping semantics/u],
+    [".card:focus-visible { corner-shape: bevel }", /cannot observe selector state: focus-visible/u],
+    ["@media all { @layer theme { .card { corner-shape: bevel } } }", /conditional cascade-layer ordering/u],
+    ["@media all { @property --shape { syntax: '*'; inherits: false; initial-value: round } }", /conditional @property registration/u],
+    ["@property --cornerfill-corner-top-left-shape { syntax: '<color>'; inherits: true; initial-value: red } .card { corner-shape: bevel }", /incompatible descriptors/u],
     [":host-context(.theme .wrapper) .card { corner-shape: bevel }", /one compound selector/u],
     [".parent { & .card { corner-shape: bevel } }", /after the nesting transform/u],
   ]) {
@@ -317,5 +323,15 @@ test("reserved manifest-looking declarations fail instead of disabling compilati
       { from: "forged-carrier.css" },
     ),
     /authored or orphaned private carrier/u,
+  );
+  await assert.rejects(
+    postcss([cornerfillPostcss()]).process(`
+@property --cornerfill-corner-top-left-shape {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: red;
+}
+`, { from: "conflicting-registration.css" }),
+    /incompatible descriptors/u,
   );
 });

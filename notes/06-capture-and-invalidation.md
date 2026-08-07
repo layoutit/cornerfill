@@ -45,10 +45,12 @@ For prepared renderers, direct invalidation is better: the renderer already know
 
 `cornerfill/postcss` inserts private shape carriers beside authored
 `corner-shape` declarations and `all` resets while retaining the native CSS. It
-also emits root-local manifests containing active-candidate selectors,
-metadata-only paint invalidation, media and host-context dependencies, and a
-cross-chunk custom-property graph. Definitions are activated only when a shape
-or owned-paint value reaches them.
+also emits manifests containing root-local candidate selectors, metadata-only
+paint invalidation, media and host-context dependencies, and a cross-chunk
+custom-property graph. Registered descendant roots consume relevant definition
+metadata from their registered ancestor chain. Definitions are activated only
+when a shape or owned-paint value reaches them; an inline custom-property
+`var()` edge conservatively includes transformed definitions from that chain.
 
 Because the carrier stays inside the authored rule, the browser owns
 specificity, inheritance, variables, source order, media activation, layers,
@@ -58,23 +60,28 @@ or stylesheet-relative URL rewriting.
 
 The plugin covers the implemented shape shorthand and physical/logical
 longhands. It must run after `@import` expansion and nesting transforms. It
-rejects shape/reset declarations in keyframes, dynamic container conditions,
-pseudo-element targets, namespace-qualified selectors, unobservable selector
-states, and scoped relative selectors that the `0.0.1` manifest cannot express.
+rejects fallback-relevant declarations in keyframes, dynamic container
+conditions, conditional layer ordering, conditional `@property`
+registrations, conflicting private registrations, pseudo-element targets,
+namespace-qualified selectors, unobservable selector states, and top-level or
+scoped relative selectors that the `0.0.1` manifest cannot express.
 
 Compiled observation is transactional: unchanged media subscriptions survive a
 manifest refresh, observation is rebound before asynchronous paint attachment,
-and a failed root retains only the stylesheet/owner signals needed to recover.
-Registered shadow roots observe their complete shadow-including containing-root
-chain, including connection and host migration. A failed scope vetoes shared
-handles until its manifest succeeds again.
+and a failed root retains the stylesheet, owner, and manifest media signals
+needed to recover. Non-measurable targets remain local pending candidates.
+Registered shadow roots form a containing-root hierarchy, observe connection
+and host migration, inherit transformed dependency metadata, and propagate
+refreshes. A failed scope vetoes shadow-including descendants until its manifest
+succeeds again.
 
 All CSS that can affect a compiled target must be transformed, including CSS
 prepared for an open shadow root or generated before insertion.
-`adoptedStyleSheets` membership changes and paint-only CSSOM mutations require
-`await cornerfill.refresh()` because they do not produce a DOM mutation. A
-CSSOM replacement that changes shape declarations must itself contain
-plugin-transformed CSS; refresh never compiles source in the browser.
+`adoptedStyleSheets` membership changes, paint-only CSSOM mutations, and direct
+`CSSStyleSheet.media.mediaText` changes require `await cornerfill.refresh()`
+because they do not produce a dependable DOM mutation. A CSSOM replacement that
+changes shape declarations must itself contain plugin-transformed CSS; refresh
+never compiles source in the browser.
 
 ### Runtime stylesheet recovery: experimental
 
@@ -109,10 +116,12 @@ PolyCSS should attach prepared entries explicitly and notify changed atlas field
 
 Compiled mode uses narrowly scoped observers:
 
-- one `ResizeObserver` for controlled elements;
+- one `ResizeObserver` for controlled elements plus bounded non-round potential
+  targets whose measurement can activate fallback;
 - one `MutationObserver` per registered root for child-list and relevant attribute changes;
 - explicit registration for open ShadowRoots;
-- explicit `refresh()` after adopted/constructed-sheet membership or CSSOM changes;
+- explicit `refresh()` after adopted/constructed-sheet membership or direct
+  CSSOM declaration/media-list changes;
 - document-level animation/transition event listeners that only touch known entries;
 - `matchMedia`/viewport hooks only for conditions that affect captured rules;
 - a DPR watcher that detects actual resolution changes.

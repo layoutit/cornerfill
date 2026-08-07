@@ -271,7 +271,8 @@ export function validCssLayerName(source: string): boolean {
 }
 
 function normalizedProperty(value: string): string {
-  return wholeCssIdentifier(value)?.value.toLowerCase() ?? "";
+  const property = wholeCssIdentifier(value)?.value ?? "";
+  return property.startsWith("--") ? property : property.toLowerCase();
 }
 
 type CssSyntaxVisitor = (

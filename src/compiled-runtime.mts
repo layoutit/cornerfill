@@ -11,10 +11,12 @@ import {
   AUTO_UNSET,
   COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX,
   COMPILED_MANIFEST_PROPERTY_PREFIX,
+  SHAPE_CARRIERS,
   compiledCarrierProblem,
   compiledManifestPropertyName,
   hasResolvedShapeCarrier,
   parseCompiledManifestCssValue,
+  resolvedCarrierValue,
   serializeCompiledManifest,
 } from "./carrier-contract.mjs";
 import type {
@@ -24,10 +26,14 @@ import type {
 } from "./carrier-contract.mjs";
 import { compiledSelectorPlan } from "./compiled-selectors.mjs";
 import type { CompiledHostContext } from "./compiled-selectors.mjs";
-import { cssDeclarationSignature } from "./css-syntax.mjs";
+import { cssDeclarations, cssDeclarationSignature, cssFunctions } from "./css-syntax.mjs";
+import { standardPropertyAffectsOwnedPaint } from "./paint-properties.mjs";
 import { mergeSelectorObservation, selectorObservation } from "./selector-metadata.mjs";
 import { observeDisabledState } from "./cssom-broker.mjs";
-import { isStylesheetSourceElement } from "./stylesheet-elements.mjs";
+import {
+  isStylesheetSourceElement,
+  mutationTouchesStylesheetSource,
+} from "./stylesheet-elements.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
 type RuntimeDocument = Document & Readonly<{ defaultView: RuntimeWindow }>;
@@ -55,6 +61,10 @@ export type CornerfillCompiledCounters = Readonly<CompiledCounters>;
 export interface CornerfillCompiledOptions extends CornerfillInstallOptions {
   readonly autoObserve?: boolean | undefined;
   readonly maxCandidateElements?: number | undefined;
+  readonly maxCustomPropertyDefinitions?: number | undefined;
+  readonly maxManifestBytes?: number | undefined;
+  readonly maxManifestRecords?: number | undefined;
+  readonly maxPotentialCandidates?: number | undefined;
   readonly maxScannedElements?: number | undefined;
   readonly onError?: ((error: unknown, context: string) => void) | undefined;
 }
@@ -66,6 +76,10 @@ export interface CornerfillCompiledExplanation {
   readonly errors: readonly string[];
   readonly limits: Readonly<{
     maxCandidateElements: number;
+    maxCustomPropertyDefinitions: number;
+    maxManifestBytes: number;
+    maxManifestRecords: number;
+    maxPotentialCandidates: number;
     maxScannedElements: number;
   }>;
   readonly manifests: number;
@@ -123,12 +137,14 @@ interface ScanRoot {
 }
 
 interface ScanResult {
+  readonly errors: readonly string[];
   readonly inspections: ReadonlyMap<HTMLElement, Readonly<{
     requiresFallback: boolean;
     values: Readonly<Record<string, string>>;
   }>>;
   readonly matched: ReadonlySet<HTMLElement>;
   readonly rawMatched: ReadonlySet<HTMLElement>;
+  readonly resizeMatched: ReadonlySet<HTMLElement>;
   readonly visited: ReadonlySet<HTMLElement>;
 }
 
@@ -141,16 +157,24 @@ interface CompiledScopeInternal {
   readonly candidates: Set<HTMLElement>;
   readonly counters: CompiledCounters;
   readonly handle: CornerfillCompiledScopeHandle;
-  readonly performRefresh: () => Promise<Readonly<CornerfillCompiledExplanation>>;
+  readonly localManifests: () => readonly Readonly<CornerfillCompiledManifest>[];
+  readonly performRefresh: (notifyDependents?: boolean) => Promise<Readonly<CornerfillCompiledExplanation>>;
   readonly destroyLocal: () => void;
   readonly contains: (element: HTMLElement) => boolean;
+  readonly mayInfluence: (element: HTMLElement) => boolean;
   readonly mayStyle: (element: HTMLElement) => boolean;
+  readonly root: CompiledRoot;
+  readonly scheduleManifestRefresh: () => void;
 }
 
 const DEFAULT_MAX_CANDIDATE_ELEMENTS = 512;
+const DEFAULT_MAX_CUSTOM_PROPERTY_DEFINITIONS = 100_000;
+const DEFAULT_MAX_MANIFEST_BYTES = 1024 * 1024;
+const DEFAULT_MAX_MANIFEST_RECORDS = 512;
+const DEFAULT_MAX_POTENTIAL_CANDIDATES = 100_000;
 const DEFAULT_MAX_SCANNED_ELEMENTS = 100_000;
 const STYLESHEET_ATTRIBUTES = Object.freeze([
-  "disabled", "href", "media", "rel", "title",
+  "disabled", "href", "media", "rel", "title", "type",
 ]);
 const EMPTY_STATE: Readonly<CompiledManifestState> = Object.freeze({
   hostCandidate: false,
@@ -254,6 +278,113 @@ function inlineCustomPropertiesChanged(record: MutationRecord): boolean {
     !== inlineCustomPropertySignature(target?.getAttribute("style"));
 }
 
+function inlineCustomVariableSignature(source: unknown): string {
+  return cssDeclarations(source)
+    .filter(({ property, value }) => property.startsWith("--")
+      && cssFunctions(value).some(({ name }) => name === "var"))
+    .map(({ property, value }) => `${property}:${value}`)
+    .join(";");
+}
+
+function inlineCustomVariableEdgesChanged(record: MutationRecord): boolean {
+  const target = record.target.nodeType === 1 ? record.target as Element : null;
+  return inlineCustomVariableSignature(record.oldValue)
+    !== inlineCustomVariableSignature(target?.getAttribute("style"));
+}
+
+function scopeHasInlineCustomVariableEdge(root: CompiledRoot, view: RuntimeWindow): boolean {
+  const hasEdge = (element: Element): boolean => (
+    inlineCustomVariableSignature(element.getAttribute("style")) !== ""
+  );
+  const container = root instanceof view.Document ? root.documentElement : root;
+  if (container instanceof view.Element && hasEdge(container)) return true;
+  for (const element of container.querySelectorAll("[style]")) {
+    if (hasEdge(element)) return true;
+  }
+  if (root instanceof view.Document) return false;
+  let ancestor: Element | null = root.host;
+  while (ancestor) {
+    if (hasEdge(ancestor)) return true;
+    if (ancestor.parentElement) {
+      ancestor = ancestor.parentElement;
+      continue;
+    }
+    const containingRoot = ancestor.getRootNode();
+    ancestor = containingRoot instanceof view.ShadowRoot ? containingRoot.host : null;
+  }
+  return false;
+}
+
+function inlineOwnedPaintChanged(record: MutationRecord): boolean {
+  const target = record.target.nodeType === 1 ? record.target as Element : null;
+  const signature = (source: unknown) => cssDeclarationSignature(
+    source,
+    standardPropertyAffectsOwnedPaint,
+  );
+  return signature(record.oldValue) !== signature(target?.getAttribute("style"));
+}
+
+function inlineFallbackDecisionChanged(record: MutationRecord): boolean {
+  const target = record.target.nodeType === 1 ? record.target as Element : null;
+  const signature = (source: unknown) => cssDeclarationSignature(source, (property) => (
+    property === "all"
+    || property === "direction"
+    || property === "font"
+    || property === "font-size"
+    || property === "text-orientation"
+    || property === "writing-mode"
+    || (property.startsWith("border-") && property.endsWith("-radius"))
+  ));
+  return signature(record.oldValue) !== signature(target?.getAttribute("style"));
+}
+
+function inlineInheritedPaintChanged(record: MutationRecord): boolean {
+  const target = record.target.nodeType === 1 ? record.target as Element : null;
+  const signature = (source: unknown) => cssDeclarationSignature(source, (property) => (
+    property === "color"
+    || property === "color-scheme"
+    || property === "direction"
+    || property === "forced-color-adjust"
+    || property === "image-rendering"
+    || property === "line-height"
+    || property === "text-orientation"
+    || property === "visibility"
+    || property === "writing-mode"
+    || property === "font"
+    || property.startsWith("font-")
+  ));
+  return signature(record.oldValue) !== signature(target?.getAttribute("style"));
+}
+
+function computedCarrierValues(
+  view: RuntimeWindow,
+  element: HTMLElement,
+): Readonly<Record<string, string>> {
+  const computed = view.getComputedStyle(element);
+  return Object.freeze(Object.fromEntries(AUTO_CARRIERS.map((property) => (
+    [property, computed.getPropertyValue(property)]
+  ))));
+}
+
+function pendingMeasurement(error: unknown): boolean {
+  return error instanceof RangeError
+    && error.message === "Cornerfill requires a measurable non-zero border box";
+}
+
+function carrierMayNeedShapedGeometry(values: Readonly<Record<string, string>>): boolean {
+  return SHAPE_CARRIERS.some((property) => {
+    const value = resolvedCarrierValue(values, property);
+    return Boolean(value && !/^round(?:\s+round){0,3}$/iu.test(value));
+  });
+}
+
+function autoDirectionAncestor(element: Element | null): Element | null {
+  for (let current = element; current; current = current.parentElement) {
+    if (current.getAttribute("dir")?.trim().toLowerCase() === "auto") return current;
+  }
+  return null;
+}
+
 function minimalScanRoots(roots: Iterable<Readonly<ScanRoot>>): readonly Readonly<ScanRoot>[] {
   const direct = new Set<Element>();
   const subtrees = new Set<Element>();
@@ -284,15 +415,36 @@ function minimalScanRoots(roots: Iterable<Readonly<ScanRoot>>): readonly Readonl
 function compiledManifests(
   view: RuntimeWindow,
   target: Element,
+  limits: Readonly<{
+    maxCustomPropertyDefinitions: number;
+    maxManifestBytes: number;
+    maxManifestRecords: number;
+  }>,
 ): readonly Readonly<CornerfillCompiledManifest>[] {
   const computed = view.getComputedStyle(target);
   const manifests = new Map<string, Readonly<CornerfillCompiledManifest>>();
+  const encoder = new view.TextEncoder();
+  let bytes = 0;
+  let customPropertyDefinitions = 0;
   for (let index = 0; index < computed.length; index += 1) {
     const property = computed.item(index);
     if (!property.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) continue;
     const value = computed.getPropertyValue(property).trim();
     if (!value || value === AUTO_UNSET) continue;
+    bytes += encoder.encode(value).byteLength;
+    if (bytes > limits.maxManifestBytes) {
+      throw new RangeError(`compiled root exceeds the maximum manifest byte count of ${limits.maxManifestBytes}`);
+    }
+    if (manifests.size >= limits.maxManifestRecords) {
+      throw new RangeError(`compiled root exceeds the maximum manifest record count of ${limits.maxManifestRecords}`);
+    }
     const manifest = parseCompiledManifestCssValue(value);
+    customPropertyDefinitions += manifest.customProperties.length;
+    if (customPropertyDefinitions > limits.maxCustomPropertyDefinitions) {
+      throw new RangeError(
+        `compiled root exceeds the maximum custom-property definition count of ${limits.maxCustomPropertyDefinitions}`,
+      );
+    }
     if (property !== compiledManifestPropertyName(serializeCompiledManifest(manifest))) {
       throw new TypeError(`compiled manifest property does not match its payload: ${property}`);
     }
@@ -304,43 +456,70 @@ function compiledManifests(
 function manifestState(
   document: RuntimeDocument,
   root: CompiledRoot,
-  manifests: readonly Readonly<CornerfillCompiledManifest>[],
+  localManifests: readonly Readonly<CornerfillCompiledManifest>[],
+  inheritedManifests: readonly Readonly<CornerfillCompiledManifest>[],
 ): Readonly<CompiledManifestState> {
   const authoredSelectors = Object.freeze([
-    ...new Set(manifests.flatMap(({ candidateSelectors }) => candidateSelectors)),
+    ...new Set(localManifests.flatMap(({ candidateSelectors }) => candidateSelectors)),
   ].sort());
   const plan = compiledSelectorPlan(authoredSelectors);
-  const customProperties = new Map<string, CornerfillCompiledManifest["customProperties"][number][]>();
+  const manifests = [...localManifests, ...inheritedManifests];
+  const localManifestSet = new Set(localManifests);
+  const customProperties = new Map<string, {
+    readonly local: boolean;
+    readonly record: CornerfillCompiledManifest["customProperties"][number];
+  }[]>();
   for (const manifest of manifests) {
     for (const record of manifest.customProperties) {
       const definitions = customProperties.get(record.name) ?? [];
-      definitions.push(record);
+      definitions.push({ local: localManifestSet.has(manifest), record });
       customProperties.set(record.name, definitions);
     }
   }
   const reachable = new Set<string>();
-  const pending = manifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties);
+  const pending = localManifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties);
   const dependencyObservations: Readonly<SelectorObservation>[] = [];
   const dependencyMediaQueries = new Set<string>();
   const dependencyHostContexts: Readonly<CompiledHostContext>[] = [];
+  let unresolvedInlineEdge = pending.length > 0
+    && scopeHasInlineCustomVariableEdge(root, document.defaultView);
+  const includeDefinition = (
+    definition: { readonly local: boolean; readonly record: CornerfillCompiledManifest["customProperties"][number] },
+  ): void => {
+    const { local, record } = definition;
+    if (record.problems.length > 0) {
+      throw new TypeError(`compiled CSS cannot observe ${record.name}: ${record.problems.join("; ")}`);
+    }
+    pending.push(...record.references);
+    dependencyObservations.push(record.observation);
+    for (const query of record.mediaQueries) dependencyMediaQueries.add(query);
+    if (local) dependencyHostContexts.push(...record.hostContexts);
+  };
   while (pending.length > 0) {
     const name = pending.pop()!;
     if (reachable.has(name)) continue;
     reachable.add(name);
-    for (const definition of customProperties.get(name) ?? []) {
-      if (definition.problems.length > 0) {
-        throw new TypeError(`compiled CSS cannot observe ${name}: ${definition.problems.join("; ")}`);
-      }
-      pending.push(...definition.references);
-      dependencyObservations.push(definition.observation);
-      for (const query of definition.mediaQueries) dependencyMediaQueries.add(query);
-      dependencyHostContexts.push(...definition.hostContexts);
+    const definitions = customProperties.get(name) ?? [];
+    if (definitions.length === 0) unresolvedInlineEdge = true;
+    for (const definition of definitions) includeDefinition(definition);
+  }
+  if (unresolvedInlineEdge) {
+    for (const [name, definitions] of customProperties) {
+      if (reachable.has(name)) continue;
+      reachable.add(name);
+      for (const definition of definitions) includeDefinition(definition);
+    }
+    while (pending.length > 0) {
+      const name = pending.pop()!;
+      if (reachable.has(name)) continue;
+      reachable.add(name);
+      for (const definition of customProperties.get(name) ?? []) includeDefinition(definition);
     }
   }
   const hostContexts = new Map<string, Readonly<CompiledHostContext>>();
   for (const context of [
     ...plan.hostContexts,
-    ...manifests.flatMap(({ hostContexts: values }) => values),
+    ...localManifests.flatMap(({ hostContexts: values }) => values),
     ...dependencyHostContexts,
   ]) {
     document.documentElement.matches(context.argument);
@@ -354,7 +533,7 @@ function manifestState(
   for (const selector of selectors) document.documentElement.matches(selector);
   const mediaQueries = Object.freeze([
     ...new Set([
-      ...manifests.flatMap(({ mediaQueries: values }) => values),
+      ...localManifests.flatMap(({ mediaQueries: values }) => values),
       ...dependencyMediaQueries,
     ]),
   ].sort());
@@ -367,10 +546,10 @@ function manifestState(
         left.attribute.localeCompare(right.attribute)
       ))),
     hostDependent: root === document ? false : plan.hostDependent || hostContexts.size > 0,
-    manifests,
+    manifests: localManifests,
     mediaQueries,
     observation: mergeSelectorObservation([
-      ...manifests.map(({ observation }) => observation),
+      ...localManifests.map(({ observation }) => observation),
       ...dependencyObservations,
     ]),
     selectorList: selectors.join(","),
@@ -444,7 +623,17 @@ export function installCornerfillCompiled(
     ?? options.maxActiveEntries
     ?? DEFAULT_MAX_CANDIDATE_ELEMENTS;
   const maxScannedElements = options.maxScannedElements ?? DEFAULT_MAX_SCANNED_ELEMENTS;
+  const maxPotentialCandidates = options.maxPotentialCandidates
+    ?? DEFAULT_MAX_POTENTIAL_CANDIDATES;
+  const maxManifestBytes = options.maxManifestBytes ?? DEFAULT_MAX_MANIFEST_BYTES;
+  const maxManifestRecords = options.maxManifestRecords ?? DEFAULT_MAX_MANIFEST_RECORDS;
+  const maxCustomPropertyDefinitions = options.maxCustomPropertyDefinitions
+    ?? DEFAULT_MAX_CUSTOM_PROPERTY_DEFINITIONS;
   positiveSafeInteger(maxCandidateElements, "maxCandidateElements");
+  positiveSafeInteger(maxCustomPropertyDefinitions, "maxCustomPropertyDefinitions");
+  positiveSafeInteger(maxManifestBytes, "maxManifestBytes");
+  positiveSafeInteger(maxManifestRecords, "maxManifestRecords");
+  positiveSafeInteger(maxPotentialCandidates, "maxPotentialCandidates");
   positiveSafeInteger(maxScannedElements, "maxScannedElements");
   if (options.autoObserve !== undefined && typeof options.autoObserve !== "boolean") {
     throw new TypeError("autoObserve must be a boolean");
@@ -455,13 +644,30 @@ export function installCornerfillCompiled(
   const {
     autoObserve: _autoObserve,
     maxCandidateElements: _maxCandidateElements,
+    maxCustomPropertyDefinitions: _maxCustomPropertyDefinitions,
+    maxManifestBytes: _maxManifestBytes,
+    maxManifestRecords: _maxManifestRecords,
+    maxPotentialCandidates: _maxPotentialCandidates,
     maxScannedElements: _maxScannedElements,
     onError,
     ...runtimeOptions
   } = options;
   void _autoObserve;
   void _maxCandidateElements;
+  void _maxCustomPropertyDefinitions;
+  void _maxManifestBytes;
+  void _maxManifestRecords;
+  void _maxPotentialCandidates;
   void _maxScannedElements;
+
+  const compiledLimits = Object.freeze({
+    maxCandidateElements,
+    maxCustomPropertyDefinitions,
+    maxManifestBytes,
+    maxManifestRecords,
+    maxPotentialCandidates,
+    maxScannedElements,
+  });
 
   const runtime: CornerfillControllerHandle = installCornerfill({
     ...runtimeOptions,
@@ -480,6 +686,78 @@ export function installCornerfillCompiled(
     const result = operationChain.then(operation, operation);
     operationChain = result.then(() => undefined, () => undefined);
     return result;
+  };
+
+  const parentScopeForRoot = (root: CompiledRoot): CompiledScopeInternal | null => {
+    if (root === document) return null;
+    const containingRoot = (root as ShadowRoot).host.getRootNode();
+    if (containingRoot instanceof view.Document) return primary;
+    return containingRoot instanceof view.ShadowRoot
+      ? scopes.get(containingRoot) ?? null
+      : null;
+  };
+
+  const inheritedManifestsFor = (
+    root: CompiledRoot,
+  ): readonly Readonly<CornerfillCompiledManifest>[] => {
+    const manifests: Readonly<CornerfillCompiledManifest>[] = [];
+    const seen = new Set<CompiledScopeInternal>();
+    let current = root;
+    while (current !== document) {
+      const containingRoot = (current as ShadowRoot).host.getRootNode();
+      let parent: CompiledScopeInternal | null;
+      if (containingRoot instanceof view.Document) parent = primary;
+      else if (containingRoot instanceof view.ShadowRoot) {
+        parent = scopes.get(containingRoot) ?? null;
+        if (!parent) {
+          throw new TypeError(
+            "Cornerfill compiled nested roots require every containing open ShadowRoot to be registered",
+          );
+        }
+      } else break;
+      if (seen.has(parent)) break;
+      seen.add(parent);
+      manifests.push(...parent.localManifests());
+      current = parent.root;
+    }
+    return Object.freeze(manifests);
+  };
+
+  const scheduleDirectDependents = (parent: CompiledScopeInternal): void => {
+    for (const scope of scopes.values()) {
+      if (scope !== parent && parentScopeForRoot(scope.root) === parent) {
+        scope.scheduleManifestRefresh();
+      }
+    }
+  };
+
+  const scheduleMovedScopes = (record: MutationRecord): void => {
+    if (record.type !== "childList") return;
+    for (const scope of scopes.values()) {
+      if (scope.root === document) continue;
+      if (mutationContainsNode(record, (scope.root as ShadowRoot).host)) {
+        scope.scheduleManifestRefresh();
+      }
+    }
+  };
+
+  const scopesInTreeOrder = (): readonly CompiledScopeInternal[] => {
+    const depths = new Map<CompiledScopeInternal, number>();
+    const visiting = new Set<CompiledScopeInternal>();
+    const depth = (scope: CompiledScopeInternal): number => {
+      const known = depths.get(scope);
+      if (known !== undefined) return known;
+      if (visiting.has(scope)) return 0;
+      visiting.add(scope);
+      const parent = parentScopeForRoot(scope.root);
+      const value = parent ? depth(parent) + 1 : 0;
+      visiting.delete(scope);
+      depths.set(scope, value);
+      return value;
+    };
+    return Object.freeze([primary, ...scopes.values()].sort((left, right) => (
+      depth(left) - depth(right)
+    )));
   };
 
   const detach = (element: HTMLElement): void => {
@@ -501,7 +779,7 @@ export function installCornerfillCompiled(
   };
 
   const blockedFor = (element: HTMLElement): boolean => {
-    for (const scope of blockedScopes) if (scope.mayStyle(element)) return true;
+    for (const scope of blockedScopes) if (scope.mayInfluence(element)) return true;
     return false;
   };
 
@@ -576,7 +854,8 @@ export function installCornerfillCompiled(
 
   const createScope = (root: CompiledRoot, isPrimary: boolean): CompiledScopeInternal => {
     const candidates = new Set<HTMLElement>();
-    const watched = new Set<HTMLElement>();
+    const potential = new Set<HTMLElement>();
+    const resizeObserved = new Set<HTMLElement>();
     const eventListeners: EventListenerRecord[] = [];
     const mediaListeners = new Map<string, MediaListenerRecord>();
     const pendingElements = new Set<Element>();
@@ -602,8 +881,11 @@ export function installCornerfillCompiled(
     let status: "active" | "blocked-recoverable" = "active";
     let errors: readonly string[] = Object.freeze([]);
     let manifestCount = 0;
+    let localManifests: readonly Readonly<CornerfillCompiledManifest>[] = Object.freeze([]);
+    let recoveryMediaQueries: readonly string[] = Object.freeze([]);
     let state = EMPTY_STATE;
     let observer: MutationObserver | null = null;
+    let resizeObserver: ResizeObserver | null = null;
     const externalObservers: MutationObserver[] = [];
     const cssomReleases: (() => void)[] = [];
     let pendingFull = false;
@@ -628,6 +910,12 @@ export function installCornerfillCompiled(
       if (root === document) return element.isConnected && element.getRootNode() === document;
       const shadow = root as ShadowRoot;
       return element === shadow.host || element.getRootNode() === shadow;
+    };
+
+    const mayInfluence = (element: HTMLElement): boolean => {
+      if (!element.isConnected || element.ownerDocument !== document) return false;
+      if (root === document) return true;
+      return shadowIncludingContains(view, (root as ShadowRoot).host, element);
     };
 
     const releaseHostContextMarker = (attribute: string, force = false): void => {
@@ -699,23 +987,27 @@ export function installCornerfillCompiled(
         status,
         observing: Boolean(observer),
         observation: state.observation,
-        potentialCandidates: watched.size,
-        limits: Object.freeze({ maxCandidateElements, maxScannedElements }),
+        potentialCandidates: potential.size,
+        limits: compiledLimits,
         counters: Object.freeze({ ...counters }),
         runtime: runtime.stats(),
       });
     }
 
     const scan = (roots: Iterable<Readonly<ScanRoot>>, replaceAll: boolean): Readonly<ScanResult> => {
+      const scanErrors = new Set<string>();
       const inspections = new Map<HTMLElement, Readonly<{
         requiresFallback: boolean;
         values: Readonly<Record<string, string>>;
       }>>();
       const matched = new Set<HTMLElement>();
       const rawMatched = new Set<HTMLElement>();
+      const resizeMatched = new Set<HTMLElement>();
       const visited = new Set<HTMLElement>();
       if (!state.selectorList && !(root !== document && state.hostCandidate)) {
-        return Object.freeze({ inspections, matched, rawMatched, visited });
+        return Object.freeze({
+          errors: Object.freeze([]), inspections, matched, rawMatched, resizeMatched, visited,
+        });
       }
       let scanned = 0;
       const inspect = (element: Element, forceHost = false): void => {
@@ -726,12 +1018,29 @@ export function installCornerfillCompiled(
           );
         }
         if (!(element instanceof view.HTMLElement)) return;
-        if (candidates.has(element) || watched.has(element)) visited.add(element);
+        if (candidates.has(element) || potential.has(element)) visited.add(element);
         if (!forceHost && (!state.selectorList || !element.matches(state.selectorList))) return;
         rawMatched.add(element);
         counters.computedChecks += 1;
-        const inspection = runtime.inspectAuthoredStyle(element, AUTO_CARRIERS);
-        if (!hasResolvedShapeCarrier(inspection.values) || !inspection.requiresFallback) return;
+        let inspection: Readonly<{
+          requiresFallback: boolean;
+          values: Readonly<Record<string, string>>;
+        }>;
+        try {
+          inspection = runtime.inspectAuthoredStyle(element, AUTO_CARRIERS);
+        } catch (error) {
+          const values = computedCarrierValues(view, element);
+          if (carrierMayNeedShapedGeometry(values)) {
+            resizeMatched.add(element);
+          }
+          if (!pendingMeasurement(error)) scanErrors.add(errorMessage(error));
+          return;
+        }
+        if (!hasResolvedShapeCarrier(inspection.values)) return;
+        if (!inspection.requiresFallback) {
+          if (carrierMayNeedShapedGeometry(inspection.values)) resizeMatched.add(element);
+          return;
+        }
         inspections.set(element, inspection);
         matched.add(element);
         if (matched.size > maxCandidateElements) {
@@ -747,13 +1056,34 @@ export function installCornerfillCompiled(
       }
       if (root !== document && state.hostCandidate) inspect((root as ShadowRoot).host, true);
       counters.scannedElements += scanned;
-      const projected = replaceAll ? matched.size : candidates.size - visited.size + matched.size;
-      if (projected > maxCandidateElements) {
+      let projectedCandidates = replaceAll ? 0 : candidates.size;
+      let projectedPotential = replaceAll ? 0 : potential.size;
+      if (!replaceAll) {
+        for (const element of visited) {
+          if (candidates.has(element)) projectedCandidates -= 1;
+          if (potential.has(element)) projectedPotential -= 1;
+        }
+      }
+      projectedCandidates += matched.size;
+      for (const element of rawMatched) if (!matched.has(element)) projectedPotential += 1;
+      if (projectedCandidates > maxCandidateElements) {
         throw new RangeError(
           `compiled root exceeds the maximum candidate element count of ${maxCandidateElements}`,
         );
       }
-      return Object.freeze({ inspections, matched, rawMatched, visited });
+      if (projectedPotential > maxPotentialCandidates) {
+        throw new RangeError(
+          `compiled root exceeds the maximum potential candidate count of ${maxPotentialCandidates}`,
+        );
+      }
+      return Object.freeze({
+        errors: Object.freeze([...scanErrors]),
+        inspections,
+        matched,
+        rawMatched,
+        resizeMatched,
+        visited,
+      });
     };
 
     const fullScanRoots = (): readonly Readonly<ScanRoot>[] => {
@@ -770,13 +1100,12 @@ export function installCornerfillCompiled(
       full: boolean,
     ): Promise<Readonly<ReconcileResult>> => {
       counters.candidatePasses += 1;
-      const { inspections, matched, rawMatched, visited } = scan(roots, full);
+      const {
+        errors: scanErrors, inspections, matched, rawMatched, resizeMatched, visited,
+      } = scan(roots, full);
       const affected = new Set<HTMLElement>(matched);
-      const watchedRemovals = full ? [...watched] : [...visited];
-      for (const element of watchedRemovals) {
-        if (!rawMatched.has(element)) watched.delete(element);
-      }
-      for (const element of rawMatched) watched.add(element);
+      const potentialRemovals = full ? [...potential] : [...visited];
+      for (const element of potentialRemovals) potential.delete(element);
       const removals = full ? [...candidates] : [...visited];
       for (const element of removals) {
         if (matched.has(element)) continue;
@@ -785,11 +1114,29 @@ export function installCornerfillCompiled(
         affected.add(element);
       }
       for (const element of matched) {
+        potential.delete(element);
         candidates.add(element);
         addClaim(scope, element);
       }
+      for (const element of rawMatched) {
+        if (!matched.has(element)) potential.add(element);
+      }
+      if (resizeObserver) {
+        const resizeRemovals = full ? [...resizeObserved] : [...visited];
+        for (const element of resizeRemovals) {
+          if (resizeMatched.has(element)) continue;
+          resizeObserved.delete(element);
+          resizeObserver.unobserve(element);
+        }
+        for (const element of resizeMatched) {
+          if (resizeObserved.has(element)) continue;
+          resizeObserved.add(element);
+          resizeObserver.observe(element);
+        }
+      }
+      const synchronizedErrors = await syncElements(affected, inspections);
       return Object.freeze({
-        errors: await syncElements(affected, inspections),
+        errors: Object.freeze([...scanErrors, ...synchronizedErrors]),
         synchronized: affected,
       });
     };
@@ -835,8 +1182,8 @@ export function installCornerfillCompiled(
     };
 
     const refreshAllPotentialCandidates = (): void => {
-      refreshAllCandidates();
-      for (const element of watched) pendingElements.add(element);
+      for (const element of candidates) pendingElements.add(element);
+      for (const element of potential) pendingElements.add(element);
       if (root !== document && state.hostCandidate) {
         pendingElements.add((root as ShadowRoot).host);
       }
@@ -846,15 +1193,18 @@ export function installCornerfillCompiled(
       clearObservation();
       status = "blocked-recoverable";
       blockedScopes.add(scope);
+      recoveryMediaQueries = state.mediaQueries;
       const cleanupErrors: unknown[] = [];
       for (const attribute of [...ownedHostContextMarkers]) releaseHostContextMarker(attribute);
       for (const element of [...candidates]) {
         candidates.delete(element);
         removeClaim(scope, element);
       }
-      watched.clear();
+      potential.clear();
+      resizeObserved.clear();
+      resizeObserver?.disconnect();
       for (const element of [...handles.keys()]) {
-        if (!mayStyle(element)) continue;
+        if (!mayInfluence(element)) continue;
         try { detach(element); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
       }
       manifestCount = 0;
@@ -874,8 +1224,13 @@ export function installCornerfillCompiled(
       pendingSubtrees.clear();
       pendingRefresh.clear();
       syncHostContextMarkers();
-      for (const element of [...watched]) {
-        if (!element.isConnected || !mayStyle(element)) watched.delete(element);
+      for (const element of [...potential]) {
+        if (!element.isConnected || !mayStyle(element)) potential.delete(element);
+      }
+      for (const element of [...resizeObserved]) {
+        if (element.isConnected && mayStyle(element)) continue;
+        resizeObserved.delete(element);
+        resizeObserver?.unobserve(element);
       }
       for (const candidate of [...candidates]) {
         if (contains(candidate)) continue;
@@ -919,6 +1274,18 @@ export function installCornerfillCompiled(
       });
     };
 
+    if (autoObserve && view.ResizeObserver) {
+      resizeObserver = new view.ResizeObserver((entries) => {
+        if (destroyed || scopeDestroyed) return;
+        for (const { target } of entries) {
+          if (target instanceof view.HTMLElement && resizeObserved.has(target)) {
+            pendingElements.add(target);
+          }
+        }
+        queuePending();
+      });
+    }
+
     function scheduleManifestRefresh(): void {
       if (manifestFrame !== null || destroyed || scopeDestroyed) return;
       manifestFrame = view.requestAnimationFrame(() => {
@@ -933,12 +1300,14 @@ export function installCornerfillCompiled(
     const handleMutations = (records: readonly MutationRecord[]): void => {
       counters.mutationBatches += 1;
       const attributes = new Set(state.observation.attributes);
+      const styleTargets = new Set<Element>();
       let stylesheetChanged = false;
       for (const record of records) {
         if (record.type === "attributes") {
           const target = record.target as Element;
           const attribute = record.attributeName ?? "";
-          if (isStylesheetElement(target, view) && STYLESHEET_ATTRIBUTES.includes(attribute)) {
+          if (STYLESHEET_ATTRIBUTES.includes(attribute)
+            && mutationTouchesStylesheetSource(record)) {
             stylesheetChanged = true;
             continue;
           }
@@ -949,14 +1318,29 @@ export function installCornerfillCompiled(
             pendingFull = true;
             continue;
           }
+          if (attribute === "style") {
+            if (styleTargets.has(target)) continue;
+            styleTargets.add(target);
+          }
           const customPropertiesChanged = attribute === "style"
             && inlineCustomPropertiesChanged(record);
-          if (attribute === "style"
-            && target instanceof view.HTMLElement
-            && handles.has(target)
-            && !customPropertiesChanged) continue;
-          if (customPropertiesChanged) pendingSubtrees.add(target);
-          else refreshCandidateDescendants(target);
+          const ownedPaintChanged = attribute === "style" && inlineOwnedPaintChanged(record);
+          if (attribute === "style") {
+            if (!customPropertiesChanged && !ownedPaintChanged) continue;
+            if (customPropertiesChanged && inlineCustomVariableEdgesChanged(record)) {
+              scheduleManifestRefresh();
+              continue;
+            }
+            if (target instanceof view.HTMLElement && handles.has(target)
+              && !customPropertiesChanged) {
+              const inheritedPaintChanged = inlineInheritedPaintChanged(record);
+              if (runtime.explain(target)?.backend === "native-corner-shape"
+                && !inheritedPaintChanged) continue;
+              if (!inheritedPaintChanged && !inlineFallbackDecisionChanged(record)) continue;
+            }
+            pendingSubtrees.add(target);
+          } else refreshCandidateDescendants(target);
+          if (attribute === "dir") pendingSubtrees.add(target);
           if (state.observation.conservative || attributes.has(attribute)) {
             scopeFor(target, state.observation.invalidation);
           }
@@ -968,9 +1352,12 @@ export function installCornerfillCompiled(
             continue;
           }
           const parent = record.target.parentElement;
-          if (parent && state.observation.characterData) scopeFor(parent, "parent");
+          const directionRoot = autoDirectionAncestor(parent);
+          if (directionRoot) pendingSubtrees.add(directionRoot);
+          else if (parent && state.observation.characterData) scopeFor(parent, "parent");
           continue;
         }
+        scheduleMovedScopes(record);
         const target = record.target instanceof view.Element ? record.target : null;
         if (stylesheetTextOwner(record.target, view)) stylesheetChanged = true;
         for (const node of record.addedNodes) {
@@ -1032,11 +1419,23 @@ export function installCornerfillCompiled(
       }
     };
 
+    const handleViewportResize = (): void => {
+      refreshAllPotentialCandidates();
+      if (stateFrame === null) {
+        stateFrame = view.requestAnimationFrame(() => {
+          stateFrame = null;
+          queuePending();
+        });
+      }
+    };
+
     const handleExternalMutations = (records: readonly MutationRecord[]): void => {
       if (root === document) return;
       const host = (root as ShadowRoot).host;
+      const attributes = new Set(state.observation.attributes);
+      const styleTargets = new Set<Element>();
       let refresh = false;
-      let rebind = false;
+      let manifestRefresh = false;
       for (const record of records) {
         if (record.type === "attributes") {
           const target = record.target as Element;
@@ -1048,24 +1447,40 @@ export function installCornerfillCompiled(
             pendingFull = true;
             continue;
           }
-          if (attribute === "style"
-            && target instanceof view.HTMLElement
-            && handles.has(target)
-            && !inlineCustomPropertiesChanged(record)) {
-            continue;
+          if (attribute !== "style"
+            && !state.observation.conservative
+            && !attributes.has(attribute)) continue;
+          if (attribute === "style") {
+            if (styleTargets.has(target)) continue;
+            styleTargets.add(target);
+            const customPropertiesChanged = inlineCustomPropertiesChanged(record);
+            const ownedPaintChanged = inlineOwnedPaintChanged(record);
+            if (!customPropertiesChanged && !ownedPaintChanged) continue;
+            if (customPropertiesChanged && inlineCustomVariableEdgesChanged(record)) {
+              manifestRefresh = true;
+            }
+            if (target instanceof view.HTMLElement && handles.has(target)
+              && !customPropertiesChanged) {
+              const inheritedPaintChanged = inlineInheritedPaintChanged(record);
+              if (runtime.explain(target)?.backend === "native-corner-shape"
+                && !inheritedPaintChanged) continue;
+              if (!inheritedPaintChanged && !inlineFallbackDecisionChanged(record)) continue;
+            }
           }
           if (target === host || shadowIncludingContains(view, target, host)) refresh = true;
           continue;
         }
         if (record.type === "characterData") {
           const parent = record.target.parentElement;
-          if (state.hostContext && parent && shadowIncludingContains(view, parent, host)) refresh = true;
+          if ((state.hostContext || state.observation.characterData || autoDirectionAncestor(parent))
+            && parent
+            && shadowIncludingContains(view, parent, host)) refresh = true;
           continue;
         }
         if (mutationContainsNode(record, host)) {
           pendingFull = true;
           refresh = true;
-          rebind = true;
+          manifestRefresh = true;
         } else if (state.hostContext
           && record.target instanceof view.Element
           && shadowIncludingContains(view, record.target, host)) refresh = true;
@@ -1075,7 +1490,7 @@ export function installCornerfillCompiled(
       }
       if (refresh) {
         refreshAllPotentialCandidates();
-        if (rebind) scheduleManifestRefresh();
+        if (manifestRefresh) scheduleManifestRefresh();
         else queuePending();
       }
     };
@@ -1172,15 +1587,21 @@ export function installCornerfillCompiled(
     const observeStylesheetLifecycle = (mediaKeys: Set<string>): void => {
       const ownerQueries = new Set<string>();
       const stylesheetStates = new Set<object>();
+      const rememberSheet = (sheet: CSSStyleSheet | null): void => {
+        if (!sheet) return;
+        stylesheetStates.add(sheet);
+        const media = sheet.media.mediaText.trim();
+        if (media) ownerQueries.add(media);
+      };
       for (const element of stylesheetElements(root, view)) {
         if (element instanceof view.HTMLStyleElement || element instanceof view.HTMLLinkElement) {
           if (element.media.trim()) ownerQueries.add(element.media.trim());
           stylesheetStates.add(element);
-          if (element.sheet) stylesheetStates.add(element.sheet);
+          rememberSheet(element.sheet);
         }
       }
       try {
-        for (const sheet of root.adoptedStyleSheets) stylesheetStates.add(sheet);
+        for (const sheet of root.adoptedStyleSheets) rememberSheet(sheet);
       } catch {
         // An explicit refresh remains the contract when adoptedStyleSheets itself is inaccessible.
       }
@@ -1242,9 +1663,18 @@ export function installCornerfillCompiled(
       addEventRecord(root, "error", stylesheetSettled, true);
       observeStylesheetLifecycle(mediaKeys);
       if (recovery) {
+        for (const query of recoveryMediaQueries) {
+          const key = `recovery:${query}`;
+          mediaKeys.add(key);
+          addMediaListener(key, query, () => {
+            counters.mediaInvalidations += 1;
+            scheduleManifestRefresh();
+          });
+        }
         retainMediaListeners(mediaKeys);
         return;
       }
+      addEventRecord(view, "resize", handleViewportResize, Object.freeze({ passive: true }));
       for (const type of state.observation.events) {
         const windowEvent = type === "hashchange" || type === "popstate";
         const documentEvent = type === "fullscreenchange";
@@ -1274,7 +1704,9 @@ export function installCornerfillCompiled(
       retainMediaListeners(mediaKeys);
     };
 
-    const performRefresh = async (): Promise<Readonly<CornerfillCompiledExplanation>> => {
+    const performRefresh = async (
+      notifyDependents = true,
+    ): Promise<Readonly<CornerfillCompiledExplanation>> => {
       if (destroyed || scopeDestroyed) throw new Error("Cornerfill compiled scope is destroyed");
       if (manifestFrame !== null) view.cancelAnimationFrame(manifestFrame);
       manifestFrame = null;
@@ -1285,13 +1717,21 @@ export function installCornerfillCompiled(
       try {
         clearObservation(true);
         counters.manifestReads += 1;
-        const manifests = compiledManifests(view, manifestTarget());
-        state = manifestState(document, root, manifests);
-        manifestCount = manifests.length;
+        const nextManifests = compiledManifests(view, manifestTarget(), compiledLimits);
+        const nextState = manifestState(
+          document,
+          root,
+          nextManifests,
+          inheritedManifestsFor(root),
+        );
+        localManifests = nextManifests;
+        state = nextState;
+        recoveryMediaQueries = state.mediaQueries;
+        manifestCount = nextManifests.length;
         syncHostContextMarkers();
         const wasBlocked = blockedScopes.has(scope);
         const blockedElements = wasBlocked
-          ? [...claims.keys()].filter((element) => mayStyle(element))
+          ? [...claims.keys()].filter((element) => mayInfluence(element))
           : [];
         status = "active";
         configureObservation();
@@ -1301,6 +1741,7 @@ export function installCornerfillCompiled(
           ? await syncElements(blockedElements)
           : Object.freeze([]);
         errors = Object.freeze([...reconciled.errors, ...recoveryErrors]);
+        if (notifyDependents) scheduleDirectDependents(scope);
         return explain();
       } catch (error) {
         if (stateFrame !== null) view.cancelAnimationFrame(stateFrame);
@@ -1320,8 +1761,11 @@ export function installCornerfillCompiled(
       scopeDestroyed = true;
       const releasedBlock = blockedScopes.delete(scope);
       const recoveryElements = releasedBlock
-        ? [...claims.keys()].filter((element) => mayStyle(element))
+        ? [...claims.keys()].filter((element) => mayInfluence(element))
         : [];
+      const dependentScopes = root === document
+        ? []
+        : [...scopes.values()].filter((candidate) => parentScopeForRoot(candidate.root) === scope);
       clearObservation();
       if (stateFrame !== null) view.cancelAnimationFrame(stateFrame);
       if (manifestFrame !== null) view.cancelAnimationFrame(manifestFrame);
@@ -1330,7 +1774,10 @@ export function installCornerfillCompiled(
       pendingElements.clear();
       pendingSubtrees.clear();
       pendingRefresh.clear();
-      watched.clear();
+      potential.clear();
+      resizeObserved.clear();
+      resizeObserver?.disconnect();
+      localManifests = Object.freeze([]);
       for (const attribute of [...ownedHostContextMarkers]) releaseHostContextMarker(attribute);
       pendingHostContextWrites.clear();
       for (const element of [...candidates]) {
@@ -1341,6 +1788,7 @@ export function installCornerfillCompiled(
       if (root !== document && scopes.get(root as ShadowRoot) === scope) {
         scopes.delete(root as ShadowRoot);
       }
+      for (const dependent of dependentScopes) dependent.scheduleManifestRefresh();
       if (!destroyed && recoveryElements.length > 0) {
         void queueOperation(async () => { await syncElements(recoveryElements); }).catch((error) => (
           reportAsyncError(error, "compiled scope teardown recovery")
@@ -1362,10 +1810,14 @@ export function installCornerfillCompiled(
       candidates,
       counters,
       handle,
+      localManifests: () => localManifests,
       contains,
+      mayInfluence,
       mayStyle,
       performRefresh,
       destroyLocal,
+      root,
+      scheduleManifestRefresh,
     };
     ready = refreshLocal();
     return scope;
@@ -1413,7 +1865,7 @@ export function installCornerfillCompiled(
       observing: reports.some(({ observing }) => observing),
       observation: mergeSelectorObservation(reports.map(({ observation }) => observation)),
       potentialCandidates: reports.reduce((sum, report) => sum + report.potentialCandidates, 0),
-      limits: Object.freeze({ maxCandidateElements, maxScannedElements }),
+      limits: compiledLimits,
       counters: Object.freeze(sumCounters(registered.map(({ counters: values }) => values))),
       runtime: runtime.stats(),
     });
@@ -1424,8 +1876,13 @@ export function installCornerfillCompiled(
     refresh() {
       if (destroyed) return Promise.reject(new Error("Cornerfill compiled controller is destroyed"));
       return queueOperation(async () => {
-        await primary.performRefresh();
-        for (const scope of scopes.values()) await scope.performRefresh();
+        const failures: unknown[] = [];
+        for (const scope of scopesInTreeOrder()) {
+          try { await scope.performRefresh(false); } catch (error) { failures.push(error); }
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Cornerfill compiled refresh failed");
+        }
       }).then(() => controllerExplain());
     },
     registerRoot(root: ShadowRoot): CornerfillCompiledScopeHandle {
@@ -1440,6 +1897,7 @@ export function installCornerfillCompiled(
       if (existing) return existing.handle;
       const scope = createScope(root, false);
       scopes.set(root, scope);
+      scheduleDirectDependents(scope);
       return scope.handle;
     },
     unregisterRoot(root: ShadowRoot): boolean {

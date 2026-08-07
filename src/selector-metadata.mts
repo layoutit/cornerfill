@@ -9,7 +9,6 @@ import type { SelectorInvalidation, SelectorObservation } from "./carrier-contra
 const SELECTOR_STATE_EVENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   hover: Object.freeze(["pointerover", "pointerout"]),
   focus: Object.freeze(["focusin", "focusout"]),
-  "focus-visible": Object.freeze(["focusin", "focusout"]),
   "focus-within": Object.freeze(["focusin", "focusout"]),
   disabled: Object.freeze(["input", "change"]),
   enabled: Object.freeze(["input", "change"]),

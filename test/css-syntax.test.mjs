@@ -29,6 +29,15 @@ test("declaration tokenization decodes escaped and commented property names", ()
     { property: "border-radius", value: "5px" },
     { property: "background", value: "red" },
   ]);
+  assert.deepEqual(cssDeclarations("--Shape:bevel;--shape:scoop;COLOR:red"), [
+    { property: "--Shape", value: "bevel" },
+    { property: "--shape", value: "scoop" },
+    { property: "color", value: "red" },
+  ]);
+  assert.notEqual(
+    cssDeclarationSignature("--Shape:bevel", (property) => property.startsWith("--")),
+    cssDeclarationSignature("--shape:bevel", (property) => property.startsWith("--")),
+  );
 });
 
 test("stylesheet canonicalization does not treat a custom-element selector as a declaration", () => {

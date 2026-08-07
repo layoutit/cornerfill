@@ -185,13 +185,33 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-variable-shape {
     corner-shape: var(--cornerfill-compiled-dynamic-shape);
   }
+  .cornerfill-compiled-local { corner-shape: bevel; }
+  .cornerfill-compiled-case { corner-shape: var(--Shape); }
+  .cornerfill-compiled-logical-potential {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 12px 0 0 0;
+    corner-start-start-shape: bevel;
+    background: rgb(220, 40, 40);
+  }
+  :root {
+    --cornerfill-compiled-dynamic-shape: round;
+    --cornerfill-compiled-indirect-shape: bevel;
+  }
+  .cornerfill-compiled-inherited-host { --cornerfill-compiled-inherited-shape: bevel; }
+  @media (prefers-color-scheme: dark) {
+    :root { --cornerfill-compiled-indirect-shape: scoop; }
+    .cornerfill-compiled-inherited-host { --cornerfill-compiled-inherited-shape: scoop; }
+  }
   .cornerfill-compiled-shared-host { corner-shape: bevel; }
   @media print { * { corner-shape: bevel; } }
 `, { from: "compiled-fixture.css" })).css;
 const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-shadow,
   .cornerfill-compiled-shadow-host-child,
-  .cornerfill-compiled-shadow-context {
+  .cornerfill-compiled-shadow-context,
+  .cornerfill-compiled-shadow-inherited {
     display: block;
     width: 36px;
     height: 28px;
@@ -199,6 +219,9 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
     background: rgb(220, 40, 40);
   }
   .cornerfill-compiled-shadow { corner-shape: bevel; }
+  .cornerfill-compiled-shadow-inherited {
+    corner-shape: var(--cornerfill-compiled-inherited-shape);
+  }
   :host { corner-shape: notch; }
   :host(.cornerfill-compiled-shadow-active) .cornerfill-compiled-shadow-host-child {
     corner-shape: scoop;
@@ -223,8 +246,17 @@ const COMPILED_CONDITIONAL_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).p
 `, { from: "compiled-conditional-fixture.css" })).css;
 const COMPILED_BUDGET_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-budget-real { corner-shape: bevel; }
-  .cornerfill-compiled-budget-round { corner-shape: round; }
-  @media print { * { corner-shape: bevel; } }
+  .cornerfill-compiled-budget-round {
+    width: 12px;
+    height: 10px;
+    border-radius: 5px;
+    background: red;
+    corner-shape: round;
+  }
+  @media print { .cornerfill-compiled-budget-round { corner-shape: bevel; } }
+  @media (max-width: 50px) {
+    .cornerfill-compiled-budget-round { corner-shape: bevel; }
+  }
 `, { from: "compiled-budget-fixture.css" })).css;
 
 function locatePlaywrightModule() {

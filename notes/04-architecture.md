@@ -105,15 +105,19 @@ therefore resolves the actual cascade before the compiled runtime reads computed
 carriers. The plugin must run after `@import` expansion and nesting transforms;
 it rejects conditions or selectors the runtime cannot observe instead of
 silently weakening them. Scoped selectors require an explicit observable scope
-start; relative scoped selectors are rejected until discovery can represent
-their relative-selector semantics directly.
+start; relative selectors and top-level or scoped `:scope` are rejected until
+discovery can represent their stylesheet scoping semantics directly.
 
 The package root qualifies native support first. Only an unqualified browser
 loads `compiled-runtime.mjs`; that runtime reads compiler manifests and computed
 state but never fetches CSS, reconstructs imports or layers, or ships PostCSS to
 the browser. It keeps active candidates separate from cached potential matches,
-so inactive conditions cannot consume the active-candidate limit. CSS not
-processed by the plugin is intentionally not claimed.
+so inactive conditions cannot consume the active-candidate limit; both sets and
+manifest inputs have explicit per-root budgets. Registered roots form a
+containing-root dependency hierarchy for inherited variables, activation,
+fail-close influence, and host migration. CSS not processed by the plugin is
+intentionally not claimed. `cornerfill/compiled` exposes the same compiled
+installer with explicit nonce, limit, observation, and lifecycle options.
 
 `cornerfill/auto` retains the previous best-effort source interpreter as an
 explicitly experimental no-build mode. Its accessible-source, CSP, CSSOM,

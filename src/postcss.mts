@@ -59,7 +59,11 @@ interface MutableCustomProperty {
 }
 
 const CONTAINER_AT_RULES = new Set(["container"]);
+const CONDITIONAL_SEMANTIC_AT_RULES = new Set([
+  "container", "document", "media", "scope", "starting-style", "supports",
+]);
 const KEYFRAME_AT_RULES = new Set(["keyframes", "-webkit-keyframes"]);
+const SCOPE_AT_RULES = new Set(["scope"]);
 const LEGACY_PSEUDO_ELEMENTS = new Set(["after", "before", "first-letter", "first-line"]);
 const MANIFEST_RULE_SELECTORS = new Set([":host", ":root"]);
 const INVALIDATION_RANK: Readonly<Record<SelectorInvalidation, number>> = Object.freeze({
@@ -104,8 +108,8 @@ function customPropertyReferences(value: string): readonly string[] {
   return Object.freeze([...references].sort());
 }
 
-function ancestorAtRule(declaration: Declaration, names: ReadonlySet<string>): AtRule | null {
-  let parent: Node | undefined = declaration.parent;
+function ancestorAtRule(node: Node, names: ReadonlySet<string>): AtRule | null {
+  let parent: Node | undefined = node.parent;
   while (parent) {
     if (parent.type === "atrule") {
       const atRule = parent as AtRule;
@@ -251,6 +255,10 @@ function ruleMetadata(rule: Rule, declaration: Declaration): Readonly<RuleMetada
   }
   const issue = selectorIssue(rule.selector);
   if (issue) throw new SyntaxError(issue);
+  if (!ancestorAtRule(declaration, SCOPE_AT_RULES)
+    && selectorUsesScopedRelativeSyntax(rule.selector)) {
+    throw new SyntaxError("relative selectors and :scope require unsupported stylesheet scoping semantics");
+  }
   const observations: Readonly<SelectorObservation>[] = [selectorObservation([rule.selector])];
   const hostContexts = compiledSelectorPlan([rule.selector]).hostContexts;
   let parent: Node | undefined = rule.parent;
@@ -343,18 +351,51 @@ function removeExistingCompiledMetadata(root: Root): void {
   for (const registration of registrations) registration.remove();
 }
 
-function registeredProperties(root: Root): Set<string> {
-  const properties = new Set<string>();
+function registeredProperties(root: Root): Map<string, AtRule[]> {
+  const properties = new Map<string, AtRule[]>();
   root.walkAtRules((atRule) => {
     if (decodeCssEscapes(atRule.name).toLowerCase() === "property") {
-      properties.add(decodeCssEscapes(atRule.params).trim());
+      const property = decodeCssEscapes(atRule.params).trim();
+      const registrations = properties.get(property) ?? [];
+      registrations.push(atRule);
+      properties.set(property, registrations);
     }
   });
   return properties;
 }
 
-function registerCarrier(root: Root, property: string, registered: Set<string>): void {
-  if (registered.has(property)) return;
+function validateCarrierRegistration(registration: AtRule, property: string): void {
+  if (ancestorAtRule(registration, CONDITIONAL_SEMANTIC_AT_RULES)) {
+    throw registration.error(`Cornerfill private registration ${property} cannot be conditional`);
+  }
+  const descriptors = new Map<string, string[]>();
+  registration.walkDecls((declaration) => {
+    const name = decodedProperty(declaration);
+    const values = descriptors.get(name) ?? [];
+    values.push(declaration.value.trim());
+    descriptors.set(name, values);
+  });
+  const syntax = descriptors.get("syntax") ?? [];
+  const inherits = descriptors.get("inherits") ?? [];
+  const initial = descriptors.get("initial-value") ?? [];
+  const exact = descriptors.size === 3
+    && syntax.length === 1
+    && new Set(['"*"', "'*'"]).has(syntax[0]!)
+    && inherits.length === 1
+    && inherits[0]!.toLowerCase() === "false"
+    && initial.length === 1
+    && initial[0] === AUTO_UNSET;
+  if (!exact) {
+    throw registration.error(`Cornerfill private registration ${property} has incompatible descriptors`);
+  }
+}
+
+function registerCarrier(root: Root, property: string, registered: Map<string, AtRule[]>): void {
+  const existing = registered.get(property);
+  if (existing) {
+    for (const registration of existing) validateCarrierRegistration(registration, property);
+    return;
+  }
   const registration = postcss.atRule({ name: "property", params: property });
   registration.append(
     postcss.decl({ prop: "syntax", value: '"*"' }),
@@ -362,7 +403,7 @@ function registerCarrier(root: Root, property: string, registered: Set<string>):
     postcss.decl({ prop: "initial-value", value: AUTO_UNSET }),
   );
   root.append(registration);
-  registered.add(property);
+  registered.set(property, [registration]);
 }
 
 function appendManifestRule(
@@ -482,6 +523,14 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
     const hostContextRuleSet = new Set<Rule>();
     const generatedRuleCounts = new Map<string, number>();
 
+    for (const [property, registrations] of registered) {
+      if (AUTO_CARRIER_SET.has(property)) {
+        for (const registration of registrations) {
+          validateCarrierRegistration(registration, property);
+        }
+      }
+    }
+
     root.walkRules((rule) => {
       if (!isGeneratedHostContextRule(rule)) return;
       const signature = rule.toString();
@@ -492,6 +541,14 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
       const name = decodeCssEscapes(atRule.name).toLowerCase();
       if (name === "import") throw atRule.error("Cornerfill must run after @import expansion");
       if (name === "supports") atRule.params = rewriteCornerShapeSupportsCondition(atRule.params);
+      if (name === "property" && ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
+        throw atRule.error("Cornerfill cannot compile conditional @property registration");
+      }
+      if (name === "layer"
+        && (!atRule.nodes || atRule.params.trim())
+        && ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
+        throw atRule.error("Cornerfill cannot compile conditional cascade-layer ordering");
+      }
     });
 
     const rememberHostContextRule = (rule: Rule): void => {
@@ -537,14 +594,14 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
 
       const shape = isShapeProperty(property);
       const all = property === "all";
+      const keyframes = ancestorAtRule(authored, KEYFRAME_AT_RULES);
       if (shape && !rule) {
         throw authored.error("Cornerfill cannot compile corner-shape outside a style rule");
       }
-      if ((shape || all) && ancestorAtRule(authored, KEYFRAME_AT_RULES)) {
-        throw authored.error("Cornerfill cannot compile corner-shape or all inside keyframes");
+      if (keyframes && (shape || all || standardPropertyAffectsOwnedPaint(property))) {
+        throw authored.error(`Cornerfill cannot compile fallback-relevant ${property} inside keyframes`);
       }
-      if (!shape && !all
-        && ancestorAtRule(authored, KEYFRAME_AT_RULES)) return;
+      if (keyframes) return;
       let compiled: ReturnType<typeof compileShapeCarrierDeclarations> = Object.freeze([]);
       if (shape || all) {
         if (!rule) return;

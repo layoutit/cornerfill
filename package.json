@@ -24,6 +24,11 @@
       "import": "./dist/runtime.mjs",
       "default": "./dist/runtime.mjs"
     },
+    "./compiled": {
+      "types": "./dist/compiled-runtime.d.mts",
+      "import": "./dist/compiled-runtime.mjs",
+      "default": "./dist/compiled-runtime.mjs"
+    },
     "./postcss": {
       "types": "./dist/postcss.d.mts",
       "import": "./dist/postcss.mjs",
