@@ -230,7 +230,7 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
     ["@keyframes morph { to { border-radius: 12px } }", /fallback-relevant border-radius inside keyframes/u],
     [":scope .card { corner-shape: bevel }", /unsupported stylesheet scoping semantics/u],
     [".card:focus-visible { corner-shape: bevel }", /cannot observe selector state: focus-visible/u],
-    ["@media all { @layer theme { .card { corner-shape: bevel } } }", /conditional cascade-layer ordering/u],
+    ["@media all { @layer theme { .card { corner-shape: bevel } } }", /conditional cascade-layer first establishment/u],
     ["@media all { @property --shape { syntax: '*'; inherits: false; initial-value: round } }", /conditional @property registration/u],
     ["@property --cornerfill-corner-top-left-shape { syntax: '<color>'; inherits: true; initial-value: red } .card { corner-shape: bevel }", /incompatible descriptors/u],
     [":host-context(.theme .wrapper) .card { corner-shape: bevel }", /one compound selector/u],
@@ -243,6 +243,15 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
         && message.test(error.message),
     );
   }
+
+  const layered = await postcss([cornerfillPostcss()]).process(`
+    @layer base, theme;
+    @media all {
+      @layer theme { .card { corner-shape: bevel } }
+    }
+  `, { from: "layered.css" });
+  assert.match(layered.css, /@layer base, theme/u);
+  assert.match(layered.css, /@media all\s*\{\s*@layer theme/u);
 });
 
 test("unrelated custom properties do not become Cornerfill paint dependencies", async () => {
@@ -273,6 +282,10 @@ test("paint-only and cross-file variable chunks emit observation metadata", asyn
   .face:hover { --face-color: blue; }
 }
 `, { from: "theme.css" });
+  const reset = await postcss([cornerfillPostcss()]).process(
+    ".theme { all: initial; }",
+    { from: "reset.css" },
+  );
   const read = (css) => {
     const manifests = [];
     postcss.parse(css).walkDecls((declaration) => {
@@ -288,6 +301,7 @@ test("paint-only and cross-file variable chunks emit observation metadata", asyn
   assert.deepEqual(themeManifest.candidateSelectors, []);
   assert.deepEqual(themeManifest.customProperties[0].mediaQueries, ["(prefers-color-scheme: dark)"]);
   assert(themeManifest.customProperties[0].observation.events.includes("pointerover"));
+  assert.equal(read(reset.css).observation.invalidation, "subtree");
 });
 
 test("a second pass rebuilds valid manifests and compiles newly concatenated CSS", async () => {

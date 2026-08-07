@@ -28,7 +28,10 @@ import {
   scanCssSyntax,
   skipCssTrivia,
 } from "./css-syntax.mjs";
-import { standardPropertyAffectsOwnedPaint } from "./paint-properties.mjs";
+import {
+  standardPropertyAffectsOwnedPaint,
+  standardPropertyInheritsIntoOwnedPaint,
+} from "./paint-properties.mjs";
 import { mergeSelectorObservation, selectorObservation } from "./selector-metadata.mjs";
 import { rewriteCornerShapeSupportsCondition } from "./supports.mjs";
 import {
@@ -118,6 +121,68 @@ function ancestorAtRule(node: Node, names: ReadonlySet<string>): AtRule | null {
     parent = parent.parent;
   }
   return null;
+}
+
+function parsedLayerNames(source: string): readonly (readonly string[])[] {
+  const text = replaceCssCommentsWithWhitespace(source).trim();
+  if (!text) return Object.freeze([]);
+  const branches: string[] = [];
+  let start = 0;
+  scanCssSyntax(text, 0, (index, character, parentheses, brackets, blocks) => {
+    if (character === "," && parentheses === 0 && brackets === 0 && blocks === 0) {
+      branches.push(text.slice(start, index));
+      start = index + 1;
+    }
+  });
+  branches.push(text.slice(start));
+  return Object.freeze(branches.map((branch) => {
+    const segments: string[] = [];
+    let cursor = 0;
+    while (cursor < branch.length) {
+      cursor = skipCssTrivia(branch, cursor);
+      const identifier = cssIdentifierAt(branch, cursor);
+      if (!identifier) throw new SyntaxError("Cornerfill cannot parse this cascade-layer name");
+      segments.push(identifier.value);
+      cursor = skipCssTrivia(branch, identifier.end);
+      if (cursor === branch.length) break;
+      if (branch[cursor] !== ".") {
+        throw new SyntaxError("Cornerfill cannot parse this cascade-layer name");
+      }
+      cursor += 1;
+    }
+    if (segments.length === 0) throw new SyntaxError("Cornerfill found an empty cascade-layer name");
+    return Object.freeze(segments);
+  }));
+}
+
+function completeLayerNames(atRule: AtRule): readonly (readonly string[])[] {
+  const prefix: string[] = [];
+  const ancestors: AtRule[] = [];
+  let parent: Node | undefined = atRule.parent;
+  while (parent) {
+    if (parent.type === "atrule"
+      && decodeCssEscapes((parent as AtRule).name).toLowerCase() === "layer") {
+      ancestors.push(parent as AtRule);
+    }
+    parent = parent.parent;
+  }
+  for (const ancestor of ancestors.reverse()) {
+    const names = parsedLayerNames(ancestor.params);
+    if (names.length === 1) prefix.push(...names[0]!);
+  }
+  return Object.freeze(parsedLayerNames(atRule.params).map((name) => (
+    Object.freeze([...prefix, ...name])
+  )));
+}
+
+function layerKey(name: readonly string[]): string {
+  return JSON.stringify(name);
+}
+
+function establishLayer(established: Set<string>, name: readonly string[]): void {
+  for (let length = 1; length <= name.length; length += 1) {
+    established.add(layerKey(name.slice(0, length)));
+  }
 }
 
 function mediaQueries(declaration: Declaration): readonly string[] {
@@ -522,6 +587,7 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
     const hostContextRules: Rule[] = [];
     const hostContextRuleSet = new Set<Rule>();
     const generatedRuleCounts = new Map<string, number>();
+    const establishedLayers = new Set<string>();
 
     for (const [property, registrations] of registered) {
       if (AUTO_CARRIER_SET.has(property)) {
@@ -544,10 +610,18 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
       if (name === "property" && ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
         throw atRule.error("Cornerfill cannot compile conditional @property registration");
       }
-      if (name === "layer"
-        && (!atRule.nodes || atRule.params.trim())
-        && ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
-        throw atRule.error("Cornerfill cannot compile conditional cascade-layer ordering");
+      if (name === "layer" && atRule.params.trim()) {
+        let layerNames: readonly (readonly string[])[];
+        try { layerNames = completeLayerNames(atRule); } catch (error) {
+          throw atRule.error(error instanceof Error ? error.message : String(error));
+        }
+        if (ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
+          if (layerNames.some((layerName) => !establishedLayers.has(layerKey(layerName)))) {
+            throw atRule.error("Cornerfill cannot compile conditional cascade-layer first establishment");
+          }
+        } else {
+          for (const layerName of layerNames) establishLayer(establishedLayers, layerName);
+        }
       }
     });
 
@@ -618,7 +692,9 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
         return;
       }
       const metadata = validateRule(rule, authored);
-      directObservations.push(metadata.observation);
+      directObservations.push(standardPropertyInheritsIntoOwnedPaint(property)
+        ? minimumInvalidation(metadata.observation, "subtree")
+        : metadata.observation);
       for (const query of metadata.mediaQueries) directMediaQueries.add(query);
       mergeHostContexts(directHostContexts, metadata.hostContexts);
       rememberHostContextRule(rule);

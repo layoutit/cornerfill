@@ -153,7 +153,8 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-language,
   .cornerfill-compiled-direction,
   .cornerfill-compiled-disabled,
-  .cornerfill-compiled-variable-shape {
+  .cornerfill-compiled-variable-shape,
+  .cornerfill-compiled-font-potential {
     display: block;
     width: 36px;
     height: 28px;
@@ -195,14 +196,25 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
     corner-start-start-shape: bevel;
     background: rgb(220, 40, 40);
   }
+  .cornerfill-compiled-zero-font { font-size: 0; }
+  .cornerfill-compiled-font-potential {
+    border-radius: 1em;
+    corner-shape: bevel;
+  }
   :root {
     --cornerfill-compiled-dynamic-shape: round;
     --cornerfill-compiled-indirect-shape: bevel;
   }
   .cornerfill-compiled-inherited-host { --cornerfill-compiled-inherited-shape: bevel; }
+  .cornerfill-compiled-external-hover-host { --cornerfill-compiled-external-hover-shape: bevel; }
+  .cornerfill-compiled-external-theme:hover .cornerfill-compiled-external-hover-host {
+    --cornerfill-compiled-external-hover-shape: scoop;
+  }
+  .cornerfill-compiled-inherited-standard-host { color: rgb(220, 40, 40); }
   @media (prefers-color-scheme: dark) {
     :root { --cornerfill-compiled-indirect-shape: scoop; }
     .cornerfill-compiled-inherited-host { --cornerfill-compiled-inherited-shape: scoop; }
+    .cornerfill-compiled-inherited-standard-host { color: rgb(20, 40, 220); }
   }
   .cornerfill-compiled-shared-host { corner-shape: bevel; }
   @media print { * { corner-shape: bevel; } }
@@ -211,7 +223,11 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
   .cornerfill-compiled-shadow,
   .cornerfill-compiled-shadow-host-child,
   .cornerfill-compiled-shadow-context,
-  .cornerfill-compiled-shadow-inherited {
+  .cornerfill-compiled-shadow-inherited,
+  .cornerfill-compiled-shadow-external-hover,
+  .cornerfill-compiled-shadow-external-context,
+  .cornerfill-compiled-shadow-inherited-standard,
+  .cornerfill-compiled-shadow-logical {
     display: block;
     width: 36px;
     height: 28px;
@@ -221,6 +237,21 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
   .cornerfill-compiled-shadow { corner-shape: bevel; }
   .cornerfill-compiled-shadow-inherited {
     corner-shape: var(--cornerfill-compiled-inherited-shape);
+  }
+  .cornerfill-compiled-shadow-external-hover {
+    corner-shape: var(--cornerfill-compiled-external-hover-shape);
+  }
+  :host-context(.cornerfill-compiled-external-theme:hover)
+    .cornerfill-compiled-shadow-external-context {
+    corner-shape: bevel;
+  }
+  .cornerfill-compiled-shadow-inherited-standard {
+    corner-shape: bevel;
+    background: currentColor;
+  }
+  .cornerfill-compiled-shadow-logical {
+    border-radius: 12px 0 0 0;
+    corner-start-start-shape: bevel;
   }
   :host { corner-shape: notch; }
   :host(.cornerfill-compiled-shadow-active) .cornerfill-compiled-shadow-host-child {
@@ -233,6 +264,18 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
 const COMPILED_SHADOW_RESET_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-shadow { corner-shape: initial; }
 `, { from: "compiled-shadow-reset.css" })).css;
+const COMPILED_SELECTOR_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-style-gate[style] + .cornerfill-compiled-style-gated,
+  .cornerfill-compiled-selector-shell:has(.cornerfill-compiled-empty-marker:empty)
+    .cornerfill-compiled-character-gated {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+    corner-shape: bevel;
+  }
+`, { from: "compiled-selector-fixture.css" })).css;
 const COMPILED_PAINT_METADATA_CSS = (await postcss([cornerfillPostcss()]).process(`
   @media (prefers-color-scheme: dark) {
     .cornerfill-compiled-cross-file:hover,
@@ -256,6 +299,13 @@ const COMPILED_BUDGET_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
   @media print { .cornerfill-compiled-budget-round { corner-shape: bevel; } }
   @media (max-width: 50px) {
     .cornerfill-compiled-budget-round { corner-shape: bevel; }
+  }
+  .cornerfill-compiled-recovery-grid:hover .cornerfill-compiled-recovery-item {
+    width: 12px;
+    height: 10px;
+    border-radius: 5px;
+    background: red;
+    corner-shape: bevel;
   }
 `, { from: "compiled-budget-fixture.css" })).css;
 
@@ -306,6 +356,11 @@ async function startServer() {
     if (url.pathname === "/bench/compiled-shadow-reset.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_SHADOW_RESET_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-selector-fixture.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_SELECTOR_FIXTURE_CSS);
       return;
     }
     if (url.pathname === "/bench/compiled-paint-metadata.css") {
@@ -454,6 +509,23 @@ async function driveBrowserStates(page) {
       await page.locator("#status").hover({ force: true });
       stage = "compiled-ancestor-hover-out-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-ancestor-hover-out-driven"; });
+    } else if (stage === "compiled-external-hover-ready") {
+      await page.locator(".cornerfill-compiled-external-hover-trigger").hover();
+      stage = "compiled-external-hover-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-external-hover-driven"; });
+    } else if (stage === "compiled-external-hover-out-ready") {
+      await page.locator("#status").hover({ force: true });
+      stage = "compiled-external-hover-out-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-external-hover-out-driven"; });
+    } else if (stage === "compiled-recovery-hover-ready") {
+      await page.frameLocator("#cornerfill-compiled-budget-frame")
+        .locator(".cornerfill-compiled-recovery-grid").hover();
+      stage = "compiled-recovery-hover-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-recovery-hover-driven"; });
+    } else if (stage === "compiled-recovery-hover-out-ready") {
+      await page.locator("#status").hover({ force: true });
+      stage = "compiled-recovery-hover-out-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-recovery-hover-out-driven"; });
     } else if (stage === "media-dark-ready") {
       await page.emulateMedia({ colorScheme: "dark" });
       stage = "media-dark-driven";

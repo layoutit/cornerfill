@@ -46,11 +46,30 @@ const OWNED_PAINT_PREFIXES = Object.freeze([
   "padding",
 ]);
 
+const INHERITED_OWNED_PAINT_PROPERTIES = new Set([
+  "color",
+  "color-scheme",
+  "direction",
+  "forced-color-adjust",
+  "image-rendering",
+  "line-height",
+  "text-orientation",
+  "visibility",
+  "writing-mode",
+]);
+
 export function standardPropertyAffectsOwnedPaint(property: string): boolean {
   return OWNED_PAINT_PROPERTIES.has(property)
     || OWNED_PAINT_PREFIXES.some((prefix) => (
       property === prefix || property.startsWith(`${prefix}-`)
     ));
+}
+
+export function standardPropertyInheritsIntoOwnedPaint(property: string): boolean {
+  return property === "all"
+    || INHERITED_OWNED_PAINT_PROPERTIES.has(property)
+    || property === "font"
+    || property.startsWith("font-");
 }
 
 export function propertyAffectsOwnedPaint(property: string): boolean {
