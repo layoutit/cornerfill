@@ -36,7 +36,7 @@ test("the PostCSS plugin preserves authored declarations and emits one manifest"
     }
   });
   assert.equal(manifests.length, 2);
-  assert.deepEqual(manifests[0].selectors, [".card"]);
+  assert.deepEqual(manifests[0].candidateSelectors, [".card"]);
   assert.deepEqual(manifests[1], manifests[0]);
 
   const second = await postcss([cornerfillPostcss()]).process(first.css, { from: "fixture.css" });
@@ -194,10 +194,19 @@ test("the PostCSS plugin rewrites only implemented corner-shape support tests", 
 
 test("the PostCSS plugin accepts scoped rules and rejects unobservable build input at its source", async () => {
   const scoped = await postcss([cornerfillPostcss()]).process(
-    "@scope (.shell) { .scoped { corner-shape: bevel } }",
+    "@scope /* preserved comment */ (.shell) { .scoped { corner-shape: bevel } }",
     { from: "scoped.css" },
   );
   assert.match(scoped.css, /\.scoped \{ corner-shape: bevel;/u);
+  const scopedManifest = [];
+  postcss.parse(scoped.css).walkDecls((declaration) => {
+    if (declaration.prop.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) {
+      scopedManifest.push(parseCompiledManifestCssValue(declaration.value));
+    }
+  });
+  assert.deepEqual(scopedManifest[0].candidateSelectors, [".scoped"]);
+  assert(scopedManifest[0].observation.attributes.includes("class"));
+  assert.equal(scopedManifest[0].observation.invalidation, "subtree");
 
   const contextArgument = ".theme";
   const context = await postcss([cornerfillPostcss()]).process(
@@ -216,6 +225,9 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
     [".card::before { corner-shape: bevel }", /pseudo-elements/u],
     [".card:visited { corner-shape: bevel }", /cannot observe selector state: visited/u],
     ["@container (width > 20px) { .card { corner-shape: bevel } }", /dynamic @container/u],
+    ["@scope (.shell) { > .card { corner-shape: bevel } }", /relative selectors/u],
+    ["@keyframes morph { from { corner-shape: bevel } }", /inside keyframes/u],
+    [":host-context(.theme .wrapper) .card { corner-shape: bevel }", /one compound selector/u],
     [".parent { & .card { corner-shape: bevel } }", /after the nesting transform/u],
   ]) {
     await assert.rejects(
@@ -225,4 +237,85 @@ test("the PostCSS plugin accepts scoped rules and rejects unobservable build inp
         && message.test(error.message),
     );
   }
+});
+
+test("unrelated custom properties do not become Cornerfill paint dependencies", async () => {
+  const result = await postcss([cornerfillPostcss()]).process(`
+.card::before { --brand-accent: red; }
+@container card (width > 20rem) { .title { --title-size: large; } }
+.face { corner-shape: bevel; }
+`, { from: "application.css" });
+  const manifests = [];
+  postcss.parse(result.css).walkDecls((declaration) => {
+    if (declaration.prop.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) {
+      manifests.push(parseCompiledManifestCssValue(declaration.value));
+    }
+  });
+  assert.deepEqual(manifests[0].candidateSelectors, [".face"]);
+  assert(!manifests[0].customProperties.some(({ name }) => name === "--brand-accent"));
+  const title = manifests[0].customProperties.find(({ name }) => name === "--title-size");
+  assert(title?.problems.some((problem) => /@container/u.test(problem)));
+});
+
+test("paint-only and cross-file variable chunks emit observation metadata", async () => {
+  const shape = await postcss([cornerfillPostcss()]).process(
+    ".face { corner-shape: bevel; background: var(--face-color); }",
+    { from: "shape.css" },
+  );
+  const theme = await postcss([cornerfillPostcss()]).process(`
+@media (prefers-color-scheme: dark) {
+  .face:hover { --face-color: blue; }
+}
+`, { from: "theme.css" });
+  const read = (css) => {
+    const manifests = [];
+    postcss.parse(css).walkDecls((declaration) => {
+      if (declaration.prop.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) {
+        manifests.push(parseCompiledManifestCssValue(declaration.value));
+      }
+    });
+    return manifests[0];
+  };
+  const shapeManifest = read(shape.css);
+  const themeManifest = read(theme.css);
+  assert.deepEqual(shapeManifest.referencedCustomProperties, ["--face-color"]);
+  assert.deepEqual(themeManifest.candidateSelectors, []);
+  assert.deepEqual(themeManifest.customProperties[0].mediaQueries, ["(prefers-color-scheme: dark)"]);
+  assert(themeManifest.customProperties[0].observation.events.includes("pointerover"));
+});
+
+test("a second pass rebuilds valid manifests and compiles newly concatenated CSS", async () => {
+  const first = await postcss([cornerfillPostcss()]).process(
+    ".card-a { corner-shape: bevel }",
+    { from: "a.css" },
+  );
+  const combined = `${first.css}\n.card-b { corner-shape: scoop }`;
+  const result = await postcss([cornerfillPostcss()]).process(combined, { from: "bundle.css" });
+  const manifests = [];
+  postcss.parse(result.css).walkDecls((declaration) => {
+    if (declaration.prop.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) {
+      manifests.push(parseCompiledManifestCssValue(declaration.value));
+    }
+  });
+  assert.deepEqual(manifests[0].candidateSelectors, [".card-a", ".card-b"]);
+  assert.match(result.css, /\.card-b \{ corner-shape: scoop; --cornerfill-corner-top-left-shape: scoop/u);
+  const second = await postcss([cornerfillPostcss()]).process(result.css, { from: "bundle.css" });
+  assert.equal(second.css, result.css);
+});
+
+test("reserved manifest-looking declarations fail instead of disabling compilation", async () => {
+  await assert.rejects(
+    postcss([cornerfillPostcss()]).process(`
+:root { --cornerfill-compiled-manifest-debug: "test"; }
+.face { corner-shape: bevel; }
+`, { from: "forged.css" }),
+    /invalid compiled manifest/u,
+  );
+  await assert.rejects(
+    postcss([cornerfillPostcss()]).process(
+      ".face { --cornerfill-corner-shape: bevel; corner-shape: scoop; }",
+      { from: "forged-carrier.css" },
+    ),
+    /authored or orphaned private carrier/u,
+  );
 });

@@ -12,8 +12,10 @@ import {
   COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX,
   COMPILED_MANIFEST_PROPERTY_PREFIX,
   compiledCarrierProblem,
+  compiledManifestPropertyName,
   hasResolvedShapeCarrier,
   parseCompiledManifestCssValue,
+  serializeCompiledManifest,
 } from "./carrier-contract.mjs";
 import type {
   CornerfillCompiledManifest,
@@ -22,7 +24,10 @@ import type {
 } from "./carrier-contract.mjs";
 import { compiledSelectorPlan } from "./compiled-selectors.mjs";
 import type { CompiledHostContext } from "./compiled-selectors.mjs";
+import { cssDeclarationSignature } from "./css-syntax.mjs";
 import { mergeSelectorObservation, selectorObservation } from "./selector-metadata.mjs";
+import { observeDisabledState } from "./cssom-broker.mjs";
+import { isStylesheetSourceElement } from "./stylesheet-elements.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
 type RuntimeDocument = Document & Readonly<{ defaultView: RuntimeWindow }>;
@@ -67,10 +72,12 @@ export interface CornerfillCompiledExplanation {
   readonly mode: "compiled";
   readonly observation: Readonly<SelectorObservation>;
   readonly observing: boolean;
+  readonly potentialCandidates: number;
   readonly root: "document" | "shadow";
   readonly runtime: Readonly<CornerfillControllerStats>;
   readonly schema: "cornerfill-compiled-controller@1";
   readonly scopes: number;
+  readonly status: "active" | "blocked-recoverable";
 }
 
 export interface CornerfillCompiledScopeHandle {
@@ -95,7 +102,6 @@ interface CompiledManifestState {
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
   readonly selectorList: string;
-  readonly selectors: readonly string[];
 }
 
 interface EventListenerRecord {
@@ -117,7 +123,12 @@ interface ScanRoot {
 }
 
 interface ScanResult {
+  readonly inspections: ReadonlyMap<HTMLElement, Readonly<{
+    requiresFallback: boolean;
+    values: Readonly<Record<string, string>>;
+  }>>;
   readonly matched: ReadonlySet<HTMLElement>;
+  readonly rawMatched: ReadonlySet<HTMLElement>;
   readonly visited: ReadonlySet<HTMLElement>;
 }
 
@@ -130,10 +141,10 @@ interface CompiledScopeInternal {
   readonly candidates: Set<HTMLElement>;
   readonly counters: CompiledCounters;
   readonly handle: CornerfillCompiledScopeHandle;
-  readonly root: CompiledRoot;
   readonly performRefresh: () => Promise<Readonly<CornerfillCompiledExplanation>>;
   readonly destroyLocal: () => void;
   readonly contains: (element: HTMLElement) => boolean;
+  readonly mayStyle: (element: HTMLElement) => boolean;
 }
 
 const DEFAULT_MAX_CANDIDATE_ELEMENTS = 512;
@@ -150,7 +161,6 @@ const EMPTY_STATE: Readonly<CompiledManifestState> = Object.freeze({
   mediaQueries: Object.freeze([]),
   observation: selectorObservation([]),
   selectorList: "",
-  selectors: Object.freeze([]),
 });
 
 function positiveSafeInteger(value: number, name: string): void {
@@ -217,8 +227,7 @@ function isGeneratedStyle(element: Element, view: RuntimeWindow): boolean {
 }
 
 function isStylesheetElement(element: Element, view: RuntimeWindow): boolean {
-  return (element instanceof view.HTMLStyleElement && !isGeneratedStyle(element, view))
-    || element instanceof view.HTMLLinkElement;
+  return !isGeneratedStyle(element, view) && isStylesheetSourceElement(element);
 }
 
 function nodeContainsStylesheet(node: Node, view: RuntimeWindow): boolean {
@@ -235,6 +244,43 @@ function stylesheetTextOwner(node: Node, view: RuntimeWindow): HTMLStyleElement 
   return parent;
 }
 
+function inlineCustomPropertySignature(source: unknown): string {
+  return cssDeclarationSignature(source, (property) => property.startsWith("--"));
+}
+
+function inlineCustomPropertiesChanged(record: MutationRecord): boolean {
+  const target = record.target.nodeType === 1 ? record.target as Element : null;
+  return inlineCustomPropertySignature(record.oldValue)
+    !== inlineCustomPropertySignature(target?.getAttribute("style"));
+}
+
+function minimalScanRoots(roots: Iterable<Readonly<ScanRoot>>): readonly Readonly<ScanRoot>[] {
+  const direct = new Set<Element>();
+  const subtrees = new Set<Element>();
+  for (const { element, subtree } of roots) (subtree ? subtrees : direct).add(element);
+  const coverage = new Map<Element, boolean>();
+  const coveredBySubtree = (element: Element): boolean => {
+    let parent = element.parentElement;
+    const path: Element[] = [];
+    while (parent && !subtrees.has(parent) && !coverage.has(parent)) {
+      path.push(parent);
+      parent = parent.parentElement;
+    }
+    const result = parent !== null
+      && (subtrees.has(parent) || coverage.get(parent) === true);
+    for (const ancestor of path) coverage.set(ancestor, result);
+    return result;
+  };
+  return Object.freeze([
+    ...[...subtrees]
+      .filter((element) => !coveredBySubtree(element))
+      .map((element) => Object.freeze({ element, subtree: true })),
+    ...[...direct]
+      .filter((element) => !subtrees.has(element) && !coveredBySubtree(element))
+      .map((element) => Object.freeze({ element, subtree: false })),
+  ]);
+}
+
 function compiledManifests(
   view: RuntimeWindow,
   target: Element,
@@ -246,7 +292,11 @@ function compiledManifests(
     if (!property.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) continue;
     const value = computed.getPropertyValue(property).trim();
     if (!value || value === AUTO_UNSET) continue;
-    manifests.set(property, parseCompiledManifestCssValue(value));
+    const manifest = parseCompiledManifestCssValue(value);
+    if (property !== compiledManifestPropertyName(serializeCompiledManifest(manifest))) {
+      throw new TypeError(`compiled manifest property does not match its payload: ${property}`);
+    }
+    manifests.set(property, manifest);
   }
   return Object.freeze([...manifests.values()]);
 }
@@ -257,13 +307,41 @@ function manifestState(
   manifests: readonly Readonly<CornerfillCompiledManifest>[],
 ): Readonly<CompiledManifestState> {
   const authoredSelectors = Object.freeze([
-    ...new Set(manifests.flatMap(({ selectors }) => selectors)),
+    ...new Set(manifests.flatMap(({ candidateSelectors }) => candidateSelectors)),
   ].sort());
   const plan = compiledSelectorPlan(authoredSelectors);
+  const customProperties = new Map<string, CornerfillCompiledManifest["customProperties"][number][]>();
+  for (const manifest of manifests) {
+    for (const record of manifest.customProperties) {
+      const definitions = customProperties.get(record.name) ?? [];
+      definitions.push(record);
+      customProperties.set(record.name, definitions);
+    }
+  }
+  const reachable = new Set<string>();
+  const pending = manifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties);
+  const dependencyObservations: Readonly<SelectorObservation>[] = [];
+  const dependencyMediaQueries = new Set<string>();
+  const dependencyHostContexts: Readonly<CompiledHostContext>[] = [];
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    if (reachable.has(name)) continue;
+    reachable.add(name);
+    for (const definition of customProperties.get(name) ?? []) {
+      if (definition.problems.length > 0) {
+        throw new TypeError(`compiled CSS cannot observe ${name}: ${definition.problems.join("; ")}`);
+      }
+      pending.push(...definition.references);
+      dependencyObservations.push(definition.observation);
+      for (const query of definition.mediaQueries) dependencyMediaQueries.add(query);
+      dependencyHostContexts.push(...definition.hostContexts);
+    }
+  }
   const hostContexts = new Map<string, Readonly<CompiledHostContext>>();
   for (const context of [
     ...plan.hostContexts,
     ...manifests.flatMap(({ hostContexts: values }) => values),
+    ...dependencyHostContexts,
   ]) {
     document.documentElement.matches(context.argument);
     const existing = hostContexts.get(context.attribute);
@@ -275,7 +353,10 @@ function manifestState(
   const selectors = root === document ? plan.documentSelectors : plan.elementSelectors;
   for (const selector of selectors) document.documentElement.matches(selector);
   const mediaQueries = Object.freeze([
-    ...new Set(manifests.flatMap(({ mediaQueries: values }) => values)),
+    ...new Set([
+      ...manifests.flatMap(({ mediaQueries: values }) => values),
+      ...dependencyMediaQueries,
+    ]),
   ].sort());
   return Object.freeze({
     hostCandidate: root === document ? false : plan.hostCandidate,
@@ -288,9 +369,11 @@ function manifestState(
     hostDependent: root === document ? false : plan.hostDependent || hostContexts.size > 0,
     manifests,
     mediaQueries,
-    observation: mergeSelectorObservation(manifests.map(({ observation }) => observation)),
+    observation: mergeSelectorObservation([
+      ...manifests.map(({ observation }) => observation),
+      ...dependencyObservations,
+    ]),
     selectorList: selectors.join(","),
-    selectors,
   });
 }
 
@@ -317,6 +400,34 @@ function matchesShadowIncludingContext(
     current = containingRoot instanceof view.ShadowRoot ? containingRoot.host : null;
   }
   return false;
+}
+
+function shadowIncludingContains(
+  view: RuntimeWindow,
+  ancestor: Element,
+  element: Element,
+): boolean {
+  let current: Element | null = element;
+  while (current) {
+    if (current === ancestor) return true;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const containingRoot = current.getRootNode();
+    current = containingRoot instanceof view.ShadowRoot ? containingRoot.host : null;
+  }
+  return false;
+}
+
+function stylesheetElements(root: CompiledRoot, view: RuntimeWindow): readonly Element[] {
+  const container: ParentNode = root instanceof view.Document ? root.documentElement : root;
+  const elements: Element[] = [];
+  if (container instanceof view.Element && isStylesheetElement(container, view)) elements.push(container);
+  for (const element of container.querySelectorAll("style,link[rel]")) {
+    if (isStylesheetElement(element, view)) elements.push(element);
+  }
+  return Object.freeze(elements);
 }
 
 export function installCornerfillCompiled(
@@ -359,6 +470,7 @@ export function installCornerfillCompiled(
   });
   const handles = new Map<HTMLElement, Readonly<CornerfillHandle>>();
   const claims = new Map<HTMLElement, Set<CompiledScopeInternal>>();
+  const blockedScopes = new Set<CompiledScopeInternal>();
   const scopes = new Map<ShadowRoot, CompiledScopeInternal>();
   let primary: CompiledScopeInternal;
   let destroyed = false;
@@ -388,18 +500,32 @@ export function installCornerfillCompiled(
     return elementClaims;
   };
 
-  const syncElements = async (elements: Iterable<HTMLElement>): Promise<readonly string[]> => {
+  const blockedFor = (element: HTMLElement): boolean => {
+    for (const scope of blockedScopes) if (scope.mayStyle(element)) return true;
+    return false;
+  };
+
+  const syncElements = async (
+    elements: Iterable<HTMLElement>,
+    inspections?: ReadonlyMap<HTMLElement, Readonly<{
+      requiresFallback: boolean;
+      values: Readonly<Record<string, string>>;
+    }>>,
+  ): Promise<readonly string[]> => {
     const nextErrors: string[] = [];
     for (const element of new Set(elements)) {
       const elementClaims = validClaims(element);
       for (const scope of elementClaims) scope.counters.attachmentPasses += 1;
-      if (elementClaims.size === 0 || !element.isConnected) {
+      if (elementClaims.size === 0 || !element.isConnected || blockedFor(element)) {
         try { detach(element); } catch (error) { nextErrors.push(errorMessage(error)); }
         continue;
       }
       try {
-        for (const scope of elementClaims) scope.counters.computedChecks += 1;
-        const inspection = runtime.inspectAuthoredStyle(element, AUTO_CARRIERS);
+        let inspection = inspections?.get(element);
+        if (!inspection) {
+          for (const scope of elementClaims) scope.counters.computedChecks += 1;
+          inspection = runtime.inspectAuthoredStyle(element, AUTO_CARRIERS);
+        }
         const problem = compiledCarrierProblem(inspection.values);
         if (problem) throw new TypeError(problem);
         if (!hasResolvedShapeCarrier(inspection.values) || !inspection.requiresFallback) {
@@ -450,8 +576,9 @@ export function installCornerfillCompiled(
 
   const createScope = (root: CompiledRoot, isPrimary: boolean): CompiledScopeInternal => {
     const candidates = new Set<HTMLElement>();
+    const watched = new Set<HTMLElement>();
     const eventListeners: EventListenerRecord[] = [];
-    const mediaListeners: MediaListenerRecord[] = [];
+    const mediaListeners = new Map<string, MediaListenerRecord>();
     const pendingElements = new Set<Element>();
     const pendingSubtrees = new Set<Element>();
     const pendingRefresh = new Set<HTMLElement>();
@@ -472,16 +599,19 @@ export function installCornerfillCompiled(
       sourceReads: 0,
     };
     let scopeDestroyed = false;
+    let status: "active" | "blocked-recoverable" = "active";
     let errors: readonly string[] = Object.freeze([]);
     let manifestCount = 0;
     let state = EMPTY_STATE;
     let observer: MutationObserver | null = null;
-    let externalObserver: MutationObserver | null = null;
+    const externalObservers: MutationObserver[] = [];
+    const cssomReleases: (() => void)[] = [];
     let pendingFull = false;
     let queued = false;
     let stateFrame: number | null = null;
     let manifestFrame: number | null = null;
     const ownedHostContextMarkers = new Set<string>();
+    const pendingHostContextWrites = new Map<string, string | null>();
 
     const manifestTarget = (): Element => (
       root === document ? document.documentElement : (root as ShadowRoot).host
@@ -494,10 +624,21 @@ export function installCornerfillCompiled(
       return element === shadow.host ? state.hostCandidate : element.getRootNode() === shadow;
     };
 
-    const releaseHostContextMarker = (attribute: string): void => {
-      if (root === document || !ownedHostContextMarkers.delete(attribute)) return;
+    const mayStyle = (element: HTMLElement): boolean => {
+      if (root === document) return element.isConnected && element.getRootNode() === document;
+      const shadow = root as ShadowRoot;
+      return element === shadow.host || element.getRootNode() === shadow;
+    };
+
+    const releaseHostContextMarker = (attribute: string, force = false): void => {
+      if (root === document) return;
+      const owned = ownedHostContextMarkers.delete(attribute);
+      if (!owned && !force) return;
       const host = (root as ShadowRoot).host;
-      if (host.getAttribute(attribute) === "1") host.removeAttribute(attribute);
+      if (host.hasAttribute(attribute)) {
+        pendingHostContextWrites.set(attribute, null);
+        host.removeAttribute(attribute);
+      }
     };
 
     const syncHostContextMarkers = (): void => {
@@ -509,16 +650,28 @@ export function installCornerfillCompiled(
       }
       for (const { argument, attribute } of state.hostContexts) {
         if (matchesShadowIncludingContext(view, host, argument)) {
-          if (!host.hasAttribute(attribute)) {
+          ownedHostContextMarkers.add(attribute);
+          if (host.getAttribute(attribute) !== "1") {
+            pendingHostContextWrites.set(attribute, "1");
             host.setAttribute(attribute, "1");
-            ownedHostContextMarkers.add(attribute);
           }
-        } else releaseHostContextMarker(attribute);
+        } else releaseHostContextMarker(attribute, true);
       }
     };
 
+    const consumesOwnHostContextWrite = (target: Element, attribute: string): boolean => {
+      if (root === document
+        || target !== (root as ShadowRoot).host
+        || !attribute.startsWith(COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX)
+        || !pendingHostContextWrites.has(attribute)) return false;
+      const expected = pendingHostContextWrites.get(attribute) ?? null;
+      pendingHostContextWrites.delete(attribute);
+      return target.getAttribute(attribute) === expected;
+    };
+
     const reportAsyncError = (error: unknown, context: string): void => {
-      errors = Object.freeze([errorMessage(error)]);
+      const message = errorMessage(error);
+      if (!errors.includes(message)) errors = Object.freeze([...errors, message]);
       try { onError?.(error, context); } catch { /* Diagnostics cannot re-enter work. */ }
     };
 
@@ -543,8 +696,10 @@ export function installCornerfillCompiled(
         candidates: candidates.size,
         attached: localAttached(),
         errors,
+        status,
         observing: Boolean(observer),
         observation: state.observation,
+        potentialCandidates: watched.size,
         limits: Object.freeze({ maxCandidateElements, maxScannedElements }),
         counters: Object.freeze({ ...counters }),
         runtime: runtime.stats(),
@@ -552,10 +707,15 @@ export function installCornerfillCompiled(
     }
 
     const scan = (roots: Iterable<Readonly<ScanRoot>>, replaceAll: boolean): Readonly<ScanResult> => {
+      const inspections = new Map<HTMLElement, Readonly<{
+        requiresFallback: boolean;
+        values: Readonly<Record<string, string>>;
+      }>>();
       const matched = new Set<HTMLElement>();
+      const rawMatched = new Set<HTMLElement>();
       const visited = new Set<HTMLElement>();
       if (!state.selectorList && !(root !== document && state.hostCandidate)) {
-        return Object.freeze({ matched, visited });
+        return Object.freeze({ inspections, matched, rawMatched, visited });
       }
       let scanned = 0;
       const inspect = (element: Element, forceHost = false): void => {
@@ -566,8 +726,13 @@ export function installCornerfillCompiled(
           );
         }
         if (!(element instanceof view.HTMLElement)) return;
-        if (candidates.has(element)) visited.add(element);
+        if (candidates.has(element) || watched.has(element)) visited.add(element);
         if (!forceHost && (!state.selectorList || !element.matches(state.selectorList))) return;
+        rawMatched.add(element);
+        counters.computedChecks += 1;
+        const inspection = runtime.inspectAuthoredStyle(element, AUTO_CARRIERS);
+        if (!hasResolvedShapeCarrier(inspection.values) || !inspection.requiresFallback) return;
+        inspections.set(element, inspection);
         matched.add(element);
         if (matched.size > maxCandidateElements) {
           throw new RangeError(
@@ -575,7 +740,7 @@ export function installCornerfillCompiled(
           );
         }
       };
-      for (const scanRoot of roots) {
+      for (const scanRoot of minimalScanRoots(roots)) {
         if (scanRoot.subtree) {
           for (const element of subtreeElements(scanRoot.element)) inspect(element);
         } else inspect(scanRoot.element);
@@ -588,7 +753,7 @@ export function installCornerfillCompiled(
           `compiled root exceeds the maximum candidate element count of ${maxCandidateElements}`,
         );
       }
-      return Object.freeze({ matched, visited });
+      return Object.freeze({ inspections, matched, rawMatched, visited });
     };
 
     const fullScanRoots = (): readonly Readonly<ScanRoot>[] => {
@@ -605,8 +770,13 @@ export function installCornerfillCompiled(
       full: boolean,
     ): Promise<Readonly<ReconcileResult>> => {
       counters.candidatePasses += 1;
-      const { matched, visited } = scan(roots, full);
+      const { inspections, matched, rawMatched, visited } = scan(roots, full);
       const affected = new Set<HTMLElement>(matched);
+      const watchedRemovals = full ? [...watched] : [...visited];
+      for (const element of watchedRemovals) {
+        if (!rawMatched.has(element)) watched.delete(element);
+      }
+      for (const element of rawMatched) watched.add(element);
       const removals = full ? [...candidates] : [...visited];
       for (const element of removals) {
         if (matched.has(element)) continue;
@@ -619,22 +789,25 @@ export function installCornerfillCompiled(
         addClaim(scope, element);
       }
       return Object.freeze({
-        errors: await syncElements(affected),
+        errors: await syncElements(affected, inspections),
         synchronized: affected,
       });
     };
 
-    const clearObservation = (): void => {
+    const clearObservation = (preserveMedia = false): void => {
       observer?.disconnect();
       observer = null;
-      externalObserver?.disconnect();
-      externalObserver = null;
+      for (const externalObserver of externalObservers.splice(0)) externalObserver.disconnect();
+      for (const release of cssomReleases.splice(0)) release();
       for (const { target, type, listener, options: listenerOptions } of eventListeners.splice(0)) {
         target.removeEventListener(type, listener, listenerOptions);
       }
-      for (const { list, listener, legacy } of mediaListeners.splice(0)) {
-        if (legacy) list.removeListener(listener);
-        else list.removeEventListener("change", listener);
+      if (!preserveMedia) {
+        for (const { list, listener, legacy } of mediaListeners.values()) {
+          if (legacy) list.removeListener(listener);
+          else list.removeEventListener("change", listener);
+        }
+        mediaListeners.clear();
       }
     };
 
@@ -661,20 +834,33 @@ export function installCornerfillCompiled(
       for (const candidate of candidates) pendingRefresh.add(candidate);
     };
 
+    const refreshAllPotentialCandidates = (): void => {
+      refreshAllCandidates();
+      for (const element of watched) pendingElements.add(element);
+      if (root !== document && state.hostCandidate) {
+        pendingElements.add((root as ShadowRoot).host);
+      }
+    };
+
     const failClosed = (error: unknown): void => {
       clearObservation();
+      status = "blocked-recoverable";
+      blockedScopes.add(scope);
       const cleanupErrors: unknown[] = [];
       for (const attribute of [...ownedHostContextMarkers]) releaseHostContextMarker(attribute);
       for (const element of [...candidates]) {
         candidates.delete(element);
         removeClaim(scope, element);
-        if (!claims.has(element)) {
-          try { detach(element); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
-        }
+      }
+      watched.clear();
+      for (const element of [...handles.keys()]) {
+        if (!mayStyle(element)) continue;
+        try { detach(element); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
       }
       manifestCount = 0;
       state = EMPTY_STATE;
       errors = Object.freeze([errorMessage(error), ...cleanupErrors.map(errorMessage)]);
+      configureObservation();
     };
 
     const performPending = async (): Promise<void> => {
@@ -688,6 +874,9 @@ export function installCornerfillCompiled(
       pendingSubtrees.clear();
       pendingRefresh.clear();
       syncHostContextMarkers();
+      for (const element of [...watched]) {
+        if (!element.isConnected || !mayStyle(element)) watched.delete(element);
+      }
       for (const candidate of [...candidates]) {
         if (contains(candidate)) continue;
         candidates.delete(candidate);
@@ -754,9 +943,20 @@ export function installCornerfillCompiled(
             continue;
           }
           if (attribute.startsWith("data-cornerfill-owned")) continue;
-          if (attribute.startsWith(COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX)) continue;
-          if (attribute === "style" && target instanceof view.HTMLElement && handles.has(target)) continue;
-          refreshCandidateDescendants(target);
+          if (consumesOwnHostContextWrite(target, attribute)) continue;
+          if (attribute.startsWith(COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX)) {
+            refreshAllCandidates();
+            pendingFull = true;
+            continue;
+          }
+          const customPropertiesChanged = attribute === "style"
+            && inlineCustomPropertiesChanged(record);
+          if (attribute === "style"
+            && target instanceof view.HTMLElement
+            && handles.has(target)
+            && !customPropertiesChanged) continue;
+          if (customPropertiesChanged) pendingSubtrees.add(target);
+          else refreshCandidateDescendants(target);
           if (state.observation.conservative || attributes.has(attribute)) {
             scopeFor(target, state.observation.invalidation);
           }
@@ -796,11 +996,32 @@ export function installCornerfillCompiled(
       const target = event.target instanceof view.Element ? event.target : null;
       if (!target || state.observation.invalidation === "root") pendingFull = true;
       else {
-        scopeFor(target, state.observation.invalidation);
-        let ancestor = target.parentElement;
-        while (ancestor) {
-          pendingElements.add(ancestor);
-          ancestor = ancestor.parentElement;
+        const related = "relatedTarget" in event && event.relatedTarget instanceof view.Element
+          ? event.relatedTarget
+          : null;
+        if ((event.type === "pointerover" || event.type === "pointerout") && related) {
+          const targetChain = new Set<Element>();
+          for (let current: Element | null = target; current; current = current.parentElement) {
+            targetChain.add(current);
+          }
+          const relatedChain = new Set<Element>();
+          for (let current: Element | null = related; current; current = current.parentElement) {
+            relatedChain.add(current);
+          }
+          for (const element of targetChain) {
+            if (!relatedChain.has(element)) scopeFor(element, state.observation.invalidation);
+          }
+          for (const element of relatedChain) {
+            if (!targetChain.has(element)) scopeFor(element, state.observation.invalidation);
+          }
+        } else {
+          scopeFor(target, state.observation.invalidation);
+          let ancestor = target.parentElement;
+          while (ancestor) {
+            if (state.observation.invalidation === "subtree") pendingSubtrees.add(ancestor);
+            else pendingElements.add(ancestor);
+            ancestor = ancestor.parentElement;
+          }
         }
       }
       if (stateFrame === null) {
@@ -815,36 +1036,47 @@ export function installCornerfillCompiled(
       if (root === document) return;
       const host = (root as ShadowRoot).host;
       let refresh = false;
+      let rebind = false;
       for (const record of records) {
         if (record.type === "attributes") {
           const target = record.target as Element;
           const attribute = record.attributeName ?? "";
           if (attribute.startsWith("data-cornerfill-owned")) continue;
-          if (attribute.startsWith(COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX)) continue;
-          if (attribute === "style" && target instanceof view.HTMLElement && handles.has(target)) {
+          if (consumesOwnHostContextWrite(target, attribute)) continue;
+          if (attribute.startsWith(COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX)) {
+            refresh = true;
+            pendingFull = true;
             continue;
           }
-          if (target === host || target.contains(host)) refresh = true;
+          if (attribute === "style"
+            && target instanceof view.HTMLElement
+            && handles.has(target)
+            && !inlineCustomPropertiesChanged(record)) {
+            continue;
+          }
+          if (target === host || shadowIncludingContains(view, target, host)) refresh = true;
           continue;
         }
         if (record.type === "characterData") {
           const parent = record.target.parentElement;
-          if (state.hostContext && parent?.contains(host)) refresh = true;
+          if (state.hostContext && parent && shadowIncludingContains(view, parent, host)) refresh = true;
           continue;
         }
         if (mutationContainsNode(record, host)) {
           pendingFull = true;
           refresh = true;
+          rebind = true;
         } else if (state.hostContext
           && record.target instanceof view.Element
-          && record.target.contains(host)) refresh = true;
+          && shadowIncludingContains(view, record.target, host)) refresh = true;
         if ([...record.addedNodes, ...record.removedNodes].some((node) => (
           nodeContainsStylesheet(node, view)
         ))) refresh = true;
       }
       if (refresh) {
-        refreshAllCandidates();
-        queuePending();
+        refreshAllPotentialCandidates();
+        if (rebind) scheduleManifestRefresh();
+        else queuePending();
       }
     };
 
@@ -852,9 +1084,9 @@ export function installCornerfillCompiled(
       if (root === document) return;
       const host = (root as ShadowRoot).host;
       const target = event.target instanceof view.Element ? event.target : null;
-      if (target && target !== host && !target.contains(host)) return;
+      if (target && target !== host && !shadowIncludingContains(view, target, host)) return;
       counters.eventInvalidations += 1;
-      refreshAllCandidates();
+      refreshAllPotentialCandidates();
       if (stateFrame === null) {
         stateFrame = view.requestAnimationFrame(() => {
           stateFrame = null;
@@ -873,31 +1105,132 @@ export function installCornerfillCompiled(
       eventListeners.push(Object.freeze({ target, type, listener, options: listenerOptions }));
     };
 
+    const externalObservationTargets = (): readonly Node[] => {
+      if (root === document) return Object.freeze([]);
+      const targets = new Set<Node>();
+      let host = (root as ShadowRoot).host;
+      while (true) {
+        const containingRoot = host.getRootNode();
+        if (containingRoot instanceof view.Document) {
+          targets.add(containingRoot.documentElement);
+          break;
+        }
+        if (containingRoot instanceof view.ShadowRoot) {
+          targets.add(containingRoot);
+          host = containingRoot.host;
+          continue;
+        }
+        if (containingRoot instanceof view.Node) targets.add(containingRoot);
+        targets.add(document.documentElement);
+        break;
+      }
+      return Object.freeze([...targets]);
+    };
+
+    const handleRecoveryMutations = (records: readonly MutationRecord[]): void => {
+      for (const record of records) {
+        if (record.type !== "attributes") {
+          scheduleManifestRefresh();
+          return;
+        }
+        const target = record.target as Element;
+        const attribute = record.attributeName ?? "";
+        if (attribute.startsWith("data-cornerfill-owned")) continue;
+        if (consumesOwnHostContextWrite(target, attribute)) continue;
+        scheduleManifestRefresh();
+        return;
+      }
+    };
+
+    const addMediaListener = (
+      key: string,
+      query: string,
+      listener: (event: MediaQueryListEvent) => void,
+    ): void => {
+      if (mediaListeners.has(key)) return;
+      const list = view.matchMedia(query);
+      let record: MediaListenerRecord;
+      if (typeof list.addEventListener === "function") {
+        list.addEventListener("change", listener);
+        record = Object.freeze({ list, listener, legacy: false });
+      } else {
+        list.addListener(listener);
+        record = Object.freeze({ list, listener, legacy: true });
+      }
+      mediaListeners.set(key, record);
+    };
+
+    const retainMediaListeners = (keys: ReadonlySet<string>): void => {
+      for (const [key, { list, listener, legacy }] of mediaListeners) {
+        if (keys.has(key)) continue;
+        if (legacy) list.removeListener(listener);
+        else list.removeEventListener("change", listener);
+        mediaListeners.delete(key);
+      }
+    };
+
+    const observeStylesheetLifecycle = (mediaKeys: Set<string>): void => {
+      const ownerQueries = new Set<string>();
+      const stylesheetStates = new Set<object>();
+      for (const element of stylesheetElements(root, view)) {
+        if (element instanceof view.HTMLStyleElement || element instanceof view.HTMLLinkElement) {
+          if (element.media.trim()) ownerQueries.add(element.media.trim());
+          stylesheetStates.add(element);
+          if (element.sheet) stylesheetStates.add(element.sheet);
+        }
+      }
+      try {
+        for (const sheet of root.adoptedStyleSheets) stylesheetStates.add(sheet);
+      } catch {
+        // An explicit refresh remains the contract when adoptedStyleSheets itself is inaccessible.
+      }
+      for (const target of stylesheetStates) {
+        const release = observeDisabledState(view, target, scheduleManifestRefresh);
+        if (release) cssomReleases.push(release);
+      }
+      for (const query of ownerQueries) {
+        const key = `owner:${query}`;
+        mediaKeys.add(key);
+        addMediaListener(key, query, () => {
+          counters.mediaInvalidations += 1;
+          scheduleManifestRefresh();
+        });
+      }
+    };
+
     const configureObservation = (): void => {
-      clearObservation();
+      clearObservation(true);
       if (!autoObserve || destroyed || scopeDestroyed) return;
+      const recovery = status === "blocked-recoverable";
+      const externalTargets = externalObservationTargets();
+      const mediaKeys = new Set<string>();
       if (view.MutationObserver) {
-        observer = new view.MutationObserver(handleMutations);
-        const attributes = new Set([
-          "dir", "style", ...STYLESHEET_ATTRIBUTES, ...state.observation.attributes,
-        ]);
+        observer = new view.MutationObserver(recovery ? handleRecoveryMutations : handleMutations);
         const observerOptions: MutationObserverInit = {
           attributes: true,
+          attributeOldValue: true,
           childList: true,
           characterData: true,
           subtree: true,
         };
-        if (!state.observation.conservative) observerOptions.attributeFilter = [...attributes];
+        if (!recovery && !state.observation.conservative) {
+          observerOptions.attributeFilter = [...new Set([
+            "dir", "style", ...STYLESHEET_ATTRIBUTES, ...state.observation.attributes,
+          ])];
+        }
         observer.observe(root === document ? document.documentElement : root, observerOptions);
-        if (root !== document) {
-          const externalRoot = (root as ShadowRoot).host.getRootNode();
-          if (externalRoot instanceof view.Document || externalRoot instanceof view.ShadowRoot) {
-            externalObserver = new view.MutationObserver(handleExternalMutations);
-            externalObserver.observe(
-              externalRoot === document ? document.documentElement : externalRoot,
-              { attributes: true, childList: true, characterData: state.hostContext, subtree: true },
-            );
-          }
+        for (const target of externalTargets) {
+          const externalObserver = new view.MutationObserver(
+            recovery ? handleRecoveryMutations : handleExternalMutations,
+          );
+          externalObserver.observe(target, {
+            attributes: true,
+            attributeOldValue: true,
+            childList: true,
+            characterData: recovery || state.hostContext,
+            subtree: true,
+          });
+          externalObservers.push(externalObserver);
         }
       }
       const stylesheetSettled: EventListener = (event) => {
@@ -907,6 +1240,11 @@ export function installCornerfillCompiled(
       };
       addEventRecord(root, "load", stylesheetSettled, true);
       addEventRecord(root, "error", stylesheetSettled, true);
+      observeStylesheetLifecycle(mediaKeys);
+      if (recovery) {
+        retainMediaListeners(mediaKeys);
+        return;
+      }
       for (const type of state.observation.events) {
         const windowEvent = type === "hashchange" || type === "popstate";
         const documentEvent = type === "fullscreenchange";
@@ -918,25 +1256,22 @@ export function installCornerfillCompiled(
         const listenerOptions = windowEvent ? Object.freeze({ passive: true }) : true;
         addEventRecord(internalTarget, type, handleStateEvent, listenerOptions);
         if (root !== document && state.hostDependent && !windowEvent && !documentEvent) {
-          const externalTarget = (root as ShadowRoot).host.getRootNode();
-          addEventRecord(externalTarget, type, handleExternalStateEvent, true);
+          for (const externalTarget of externalTargets) {
+            addEventRecord(externalTarget, type, handleExternalStateEvent, true);
+          }
         }
       }
       for (const query of state.mediaQueries) {
-        const list = view.matchMedia(query);
+        const key = `manifest:${query}`;
+        mediaKeys.add(key);
         const listener = (_event: MediaQueryListEvent): void => {
           counters.mediaInvalidations += 1;
-          refreshAllCandidates();
+          refreshAllPotentialCandidates();
           queuePending();
         };
-        if (typeof list.addEventListener === "function") {
-          list.addEventListener("change", listener);
-          mediaListeners.push(Object.freeze({ list, listener, legacy: false }));
-        } else {
-          list.addListener(listener);
-          mediaListeners.push(Object.freeze({ list, listener, legacy: true }));
-        }
+        addMediaListener(key, query, listener);
       }
+      retainMediaListeners(mediaKeys);
     };
 
     const performRefresh = async (): Promise<Readonly<CornerfillCompiledExplanation>> => {
@@ -948,15 +1283,24 @@ export function installCornerfillCompiled(
       pendingSubtrees.clear();
       pendingRefresh.clear();
       try {
-        clearObservation();
+        clearObservation(true);
         counters.manifestReads += 1;
         const manifests = compiledManifests(view, manifestTarget());
         state = manifestState(document, root, manifests);
         manifestCount = manifests.length;
         syncHostContextMarkers();
-        const nextErrors = (await reconcile(fullScanRoots(), true)).errors;
+        const wasBlocked = blockedScopes.has(scope);
+        const blockedElements = wasBlocked
+          ? [...claims.keys()].filter((element) => mayStyle(element))
+          : [];
+        status = "active";
         configureObservation();
-        errors = nextErrors;
+        blockedScopes.delete(scope);
+        const reconciled = await reconcile(fullScanRoots(), true);
+        const recoveryErrors = wasBlocked
+          ? await syncElements(blockedElements)
+          : Object.freeze([]);
+        errors = Object.freeze([...reconciled.errors, ...recoveryErrors]);
         return explain();
       } catch (error) {
         if (stateFrame !== null) view.cancelAnimationFrame(stateFrame);
@@ -974,6 +1318,10 @@ export function installCornerfillCompiled(
     const destroyLocal = (): void => {
       if (scopeDestroyed) return;
       scopeDestroyed = true;
+      const releasedBlock = blockedScopes.delete(scope);
+      const recoveryElements = releasedBlock
+        ? [...claims.keys()].filter((element) => mayStyle(element))
+        : [];
       clearObservation();
       if (stateFrame !== null) view.cancelAnimationFrame(stateFrame);
       if (manifestFrame !== null) view.cancelAnimationFrame(manifestFrame);
@@ -982,7 +1330,9 @@ export function installCornerfillCompiled(
       pendingElements.clear();
       pendingSubtrees.clear();
       pendingRefresh.clear();
+      watched.clear();
       for (const attribute of [...ownedHostContextMarkers]) releaseHostContextMarker(attribute);
+      pendingHostContextWrites.clear();
       for (const element of [...candidates]) {
         candidates.delete(element);
         removeClaim(scope, element);
@@ -990,6 +1340,11 @@ export function installCornerfillCompiled(
       }
       if (root !== document && scopes.get(root as ShadowRoot) === scope) {
         scopes.delete(root as ShadowRoot);
+      }
+      if (!destroyed && recoveryElements.length > 0) {
+        void queueOperation(async () => { await syncElements(recoveryElements); }).catch((error) => (
+          reportAsyncError(error, "compiled scope teardown recovery")
+        ));
       }
     };
 
@@ -1006,9 +1361,9 @@ export function installCornerfillCompiled(
     const scope: CompiledScopeInternal = {
       candidates,
       counters,
-      root,
       handle,
       contains,
+      mayStyle,
       performRefresh,
       destroyLocal,
     };
@@ -1025,6 +1380,7 @@ export function installCornerfillCompiled(
     }
     scopes.clear();
     try { primary.destroyLocal(); } catch (error) { cleanupErrors.push(error); }
+    blockedScopes.clear();
     claims.clear();
     handles.clear();
     try { runtime.destroy(); } catch (error) { cleanupErrors.push(error); }
@@ -1051,8 +1407,12 @@ export function installCornerfillCompiled(
       candidates: reports.reduce((sum, report) => sum + report.candidates, 0),
       attached: handles.size,
       errors: Object.freeze(reports.flatMap(({ errors: values }) => values)),
+      status: reports.some(({ status: value }) => value === "blocked-recoverable")
+        ? "blocked-recoverable"
+        : "active",
       observing: reports.some(({ observing }) => observing),
       observation: mergeSelectorObservation(reports.map(({ observation }) => observation)),
+      potentialCandidates: reports.reduce((sum, report) => sum + report.potentialCandidates, 0),
       limits: Object.freeze({ maxCandidateElements, maxScannedElements }),
       counters: Object.freeze(sumCounters(registered.map(({ counters: values }) => values))),
       runtime: runtime.stats(),

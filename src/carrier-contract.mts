@@ -361,7 +361,7 @@ export function hasResolvedShapeCarrier(values: Readonly<Record<string, string>>
   return SHAPE_CARRIERS.some((property) => resolvedCarrierValue(values, property) !== "");
 }
 
-export const COMPILED_MANIFEST_SCHEMA = "cornerfill-compiled@1";
+export const COMPILED_MANIFEST_SCHEMA = "cornerfill-compiled@2";
 export const COMPILED_MANIFEST_PROPERTY_PREFIX = "--cornerfill-compiled-manifest-";
 export const COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX = "data-cornerfill-host-context-";
 const FNV64_OFFSET = 0xcbf29ce484222325n;
@@ -369,11 +369,13 @@ const FNV64_PRIME = 0x100000001b3n;
 const UINT64_MASK = 0xffffffffffffffffn;
 
 export interface CornerfillCompiledManifest {
+  readonly candidateSelectors: readonly string[];
+  readonly customProperties: readonly Readonly<CornerfillCompiledCustomProperty>[];
   readonly hostContexts: readonly Readonly<CornerfillCompiledHostContext>[];
   readonly mediaQueries: readonly string[];
   readonly observation: Readonly<SelectorObservation>;
+  readonly referencedCustomProperties: readonly string[];
   readonly schema: typeof COMPILED_MANIFEST_SCHEMA;
-  readonly selectors: readonly string[];
 }
 
 export interface CornerfillCompiledHostContext {
@@ -381,11 +383,31 @@ export interface CornerfillCompiledHostContext {
   readonly attribute: string;
 }
 
+export interface CornerfillCompiledCustomProperty {
+  readonly hostContexts: readonly Readonly<CornerfillCompiledHostContext>[];
+  readonly mediaQueries: readonly string[];
+  readonly name: string;
+  readonly observation: Readonly<SelectorObservation>;
+  readonly problems: readonly string[];
+  readonly references: readonly string[];
+}
+
+export interface CornerfillCompiledCustomPropertyInput {
+  readonly hostContexts?: Iterable<Readonly<CornerfillCompiledHostContext>> | undefined;
+  readonly mediaQueries?: Iterable<string> | undefined;
+  readonly name: string;
+  readonly observation: Readonly<SelectorObservation>;
+  readonly problems?: Iterable<string> | undefined;
+  readonly references?: Iterable<string> | undefined;
+}
+
 export interface CornerfillCompiledManifestInput {
+  readonly candidateSelectors?: Iterable<string> | undefined;
+  readonly customProperties?: Iterable<Readonly<CornerfillCompiledCustomPropertyInput>> | undefined;
   readonly hostContexts?: Iterable<Readonly<CornerfillCompiledHostContext>> | undefined;
   readonly mediaQueries?: Iterable<string> | undefined;
   readonly observation: Readonly<SelectorObservation>;
-  readonly selectors: Iterable<string>;
+  readonly referencedCustomProperties?: Iterable<string> | undefined;
 }
 
 function normalizedHostContexts(
@@ -439,18 +461,53 @@ function manifestObservation(value: Readonly<SelectorObservation>): Readonly<Sel
   });
 }
 
+function normalizedCustomPropertyName(value: unknown): string {
+  if (typeof value !== "string" || !value.startsWith("--") || value.length < 3) {
+    throw new TypeError("compiled manifest custom property name is invalid");
+  }
+  return value;
+}
+
+function normalizedCustomProperties(
+  values: Iterable<Readonly<CornerfillCompiledCustomPropertyInput>>,
+): readonly Readonly<CornerfillCompiledCustomProperty>[] {
+  const records = new Map<string, Readonly<CornerfillCompiledCustomProperty>>();
+  for (const value of values) {
+    if (!value || typeof value !== "object") {
+      throw new TypeError("compiled manifest custom property record is invalid");
+    }
+    const name = normalizedCustomPropertyName(value.name);
+    if (records.has(name)) {
+      throw new TypeError(`compiled manifest custom property is duplicated: ${name}`);
+    }
+    const references = normalizedStrings(value.references ?? []).map(normalizedCustomPropertyName);
+    records.set(name, Object.freeze({
+      name,
+      references: Object.freeze(references),
+      hostContexts: normalizedHostContexts(value.hostContexts ?? []),
+      mediaQueries: normalizedStrings(value.mediaQueries ?? []),
+      observation: manifestObservation(value.observation),
+      problems: normalizedStrings(value.problems ?? []),
+    }));
+  }
+  return Object.freeze([...records.values()].sort((left, right) => left.name.localeCompare(right.name)));
+}
+
 export function createCompiledManifest(
   input: Readonly<CornerfillCompiledManifestInput>,
 ): Readonly<CornerfillCompiledManifest> {
   if (!input || typeof input !== "object") throw new TypeError("compiled manifest input must be an object");
-  const selectors = normalizedStrings(input.selectors);
-  if (selectors.length === 0) throw new TypeError("compiled manifest requires at least one selector");
+  const referencedCustomProperties = normalizedStrings(
+    input.referencedCustomProperties ?? [],
+  ).map(normalizedCustomPropertyName);
   return Object.freeze({
     schema: COMPILED_MANIFEST_SCHEMA,
-    selectors,
+    candidateSelectors: normalizedStrings(input.candidateSelectors ?? []),
+    customProperties: normalizedCustomProperties(input.customProperties ?? []),
     hostContexts: normalizedHostContexts(input.hostContexts ?? []),
     mediaQueries: normalizedStrings(input.mediaQueries ?? []),
     observation: manifestObservation(input.observation),
+    referencedCustomProperties: Object.freeze(referencedCustomProperties),
   });
 }
 
@@ -510,7 +567,10 @@ export function parseCompiledManifest(source: string): Readonly<CornerfillCompil
   if (record.schema !== COMPILED_MANIFEST_SCHEMA) {
     throw new TypeError(`unsupported compiled manifest schema: ${String(record.schema)}`);
   }
-  if (!Array.isArray(record.selectors) || !Array.isArray(record.mediaQueries)) {
+  if (!Array.isArray(record.candidateSelectors)
+    || !Array.isArray(record.customProperties)
+    || !Array.isArray(record.mediaQueries)
+    || !Array.isArray(record.referencedCustomProperties)) {
     throw new TypeError("compiled manifest selector or media list is invalid");
   }
   if (record.hostContexts !== undefined && !Array.isArray(record.hostContexts)) {
@@ -527,9 +587,11 @@ export function parseCompiledManifest(source: string): Readonly<CornerfillCompil
     throw new TypeError("compiled manifest observation lists are invalid");
   }
   return createCompiledManifest({
-    selectors: record.selectors as string[],
+    candidateSelectors: record.candidateSelectors as string[],
+    customProperties: record.customProperties as CornerfillCompiledCustomPropertyInput[],
     hostContexts: (record.hostContexts ?? []) as CornerfillCompiledHostContext[],
     mediaQueries: record.mediaQueries as string[],
+    referencedCustomProperties: record.referencedCustomProperties as string[],
     observation: {
       attributes: observed.attributes as string[],
       characterData: observed.characterData as boolean,

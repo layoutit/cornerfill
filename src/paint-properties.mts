@@ -46,10 +46,13 @@ const OWNED_PAINT_PREFIXES = Object.freeze([
   "padding",
 ]);
 
-export function propertyAffectsOwnedPaint(property: string): boolean {
-  return property.startsWith("--")
-    || OWNED_PAINT_PROPERTIES.has(property)
+export function standardPropertyAffectsOwnedPaint(property: string): boolean {
+  return OWNED_PAINT_PROPERTIES.has(property)
     || OWNED_PAINT_PREFIXES.some((prefix) => (
       property === prefix || property.startsWith(`${prefix}-`)
     ));
+}
+
+export function propertyAffectsOwnedPaint(property: string): boolean {
+  return property.startsWith("--") || standardPropertyAffectsOwnedPaint(property);
 }

@@ -106,6 +106,9 @@ export function selectorObservation(selectors: Iterable<string>): Readonly<Selec
       const stateEvents = SELECTOR_STATE_EVENTS[pseudo];
       if (stateEvents) {
         for (const event of stateEvents) events.add(event);
+        if (pseudo === "disabled" || pseudo === "enabled") {
+          invalidation = strongerInvalidation(invalidation, "subtree");
+        }
         if (["checked", "default", "disabled", "enabled", "required", "optional"].includes(pseudo)) {
           attributes.add(pseudo === "enabled" ? "disabled" : pseudo);
         }
@@ -113,8 +116,14 @@ export function selectorObservation(selectors: Iterable<string>): Readonly<Selec
         if (pseudo === "popover-open") attributes.add("popover");
         return;
       }
-      if (pseudo === "dir") attributes.add("dir");
-      else if (pseudo === "lang") attributes.add("lang");
+      if (pseudo === "dir") {
+        attributes.add("dir");
+        characterData = true;
+        invalidation = strongerInvalidation(invalidation, "subtree");
+      } else if (pseudo === "lang") {
+        attributes.add("lang");
+        invalidation = strongerInvalidation(invalidation, "subtree");
+      }
       else if (pseudo === "empty") characterData = true;
       else if (["any-link", "link"].includes(pseudo)) attributes.add("href");
       else if (!STATIC_SELECTOR_PSEUDOS.has(pseudo)) unobservableStates.add(pseudo);

@@ -1,4 +1,9 @@
-import { cssIdentifierAt, scanCssSyntax, skipCssTrivia } from "./css-syntax.mjs";
+import {
+  cssIdentifierAt,
+  replaceCssCommentsWithWhitespace,
+  scanCssSyntax,
+  skipCssTrivia,
+} from "./css-syntax.mjs";
 import { compiledHostContextAttribute } from "./carrier-contract.mjs";
 
 export interface CompiledHostContext {
@@ -51,6 +56,36 @@ function containsHostPseudo(selector: string): boolean {
   return found;
 }
 
+function validHostContextArgument(argument: string): boolean {
+  const selector = replaceCssCommentsWithWhitespace(argument).trim();
+  if (!selector) return false;
+  let previous = "";
+  let whitespace = false;
+  let valid = true;
+  scanCssSyntax(selector, 0, (_index, character, parentheses, brackets) => {
+    if (parentheses !== 0 || brackets !== 0) return;
+    if (/\s/u.test(character)) {
+      whitespace = true;
+      return;
+    }
+    if (whitespace && previous && !"([".includes(previous)) {
+      valid = false;
+      return false;
+    }
+    whitespace = false;
+    if (character === "," || character === ">" || character === "+" || character === "~") {
+      valid = false;
+      return false;
+    }
+    if (character === "|" && previous === "|") {
+      valid = false;
+      return false;
+    }
+    previous = character;
+  });
+  return valid;
+}
+
 function hostBranch(branch: string): Readonly<{
   elementSelector: string | null;
   hostCandidate: boolean;
@@ -71,7 +106,12 @@ function hostBranch(branch: string): Readonly<{
     if (close < 0 || !argument) {
       throw new SyntaxError(`invalid :${name}() selector`);
     }
-    if (name === "host-context") hostContextArgument = argument;
+    if (name === "host-context") {
+      if (!validHostContextArgument(argument)) {
+        throw new SyntaxError(":host-context() requires one compound selector");
+      }
+      hostContextArgument = argument;
+    }
     end = close + 1;
   } else if (name === "host-context") {
     throw new SyntaxError(":host-context() requires an argument");

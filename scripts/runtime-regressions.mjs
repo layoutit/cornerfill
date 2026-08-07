@@ -145,7 +145,15 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   }
   .cornerfill-compiled-dynamic,
   .cornerfill-compiled-hover,
-  .cornerfill-compiled-media {
+  .cornerfill-compiled-media,
+  .cornerfill-compiled-cross-file,
+  .cornerfill-compiled-conditional,
+  .cornerfill-compiled-scoped,
+  .cornerfill-compiled-hover-face,
+  .cornerfill-compiled-language,
+  .cornerfill-compiled-direction,
+  .cornerfill-compiled-disabled,
+  .cornerfill-compiled-variable-shape {
     display: block;
     width: 36px;
     height: 28px;
@@ -159,6 +167,26 @@ const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   @media (prefers-color-scheme: dark) {
     .cornerfill-compiled-media { corner-shape: bevel; }
   }
+  .cornerfill-compiled-cross-file {
+    corner-shape: bevel;
+    background: var(--cornerfill-compiled-cross-color, rgb(220, 40, 40));
+  }
+  @scope ([data-cornerfill-compiled-scope]) {
+    .cornerfill-compiled-scoped { corner-shape: scoop; }
+  }
+  .cornerfill-compiled-hover-card:hover .cornerfill-compiled-hover-face {
+    corner-shape: bevel;
+    background: rgb(20, 40, 220);
+  }
+  .cornerfill-compiled-language:lang(fr) { corner-shape: scoop; }
+  .cornerfill-compiled-direction:dir(rtl) { corner-shape: notch; }
+  .cornerfill-compiled-disabled { appearance: none; border: 0; }
+  .cornerfill-compiled-disabled:disabled { corner-shape: bevel; }
+  .cornerfill-compiled-variable-shape {
+    corner-shape: var(--cornerfill-compiled-dynamic-shape);
+  }
+  .cornerfill-compiled-shared-host { corner-shape: bevel; }
+  @media print { * { corner-shape: bevel; } }
 `, { from: "compiled-fixture.css" })).css;
 const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-shadow,
@@ -182,6 +210,22 @@ const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).proces
 const COMPILED_SHADOW_RESET_CSS = (await postcss([cornerfillPostcss()]).process(`
   .cornerfill-compiled-shadow { corner-shape: initial; }
 `, { from: "compiled-shadow-reset.css" })).css;
+const COMPILED_PAINT_METADATA_CSS = (await postcss([cornerfillPostcss()]).process(`
+  @media (prefers-color-scheme: dark) {
+    .cornerfill-compiled-cross-file:hover,
+    .cornerfill-compiled-cross-file {
+      --cornerfill-compiled-cross-color: rgb(20, 40, 220);
+    }
+  }
+`, { from: "compiled-paint-metadata.css" })).css;
+const COMPILED_CONDITIONAL_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-conditional { corner-shape: bevel; }
+`, { from: "compiled-conditional-fixture.css" })).css;
+const COMPILED_BUDGET_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-budget-real { corner-shape: bevel; }
+  .cornerfill-compiled-budget-round { corner-shape: round; }
+  @media print { * { corner-shape: bevel; } }
+`, { from: "compiled-budget-fixture.css" })).css;
 
 function locatePlaywrightModule() {
   const explicit = process.env.CORNERFILL_PLAYWRIGHT_MODULE;
@@ -230,6 +274,21 @@ async function startServer() {
     if (url.pathname === "/bench/compiled-shadow-reset.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_SHADOW_RESET_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-paint-metadata.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_PAINT_METADATA_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-conditional-fixture.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_CONDITIONAL_FIXTURE_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-budget-fixture.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_BUDGET_FIXTURE_CSS);
       return;
     }
     if (url.pathname === "/bench/imports/delayed-runtime.css") {
@@ -355,6 +414,14 @@ async function driveBrowserStates(page) {
       await page.locator("#status").hover({ force: true });
       stage = "compiled-hover-out-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-hover-out-driven"; });
+    } else if (stage === "compiled-ancestor-hover-ready") {
+      await page.locator(".cornerfill-compiled-hover-trigger").hover();
+      stage = "compiled-ancestor-hover-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-ancestor-hover-driven"; });
+    } else if (stage === "compiled-ancestor-hover-out-ready") {
+      await page.locator("#status").hover({ force: true });
+      stage = "compiled-ancestor-hover-out-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-ancestor-hover-out-driven"; });
     } else if (stage === "media-dark-ready") {
       await page.emulateMedia({ colorScheme: "dark" });
       stage = "media-dark-driven";

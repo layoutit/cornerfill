@@ -45,8 +45,10 @@ For prepared renderers, direct invalidation is better: the renderer already know
 
 `cornerfill/postcss` inserts private shape carriers beside authored
 `corner-shape` declarations and `all` resets while retaining the native CSS. It
-also emits a root-local manifest containing candidate selectors, media
-dependencies, host-context metadata, and bounded invalidation metadata.
+also emits root-local manifests containing active-candidate selectors,
+metadata-only paint invalidation, media and host-context dependencies, and a
+cross-chunk custom-property graph. Definitions are activated only when a shape
+or owned-paint value reaches them.
 
 Because the carrier stays inside the authored rule, the browser owns
 specificity, inheritance, variables, source order, media activation, layers,
@@ -56,9 +58,16 @@ or stylesheet-relative URL rewriting.
 
 The plugin covers the implemented shape shorthand and physical/logical
 longhands. It must run after `@import` expansion and nesting transforms. It
-rejects shape declarations in keyframes, dynamic container conditions,
-pseudo-element targets, namespace-qualified selectors, and selector states that
-cannot be observed safely.
+rejects shape/reset declarations in keyframes, dynamic container conditions,
+pseudo-element targets, namespace-qualified selectors, unobservable selector
+states, and scoped relative selectors that the `0.0.1` manifest cannot express.
+
+Compiled observation is transactional: unchanged media subscriptions survive a
+manifest refresh, observation is rebound before asynchronous paint attachment,
+and a failed root retains only the stylesheet/owner signals needed to recover.
+Registered shadow roots observe their complete shadow-including containing-root
+chain, including connection and host migration. A failed scope vetoes shared
+handles until its manifest succeeds again.
 
 All CSS that can affect a compiled target must be transformed, including CSS
 prepared for an open shadow root or generated before insertion.

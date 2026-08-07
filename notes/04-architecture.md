@@ -94,20 +94,26 @@ carriers adjacent to the original declaration:
 
 The real carrier ABI is structured per corner rather than the simplified
 example above. It also transports `all` resets, emits a versioned candidate and
-invalidation manifest, and rewrites only supported `corner-shape` feature
-tests. Authors never write those private declarations.
+invalidation manifest, records cross-chunk custom-property dependencies, and
+rewrites only supported `corner-shape` feature tests. Candidate selectors are
+separate from metadata-only paint dependencies; unrelated custom properties do
+not enter the observation graph. Authors never write those private declarations.
 
 The transform preserves the native declaration, source order, importance,
 variables, media/supports/layer/scope context, and source locations. The browser
 therefore resolves the actual cascade before the compiled runtime reads computed
 carriers. The plugin must run after `@import` expansion and nesting transforms;
 it rejects conditions or selectors the runtime cannot observe instead of
-silently weakening them.
+silently weakening them. Scoped selectors require an explicit observable scope
+start; relative scoped selectors are rejected until discovery can represent
+their relative-selector semantics directly.
 
 The package root qualifies native support first. Only an unqualified browser
 loads `compiled-runtime.mjs`; that runtime reads compiler manifests and computed
 state but never fetches CSS, reconstructs imports or layers, or ships PostCSS to
-the browser. CSS not processed by the plugin is intentionally not claimed.
+the browser. It keeps active candidates separate from cached potential matches,
+so inactive conditions cannot consume the active-candidate limit. CSS not
+processed by the plugin is intentionally not claimed.
 
 `cornerfill/auto` retains the previous best-effort source interpreter as an
 explicitly experimental no-build mode. Its accessible-source, CSP, CSSOM,

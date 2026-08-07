@@ -54,27 +54,46 @@ test("the shared carrier compiler emits structured per-corner declarations", () 
 
 test("compiled manifests normalize and round-trip deterministically", () => {
   const input = {
-    selectors: [".z", ".a", ".z"],
+    candidateSelectors: [".z", ".a", ".z"],
+    customProperties: [{
+      name: "--tone",
+      references: ["--palette", "--palette"],
+      observation,
+    }],
     mediaQueries: ["(min-width: 10px)", ""],
     observation,
+    referencedCustomProperties: ["--tone"],
   };
   const created = createCompiledManifest(input);
   assert.equal(created.schema, COMPILED_MANIFEST_SCHEMA);
-  assert.deepEqual(created.selectors, [".a", ".z"]);
+  assert.deepEqual(created.candidateSelectors, [".a", ".z"]);
+  assert.deepEqual(created.referencedCustomProperties, ["--tone"]);
+  assert.deepEqual(created.customProperties[0].references, ["--palette"]);
   assert.deepEqual(created.observation.attributes, ["class", "id"]);
   assert.deepEqual(parseCompiledManifest(serializeCompiledManifest(input)), created);
 });
 
+test("compiled manifests permit metadata without candidate selectors", () => {
+  const created = createCompiledManifest({
+    observation,
+    referencedCustomProperties: ["--paint"],
+  });
+  assert.deepEqual(created.candidateSelectors, []);
+  assert.deepEqual(created.referencedCustomProperties, ["--paint"]);
+});
+
 test("compiled manifests fail closed on malformed or mismatched input", () => {
   assert.throws(
-    () => parseCompiledManifest('{"schema":"cornerfill-compiled@2"}'),
+    () => parseCompiledManifest('{"schema":"cornerfill-compiled@999"}'),
     /unsupported compiled manifest schema/u,
   );
   assert.throws(
     () => parseCompiledManifest(JSON.stringify({
       schema: COMPILED_MANIFEST_SCHEMA,
-      selectors: [7],
+      candidateSelectors: [7],
+      customProperties: [],
       mediaQueries: [],
+      referencedCustomProperties: [],
       observation,
     })),
     /entries must be strings/u,
