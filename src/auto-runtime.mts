@@ -9,9 +9,6 @@ import type {
 } from "./runtime.mjs";
 import {
   isAddressableStylesheetOwner,
-  isStylesheetSourceElement,
-  mutationTouchesStylesheetSource,
-  nodeContainsStylesheetSource,
   replacementStylesheetBaseUrl,
   snapshotRegisterRootOptions,
   snapshotRefreshOptions,
@@ -24,6 +21,11 @@ import type {
   RefreshOptions,
   ReplaceStylesheetSourceOptions,
 } from "./auto-contract.mjs";
+import {
+  isStylesheetSourceElement,
+  mutationTouchesStylesheetSource,
+  nodeContainsStylesheetSource,
+} from "./stylesheet-elements.mjs";
 import type { CornerfillNativeQualification } from "./native.mjs";
 import { snapshotNativeQualification } from "./native.mjs";
 import { CORNERFILL_ORACLE_QUALIFICATION } from "./qualification.mjs";
@@ -37,20 +39,10 @@ import { planAutomaticMutations } from "./auto-observation.mjs";
 import type { AutomaticMutationPlan } from "./auto-observation.mjs";
 import { observeDisabledState, observeStylesheetMutations } from "./cssom-broker.mjs";
 import {
-  AUTO_ALL_PENDING,
-  AUTO_ALL_VALUE,
   AUTO_CARRIERS,
   AUTO_CARRIER_SET,
-  AUTO_LOGICAL_SHAPE,
-  AUTO_PHYSICAL_SHAPE,
-  AUTO_SHAPE_SOURCE,
   AUTO_UNSET,
-  LOGICAL_SHAPE_PROPERTIES,
-  PHYSICAL_SHAPE_PROPERTIES,
-  SHAPE_CARRIERS,
   SHAPE_PROPERTIES,
-  SHAPE_STATUS_CARRIERS,
-  SUPPORTED_ALL_VALUE,
   EMPTY_MEDIA_DEPENDENCIES,
   annotateDiagnostic,
   canonicalizeCornerShapeDeclarations,
@@ -85,6 +77,12 @@ import type {
   SelectorRecord,
 } from "./carriers.mjs";
 export type { SelectorObservation } from "./carriers.mjs";
+import {
+  compiledCarrierProblem,
+  hasResolvedShapeCarrier,
+  resolvedCarrierValue,
+} from "./carrier-contract.mjs";
+import type { SelectorInvalidation } from "./carrier-contract.mjs";
 import { validateTimerDelay } from "./timing.mjs";
 
 type RuntimeWindow = Window & typeof globalThis;
@@ -392,6 +390,7 @@ export interface CornerfillAutoOptions extends CornerfillInstallOptions {
   readonly maxImportCount?: number | undefined;
   readonly maxImportDepth?: number | undefined;
   readonly maxStylesheetBytes?: number | undefined;
+  readonly maxScannedElements?: number | undefined;
   readonly onError?: ((error: unknown, context: string) => void) | undefined;
   readonly stylesheetTimeoutMs?: number | undefined;
   readonly unreadableStylesheetPolicy?: "best-effort" | "block-root" | undefined;
@@ -425,6 +424,7 @@ export interface CornerfillAutoExplanation {
       maxCompiledSelectors: number;
       maxImportCount: number;
       maxImportDepth: number;
+      maxScannedElements: number;
       maxStylesheetBytes: number;
       unreadableStylesheetPolicy: "best-effort" | "block-root";
     }>;
@@ -476,6 +476,7 @@ export interface CornerfillAutoControllerHandle {
 
 const AUTO_STYLESHEET_ATTRIBUTE = "data-cornerfill-auto-styles";
 const CARRIER_REGISTRATIONS = new WeakMap<Document, Map<string, CarrierRegistration>>();
+const DEFAULT_MAX_SCANNED_ELEMENTS = 100_000;
 let nextHostContextScope = 1;
 
 const AUTOMATIC_DISCOVERY = Object.freeze({
@@ -489,6 +490,7 @@ const AUTOMATIC_DISCOVERY = Object.freeze({
     "unregistered or closed shadow roots",
     "adopted stylesheets unless explicitly enabled for a registered open shadow root",
     "adopted stylesheet corner-shape source unless supplied to refreshAdoptedStyleSheet()",
+    "adopted stylesheet list membership or order changes until refresh() is called",
     "mixed physical/logical declaration families",
     "all: var(...)/env(...) results that require inherit, revert, or revert-layer cascade reconstruction",
     "corner-shape @supports blocks that also control ordinary declarations or author custom properties",
@@ -708,8 +710,48 @@ function validHostContextArgument(host: Element, argument: string): boolean {
   }
 }
 
-function shadowSelectorMatches(root: ShadowRoot, selector: string): Iterable<Element> {
-  if (!selectorHasHostPseudo(selector)) return root.querySelectorAll(selector);
+interface RootSelectorBranch {
+  readonly directChild: boolean;
+  readonly selector: string | null;
+  readonly target: Element | null;
+}
+
+function replaceScopePseudo(selector: string, replacement: string): string {
+  const replacements: { end: number; start: number }[] = [];
+  scanCssSyntax(selector, 0, (index, character) => {
+    if (character !== ":") return;
+    const pseudo = selectorPseudo(selector, index);
+    if (pseudo?.name === "scope") replacements.push({ start: index, end: pseudo.end });
+  });
+  if (replacements.length === 0) return selector;
+  let output = "";
+  let cursor = 0;
+  for (const item of replacements) {
+    output += selector.slice(cursor, item.start) + replacement;
+    cursor = item.end;
+  }
+  return output + selector.slice(cursor);
+}
+
+function rootSelectorBranch(
+  root: AutoRoot,
+  document: RuntimeDocument,
+  selector: string,
+): Readonly<RootSelectorBranch> {
+  if (root === document) {
+    return Object.freeze({
+      directChild: false,
+      selector: replaceScopePseudo(selector, ":root"),
+      target: null,
+    });
+  }
+  if (!selectorHasHostPseudo(selector)) {
+    return Object.freeze({
+      directChild: false,
+      selector: replaceScopePseudo(selector, ":not(*)"),
+      target: null,
+    });
+  }
   const source = selector.trim();
   const pseudo = selectorPseudo(source, 0);
   if (pseudo?.name !== "host" && pseudo?.name !== "host-context") {
@@ -738,25 +780,54 @@ function shadowSelectorMatches(root: ShadowRoot, selector: string): Iterable<Ele
     }
   });
   const hostSuffix = rest.slice(0, boundary).trim();
-  const host = root.host;
+  const host = (root as ShadowRoot).host;
   if (argument && (context
     ? !shadowIncludingContextMatches(host, argument)
-    : !host.matches(argument))) return Object.freeze([]);
-  if (hostSuffix && !host.matches(hostSuffix)) return Object.freeze([]);
+    : !host.matches(argument))) {
+    return Object.freeze({ directChild: false, selector: null, target: null });
+  }
+  if (hostSuffix && !host.matches(hostSuffix)) {
+    return Object.freeze({ directChild: false, selector: null, target: null });
+  }
   const descendant = rest.slice(boundary).trim();
-  if (!descendant) return Object.freeze([host]);
+  if (!descendant) return Object.freeze({ directChild: false, selector: null, target: host });
   if (descendant.startsWith(">")) {
     const relative = descendant.slice(1).trim();
-    if (!relative) return Object.freeze([]);
+    if (!relative) return Object.freeze({ directChild: false, selector: null, target: null });
     if (selectorHasCombinator(relative)) {
       throw ownershipBlockingSyntaxError(
         `Automatic CSS cannot discover a complex shadow host child selector: ${selector}`,
       );
     }
-    return Object.freeze([...root.children].filter((element) => element.matches(relative)));
+    return Object.freeze({
+      directChild: true,
+      selector: replaceScopePseudo(relative, ":not(*)"),
+      target: null,
+    });
   }
-  if (/^[+~]/u.test(descendant)) return Object.freeze([]);
-  return root.querySelectorAll(descendant);
+  if (/^[+~]/u.test(descendant)) {
+    return Object.freeze({ directChild: false, selector: null, target: null });
+  }
+  return Object.freeze({
+    directChild: false,
+    selector: replaceScopePseudo(descendant, ":not(*)"),
+    target: null,
+  });
+}
+
+function *rootElements(root: AutoRoot, document: RuntimeDocument): Generator<Element, void, unknown> {
+  let element: Element | null = root === document
+    ? document.documentElement
+    : root.firstElementChild;
+  while (element) {
+    yield element;
+    if (element.firstElementChild) {
+      element = element.firstElementChild;
+      continue;
+    }
+    while (element && !element.nextElementSibling) element = element.parentElement;
+    element = element?.nextElementSibling ?? null;
+  }
 }
 
 function compiledSelectorCount(records: readonly Readonly<SelectorRecord>[]): number {
@@ -790,11 +861,6 @@ function emptyCarrierCompilation({
     selectorRecords: Object.freeze([]),
     selectors: Object.freeze([]),
   });
-}
-
-function normalizedCarrier(source: string): string {
-  const value = source.trim();
-  return value === AUTO_UNSET || /^(?:initial|unset)$/iu.test(value) ? "" : value;
 }
 
 const AUTOMATIC_COMPUTED_PROPERTIES = Object.freeze([
@@ -857,7 +923,7 @@ function inspectionCarrier(
   inspection: Readonly<CornerfillAuthoredStyleInspection>,
   property: string,
 ): string {
-  return normalizedCarrier(inspection.values[property] ?? "");
+  return resolvedCarrierValue(inspection.values, property);
 }
 
 function automaticComputedSignature(
@@ -871,31 +937,11 @@ function automaticComputedSignature(
 }
 
 function carrierProblem(inspection: Readonly<CornerfillAuthoredStyleInspection>): string | null {
-  if (inspectionCarrier(inspection, AUTO_ALL_PENDING)
-    && inspectionCarrier(inspection, AUTO_SHAPE_SOURCE)) {
-    const resolved = inspectionCarrier(inspection, AUTO_ALL_VALUE);
-    if (!SUPPORTED_ALL_VALUE.test(resolved)) {
-      return "Automatic CSS cannot safely transport this all: var(...) result; use cornerfill/runtime for explicit state.";
-    }
-  }
-  if (SHAPE_STATUS_CARRIERS.some((property) => inspectionCarrier(inspection, property) === "unsupported")) {
-    return "Automatic CSS cannot resolve this corner-shape value; use cornerfill/runtime for explicit state.";
-  }
-  const variableShorthand = inspectionCarrier(inspection, SHAPE_PROPERTIES["corner-shape"]);
-  const competingLonghand = [...PHYSICAL_SHAPE_PROPERTIES, ...LOGICAL_SHAPE_PROPERTIES]
-    .some((property) => inspectionCarrier(inspection, SHAPE_PROPERTIES[property]));
-  if (variableShorthand && competingLonghand) {
-    return "Automatic CSS refuses a variable corner-shape shorthand combined with longhands because their cascade order cannot be preserved.";
-  }
-  if (inspectionCarrier(inspection, AUTO_PHYSICAL_SHAPE)
-    && inspectionCarrier(inspection, AUTO_LOGICAL_SHAPE)) {
-    return "Automatic CSS refuses mixed physical and logical corner-shape declarations because their cross-family cascade cannot be preserved.";
-  }
-  return null;
+  return compiledCarrierProblem(inspection.values, "Automatic CSS");
 }
 
 function hasShapeCarrier(inspection: Readonly<CornerfillAuthoredStyleInspection>): boolean {
-  return SHAPE_CARRIERS.some((property) => inspectionCarrier(inspection, property));
+  return hasResolvedShapeCarrier(inspection.values);
 }
 
 function stylesheetElements(root: AutoRoot): StylesheetOwner[] {
@@ -1037,12 +1083,6 @@ function hasAuthoredInlineShape(element: Element): boolean {
   return cssDeclarations(element.getAttribute("style")).some(({ property }) => (
     Object.hasOwn(SHAPE_PROPERTIES, property)
   ));
-}
-
-function *authoredShapeInlineElements(root: AutoRoot): Generator<Element, void, unknown> {
-  for (const element of root.querySelectorAll("[style]")) {
-    if (hasAuthoredInlineShape(element)) yield element;
-  }
 }
 
 function stylesheetMedia(owner: StylesheetOwner): string {
@@ -1217,6 +1257,7 @@ function runtimeOptions(
     maxCompiledSelectors: _maxCompiledSelectors,
     maxImportCount: _maxImportCount,
     maxImportDepth: _maxImportDepth,
+    maxScannedElements: _maxScannedElements,
     maxStylesheetBytes: _maxStylesheetBytes,
     unreadableStylesheetPolicy: _unreadableStylesheetPolicy,
     ...runtime
@@ -1244,6 +1285,7 @@ class CornerfillAutoController {
   declare readonly maxCompiledSelectors: number;
   declare readonly maxImportCount: number;
   declare readonly maxImportDepth: number;
+  declare readonly maxScannedElements: number;
   declare readonly maxStylesheetBytes: number;
   declare native: boolean;
   declare readonly nativeQualification: Readonly<CornerfillNativeQualification>;
@@ -1304,12 +1346,14 @@ class CornerfillAutoController {
     this.maxImportCount = options.maxImportCount ?? 64;
     this.maxCandidateElements = options.maxCandidateElements ?? options.maxActiveEntries ?? 512;
     this.maxCompiledSelectors = options.maxCompiledSelectors ?? 1_024;
+    this.maxScannedElements = options.maxScannedElements ?? DEFAULT_MAX_SCANNED_ELEMENTS;
     for (const [name, value] of [
       ["maxStylesheetBytes", this.maxStylesheetBytes],
       ["maxImportDepth", this.maxImportDepth],
       ["maxImportCount", this.maxImportCount],
       ["maxCandidateElements", this.maxCandidateElements],
       ["maxCompiledSelectors", this.maxCompiledSelectors],
+      ["maxScannedElements", this.maxScannedElements],
     ] as const) {
       if (!Number.isSafeInteger(value) || value < 1) {
         throw new TypeError(`${name} must be a positive safe integer`);
@@ -1411,6 +1455,7 @@ class CornerfillAutoController {
         characterData: false,
         conservative: false,
         events: Object.freeze([]),
+        invalidation: "self",
         mediaQueries: Object.freeze([]),
         unobservableStates: Object.freeze([]),
       }),
@@ -3212,8 +3257,13 @@ class CornerfillAutoController {
     yield* this.sourceState.adoptedStylesheets.values();
   }
 
-  _stylesheetCandidates(): Set<Element> | null {
-    const candidates = new Set<Element>();
+  _discoverCandidates(): Readonly<{
+    authoredInline: readonly Element[];
+    stylesheet: Set<Element>;
+  }> | null {
+    const stylesheetCandidates = new Set<Element>();
+    const authoredInline: Element[] = [];
+    const allCandidates = new Set<Element>();
     this.attachmentState.candidateProvenance.clear();
     this._clearErrors(this.selectorBudgetOwner);
     const recordsBySelector = new Map<string, {
@@ -3252,51 +3302,138 @@ class CornerfillAutoController {
         else recordsBySelector.set(selectorRecord.selector, [groupedRecord]);
       }
     }
+    type CandidateMatcher = Readonly<{
+      directChild: boolean;
+      provenance: Readonly<SelectorRecord>;
+      selector: string;
+    }>;
+    const matchers: CandidateMatcher[] = [];
+    const directTargets: Readonly<{
+      element: Element;
+      provenance: Readonly<SelectorRecord>;
+    }>[] = [];
+    const recordSelectorFailure = (
+      error: unknown,
+      selector: string,
+      groupedRecords: readonly {
+        readonly owner: DiagnosticOwner;
+        readonly ownerIdentity: string;
+        readonly record: Readonly<SelectorRecord>;
+      }[],
+    ) => {
+      const failure = ownershipBlockingError(error)
+        ? error
+        : ownershipBlockingSyntaxError(
+          `Automatic CSS cannot discover selector matches for ${selector}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      for (const { owner, ownerIdentity, record } of groupedRecords) {
+        this._recordError(failure, `selector ${selector}`, {
+          bucket: owner,
+          ownerIdentity,
+          source: record.source,
+          selector,
+          declaration: record.declaration,
+        });
+      }
+    };
+    const probe = this.root === this.document
+      ? this.document.documentElement
+      : (this.root as ShadowRoot).host;
     for (const [selector, groupedRecords] of recordsBySelector) {
       const provenance = groupedRecords[0]!.record;
       try {
         for (const branch of selectorBranches(selector)) {
-          const matches = this.root === this.document
-            ? this.root.querySelectorAll(branch)
-            : shadowSelectorMatches(this.root as ShadowRoot, branch);
-          for (const element of matches) {
-            if (!candidates.has(element) && candidates.size >= this.maxCandidateElements) {
-              const error = ownershipBlockingRangeError(
-                `automatic root exceeds the maximum candidate element count of ${this.maxCandidateElements}`,
-              );
-              this._recordError(error, "automatic root candidate budget", {
-                bucket: this.selectorBudgetOwner,
-                ownerIdentity: "automatic root",
-              });
-              return null;
-            }
-            candidates.add(element);
-            if (!this.attachmentState.candidateProvenance.has(element)) {
-              this.attachmentState.candidateProvenance.set(element, provenance);
-            }
-          }
+          const prepared = rootSelectorBranch(this.root, this.document, branch);
+          if (prepared.target) directTargets.push(Object.freeze({
+            element: prepared.target,
+            provenance,
+          }));
+          if (!prepared.selector) continue;
+          probe.matches(prepared.selector);
+          matchers.push(Object.freeze({
+            directChild: prepared.directChild,
+            provenance,
+            selector: prepared.selector,
+          }));
         }
       } catch (error) {
-        const failure = ownershipBlockingError(error)
-          ? error
-          : ownershipBlockingSyntaxError(
-            `Automatic CSS cannot discover selector matches for ${selector}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        for (const { owner, ownerIdentity, record: selectorRecord } of groupedRecords) {
-          this._recordError(failure, `selector ${selector}`, {
-            bucket: owner,
-            ownerIdentity,
-            source: selectorRecord.source,
-            selector,
-            declaration: selectorRecord.declaration,
-          });
-        }
+        recordSelectorFailure(error, selector, groupedRecords);
         return null;
       }
     }
-    return candidates;
+    const addCandidate = (element: Element): boolean => {
+      if (allCandidates.has(element)) return true;
+      if (allCandidates.size >= this.maxCandidateElements) {
+        const error = ownershipBlockingRangeError(
+          `automatic root exceeds the maximum candidate element count of ${this.maxCandidateElements}`,
+        );
+        this._recordError(error, "automatic root candidate budget", {
+          bucket: this.selectorBudgetOwner,
+          ownerIdentity: "automatic root",
+        });
+        return false;
+      }
+      allCandidates.add(element);
+      return true;
+    };
+    for (const { element, provenance } of directTargets) {
+      if (!addCandidate(element)) return null;
+      stylesheetCandidates.add(element);
+      if (!this.attachmentState.candidateProvenance.has(element)) {
+        this.attachmentState.candidateProvenance.set(element, provenance);
+      }
+    }
+    const ordinaryMatchers = matchers.filter(({ directChild }) => !directChild);
+    const directChildMatchers = matchers.filter(({ directChild }) => directChild);
+    const ordinarySelector = ordinaryMatchers.map(({ selector }) => selector).join(",");
+    const directChildSelector = directChildMatchers.map(({ selector }) => selector).join(",");
+    const anySelector = [ordinarySelector, directChildSelector].filter(Boolean).join(",");
+    const stylesheetMayMatch = Boolean(anySelector && this.root.querySelector(anySelector));
+    let scanned = 0;
+    try {
+      for (const element of rootElements(this.root, this.document)) {
+        scanned += 1;
+        if (scanned > this.maxScannedElements) {
+          const error = ownershipBlockingRangeError(
+            `automatic root exceeds the maximum scanned element count of ${this.maxScannedElements}`,
+          );
+          this._recordError(error, "automatic root scan budget", {
+            bucket: this.selectorBudgetOwner,
+            ownerIdentity: "automatic root",
+          });
+          return null;
+        }
+        if (hasAuthoredInlineShape(element)) {
+          if (!addCandidate(element)) return null;
+          authoredInline.push(element);
+        }
+        if (!stylesheetMayMatch) continue;
+        let matcher = ordinarySelector && element.matches(ordinarySelector)
+          ? ordinaryMatchers.find((candidate) => element.matches(candidate.selector))
+          : undefined;
+        if (!matcher && element.parentNode === this.root
+          && directChildSelector && element.matches(directChildSelector)) {
+          matcher = directChildMatchers.find((candidate) => element.matches(candidate.selector));
+        }
+        if (!matcher) continue;
+        if (!addCandidate(element)) return null;
+        stylesheetCandidates.add(element);
+        if (!this.attachmentState.candidateProvenance.has(element)) {
+          this.attachmentState.candidateProvenance.set(element, matcher.provenance);
+        }
+      }
+    } catch (error) {
+      for (const [selector, groupedRecords] of recordsBySelector) {
+        recordSelectorFailure(error, selector, groupedRecords);
+      }
+      return null;
+    }
+    return Object.freeze({
+      authoredInline: Object.freeze(authoredInline),
+      stylesheet: stylesheetCandidates,
+    });
   }
 
   async _discoverSources(retryFailed = false): Promise<void> {
@@ -3393,8 +3530,8 @@ class CornerfillAutoController {
       this._vetoAutomaticHandles();
       return true;
     }
-    const stylesheetCandidates = this._stylesheetCandidates();
-    if (!stylesheetCandidates) {
+    const discovered = this._discoverCandidates();
+    if (!discovered) {
       this.ownershipBlocked = true;
       this.attachmentState.candidateProvenance.clear();
       this.attachmentState.candidates = new Set();
@@ -3402,29 +3539,10 @@ class CornerfillAutoController {
       return true;
     }
     this.ownershipBlocked = false;
-    const authoredInline: Element[] = [];
-    const candidateElements = new Set<Element>(stylesheetCandidates);
-    for (const element of authoredShapeInlineElements(this.root)) {
-      if (!candidateElements.has(element) && candidateElements.size >= this.maxCandidateElements) {
-        const error = ownershipBlockingRangeError(
-          `automatic root exceeds the maximum candidate element count of ${this.maxCandidateElements}`,
-        );
-        this._recordError(error, "automatic root candidate budget", {
-          bucket: this.selectorBudgetOwner,
-          ownerIdentity: "automatic root",
-        });
-        this.ownershipBlocked = true;
-        this.attachmentState.candidateProvenance.clear();
-        this.attachmentState.candidates = new Set();
-        this._vetoAutomaticHandles();
-        return true;
-      }
-      authoredInline.push(element);
-      candidateElements.add(element);
-    }
+    const stylesheetCandidates = discovered.stylesheet;
     const inlineCandidates = new Set<Element>([
       ...this.attachmentState.inline.keys(),
-      ...authoredInline,
+      ...discovered.authoredInline,
       ...[...stylesheetCandidates].filter((element) => element.hasAttribute("style")),
     ]);
     for (const element of inlineCandidates) {
@@ -3689,6 +3807,13 @@ class CornerfillAutoController {
     const hostObservations: Readonly<SelectorObservation>[] = [];
     let characterData = false;
     let conservative = false;
+    let invalidation: SelectorInvalidation = "self";
+    const invalidationRank: Readonly<Record<SelectorInvalidation, number>> = {
+      self: 0,
+      subtree: 1,
+      parent: 2,
+      root: 3,
+    };
     let hasSelectors = false;
     let rawStyleSelector = false;
     for (const record of this._styleRecords()) {
@@ -3705,6 +3830,9 @@ class CornerfillAutoController {
       for (const state of record.observation.unobservableStates) unobservableStates.add(state);
       characterData ||= record.observation.characterData;
       conservative ||= record.observation.conservative;
+      if (invalidationRank[record.observation.invalidation] > invalidationRank[invalidation]) {
+        invalidation = record.observation.invalidation;
+      }
     }
     for (const scope of this.scopes.values()) {
       const external = scope._hostObservationDependencies();
@@ -3716,6 +3844,9 @@ class CornerfillAutoController {
       for (const event of external.events) events.add(event);
       characterData ||= external.characterData;
       conservative ||= external.conservative;
+      if (invalidationRank[external.invalidation] > invalidationRank[invalidation]) {
+        invalidation = external.invalidation;
+      }
     }
     if (hasSelectors || this.attachmentState.inline.size > 0) events.add("resize");
     const state = Object.freeze({
@@ -3723,6 +3854,7 @@ class CornerfillAutoController {
       characterData,
       conservative,
       events: Object.freeze([...events].sort()),
+      invalidation,
       mediaQueries: Object.freeze([...mediaQueries].sort()),
       unobservableStates: Object.freeze([...unobservableStates].sort()),
     });
@@ -3964,6 +4096,11 @@ class CornerfillAutoController {
       if (!list) continue;
       const listener = (_event: MediaQueryListEvent) => {
         this._queueRefresh({ sources: true, candidates: true, attachments: true });
+        for (const scope of this.handleRegistry.scopes) {
+          if (scope !== this && scope.autoObserve && !scope.destroyed) {
+            scope._queueRefresh({ attachments: true });
+          }
+        }
         this._queueHostSelectorRefreshes();
       };
       if (typeof list.addEventListener === "function") {
@@ -4204,6 +4341,7 @@ class CornerfillAutoController {
       maxImportCount: this.maxImportCount,
       maxCandidateElements: this.maxCandidateElements,
       maxCompiledSelectors: this.maxCompiledSelectors,
+      maxScannedElements: this.maxScannedElements,
       unreadableStylesheetPolicy: this.unreadableStylesheetPolicy,
     });
     this.scopes.set(root, scope);
@@ -4274,6 +4412,7 @@ class CornerfillAutoController {
           maxCompiledSelectors: this.maxCompiledSelectors,
           maxImportCount: this.maxImportCount,
           maxImportDepth: this.maxImportDepth,
+          maxScannedElements: this.maxScannedElements,
           maxStylesheetBytes: this.maxStylesheetBytes,
           unreadableStylesheetPolicy: this.unreadableStylesheetPolicy,
         }),

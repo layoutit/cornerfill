@@ -1,9 +1,9 @@
 # CSS capture, invalidation, and lifecycle
 
-Status: the current runtime implements companion-style capture, direct prepared
-state, dirty scheduling, shared image leases, and teardown. Build transforms,
-complete DPR watching, and some observer/cache sketches below are future or
-illustrative and are labelled accordingly.
+Status: the package implements compiled declaration transport, an experimental
+automatic source-recovery mode, direct prepared state, dirty scheduling, shared
+image leases, and teardown. Complete DPR watching and some observer/cache
+sketches below remain future or illustrative and are labelled accordingly.
 
 ## Audit of the archived Paint polyfill
 
@@ -41,38 +41,40 @@ For prepared renderers, direct invalidation is better: the renderer already know
 
 ## Declaration survival
 
-### Build-time transform: future option, not implemented
+### Build-time transform: recommended
 
-A future tool could insert Cornerfill carriers next to source declarations. This
-could survive unsupported parser behavior and retain stylesheet-relative URL
-bases, but no such transform is part of the current package.
+`cornerfill/postcss` inserts private shape carriers beside authored
+`corner-shape` declarations and `all` resets while retaining the native CSS. It
+also emits a root-local manifest containing candidate selectors, media
+dependencies, host-context metadata, and bounded invalidation metadata.
 
-A future transform would have to cover:
+Because the carrier stays inside the authored rule, the browser owns
+specificity, inheritance, variables, source order, media activation, layers,
+scopes, CSS-wide values, and importance. The compiled runtime reads the resolved
+carrier and standard computed paint properties; it does not need image carriers
+or stylesheet-relative URL rewriting.
 
-- `corner-shape` shorthand and physical/logical longhands;
-- the combined `corner` shorthands if supported;
-- `border-shape` only if a separately authorized bounded lane exists;
-- background image/position/size/repeat/origin/clip when Cornerfill takes paint ownership;
-- relevant admitted border and contained-effect inputs.
+The plugin covers the implemented shape shorthand and physical/logical
+longhands. It must run after `@import` expansion and nesting transforms. It
+rejects shape declarations in keyframes, dynamic container conditions,
+pseudo-element targets, namespace-qualified selectors, and selector states that
+cannot be observed safely.
 
-Store source URL metadata for each transformed image declaration or rewrite relative URLs to absolute URLs during the build.
+All CSS that can affect a compiled target must be transformed, including CSS
+prepared for an open shadow root or generated before insertion.
+`adoptedStyleSheets` membership changes and paint-only CSSOM mutations require
+`await cornerfill.refresh()` because they do not produce a DOM mutation. A
+CSSOM replacement that changes shape declarations must itself contain
+plugin-transformed CSS; refresh never compiles source in the browser.
 
-### Runtime stylesheet scan: best effort
+### Runtime stylesheet recovery: experimental
 
-Same-origin `document.styleSheets` rules can identify selectors and custom carriers. Handle nested `@media`, `@supports`, `@layer`, `@container`, and `@scope` without flattening their conditions.
-
-Limitations:
-
-- inaccessible cross-origin sheets cannot be read;
-- unsupported native declarations may already be absent from CSSOM;
-- constructed/adopted stylesheets may have no owner node;
-- stylesheet mutations are not all represented by DOM mutations.
-
-The current auto entry performs one accessible-rule companion pass and exposes
-author-controlled refresh/explicit attachment seams. It does not preserve
-`corner-shape` declarations inside `@keyframes`, inaccessible imports,
-constructed/adopted sheets, or closed roots. Document explicit carriers/direct
-state—not a nonexistent build transform—as the reliable path for those cases.
+`cornerfill/auto` retains source recovery for no-build environments. It reads
+accessible author CSS, reconstructs supported imports and cascade context, and
+creates companion carriers. Inaccessible cross-origin sheets, parser-discarded
+declarations, constructed/adopted source without explicit handoff, and CSSOM
+mutations without exact source remain hard boundaries. These costs and limits
+belong only to the experimental automatic entry, not to the package root.
 
 ### Direct API: performance path
 
@@ -96,12 +98,12 @@ PolyCSS should attach prepared entries explicitly and notify changed atlas field
 
 ## Observer design
 
-Use narrowly scoped observers:
+Compiled mode uses narrowly scoped observers:
 
 - one `ResizeObserver` for controlled elements;
 - one `MutationObserver` per registered root for child-list and relevant attribute changes;
 - explicit registration for open ShadowRoots;
-- a stylesheet registry API for adopted/constructed sheets;
+- explicit `refresh()` after adopted/constructed-sheet membership or CSSOM changes;
 - document-level animation/transition event listeners that only touch known entries;
 - `matchMedia`/viewport hooks only for conditions that affect captured rules;
 - a DPR watcher that detects actual resolution changes.
@@ -224,9 +226,9 @@ Patching `CSSStyleDeclaration.prototype` and `Element.prototype` made sense for 
 
 Preferred order:
 
-1. current companion-style capture plus narrow observers;
-2. direct controller/prepared API;
-3. a future build transform when explicitly justified;
+1. compiled carriers plus the package-root observer;
+2. direct controller/prepared API for generated state;
+3. experimental automatic source recovery when no build is controlled;
 4. opt-in wrapper helpers for inline writes;
 5. broad prototype interception only as a separately shipped compatibility mode.
 

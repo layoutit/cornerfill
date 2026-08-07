@@ -1,47 +1,38 @@
 {
   "name": "cornerfill",
   "version": "0.0.1",
-  "description": "Experimental paint-only CSS corner-shape fallback for WebKit and Gecko",
+  "description": "Experimental paint-only CSS corner-shape polyfill for Safari and Firefox",
   "license": "MIT",
   "type": "module",
   "sideEffects": [
+    "./dist/index.mjs",
     "./dist/auto.mjs"
   ],
   "files": [
     "dist/*.d.mts",
     "dist/*.mjs"
   ],
-  "types": "./dist/auto.d.mts",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/auto.d.mts",
-      "import": "./dist/auto.mjs",
-      "default": "./dist/auto.mjs"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
     },
     "./runtime": {
       "types": "./dist/runtime.d.mts",
       "import": "./dist/runtime.mjs",
       "default": "./dist/runtime.mjs"
     },
+    "./postcss": {
+      "types": "./dist/postcss.d.mts",
+      "import": "./dist/postcss.mjs",
+      "default": "./dist/postcss.mjs"
+    },
     "./auto": {
-      "types": "./dist/auto-runtime.d.mts",
-      "import": "./dist/auto-runtime.mjs",
-      "default": "./dist/auto-runtime.mjs"
-    },
-    "./geometry": {
-      "types": "./dist/geometry.d.mts",
-      "import": "./dist/geometry.mjs",
-      "default": "./dist/geometry.mjs"
-    },
-    "./values": {
-      "types": "./dist/values.d.mts",
-      "import": "./dist/values.mjs",
-      "default": "./dist/values.mjs"
-    },
-    "./spec": {
-      "types": "./dist/spec.d.mts",
-      "import": "./dist/spec.mjs",
-      "default": "./dist/spec.mjs"
+      "types": "./dist/auto.d.mts",
+      "import": "./dist/auto.mjs",
+      "default": "./dist/auto.mjs"
     }
   },
   "repository": {
@@ -78,6 +69,10 @@
   },
   "devDependencies": {
     "playwright": "1.62.1",
+    "postcss": "^8.4.31",
     "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "postcss": "^8.4.31"
   }
 }

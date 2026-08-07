@@ -3,8 +3,9 @@
 This harness captures the same deterministic fixtures through:
 
 1. native Chromium `corner-shape`;
-2. the forced production Cornerfill runtime in Chromium;
-3. optionally, the same candidate pixels through WebKit `-webkit-canvas()` and Firefox `-moz-element()`.
+2. the forced compiled production controller in Chromium for native/candidate calibration;
+3. the compiled package root through WebKit `-webkit-canvas()` and Firefox `-moz-element()`;
+4. the explicit runtime for the retained-atlas update and caller-certified opaque-blend cases.
 
 It is the executable companion to [the verification plan](../notes/08-verification-plan.md). It is not itself the Cornerfill runtime.
 
@@ -16,6 +17,9 @@ Every run writes an immutable directory containing:
 oracle/results/<UTC run>/
   manifest.json
   README.md
+  artifacts/
+    compiled-input.css
+    compiled-output.css
   frames/
     native-chrome-a/frame_0000.png
     native-chrome-b/frame_0000.png
@@ -32,7 +36,7 @@ oracle/results/<UTC run>/
     diffs/frame_0000.png
 ```
 
-Raw numbered PNGs are the source of truth. The manifest binds the fixture/painter source hashes, `texels.webp` hash when used, host identity, browser user agent, backend, DPR, computed styles, frame-to-case mapping, and capture order.
+Raw numbered PNGs are the source of truth. The manifest binds the fixture/painter source hashes, the authored and PostCSS-transformed CSS artifact hashes, `texels.webp` hash when used, host identity, browser user agent, selected package route, backend, DPR, computed styles, frame-to-case mapping, and capture order.
 
 The comparator preserves alpha. It reports alpha independently, compares premultiplied RGB so invisible transparent RGB is ignored, separates boundary and fully opaque interior error, and reports connected changed regions.
 
@@ -119,14 +123,28 @@ because its evidence is valid; it does not claim candidate parity.
 
 ## Production candidate adapter
 
-[painter.mjs](painter.mjs) is now only the adapter from fixed oracle cases into the production build in [`dist/`](../dist/), generated from [`src/`](../src/). The fixture uses the production parser, geometry/cache, painter, live-surface backend, ownership overrides, invalidation scheduler, and teardown. There is no separate reference-candidate renderer.
+[compiled-fixture.css](compiled-fixture.css) is transformed by the production
+PostCSS plugin before capture, and both input and output are retained with hashes.
+[painter.mjs](painter.mjs) adapts fixed oracle cases into the production build
+in [`dist/`](../dist/), generated from [`src/`](../src/). WebKit and Firefox use
+the package root and compiled controller. Chromium first proves the root chose
+native mode, then uses the same compiled controller with forced static fallback
+solely to produce the A/B candidate. The retained-atlas update remains on the
+explicit prepared runtime, and the opaque `multiply` fixture remains explicit
+because computed CSS cannot certify raster opacity. All routes reuse the production parser,
+geometry/cache, painter, surface backend, ownership, invalidation, and teardown;
+there is no separate candidate renderer.
 
 `controller.capabilities.implementedPaintPaths` reports only that a production
 code path exists for the admitted grammar. `paintInputConstraints` reports
 known input boundaries. Neither object overrides this chapter's qualification
 states or constitutes native-differential `PASS`.
 
-For the `bevel` case, every requested browser also executes a post-capture lifecycle proof: a literal `matrix3d()` change must cause zero paints, a carrier style change and a resize must each cause one paint, and disposal must remove the active entry. Failure makes the oracle run fail structurally.
+For the `bevel` case, every requested browser also executes a post-capture
+compiled lifecycle proof: a literal `matrix3d()` change must cause zero computed
+checks and zero paints, a resolved shape-carrier change and a resize must each
+cause one paint, and destruction must remove the active entry. Failure makes the
+oracle run fail structurally.
 
 For `mario-texel-face`, a post-capture prepared crop update must repaint the same surface, reuse the already-decoded atlas, resolve the next exact 4×4 source field, and unregister cleanly. This proof also fails the run structurally if any invariant is lost.
 

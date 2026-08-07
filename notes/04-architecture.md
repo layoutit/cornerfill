@@ -1,15 +1,16 @@
 # Architecture status and design
 
-Status: the ownership flow and WebKit/Gecko surface model are implemented. The
-TypeScript module tree, build transform, Native Paint backend, `border-shape`
-lane, and parts of the API below are historical or future sketches, not release
-requirements. [`src/`](../src/) is the implementation authority.
+Status: the compiled declaration transport, ownership flow, and WebKit/Gecko
+surface model are implemented. The superseded module tree, Native Paint
+backend, `border-shape` lane, and parts of the API below remain historical or
+future sketches, not release requirements. [`src/`](../src/) is the
+implementation authority.
 
 ## End-to-end flow
 
 ```text
-authored CSS / direct prepared state
-  -> declaration transport
+authored CSS -> PostCSS carriers / experimental automatic recovery / direct prepared state
+  -> browser-resolved declaration transport
   -> computed box snapshot
   -> normalized corner shape
   -> contour requests
@@ -69,17 +70,19 @@ src/
     live-surface.ts
 ```
 
-The shipped source uses flat `.mjs` modules rather than this tree. The enduring
-boundary is that numeric geometry remains DOM-independent and unit-testable;
-this file layout must not be recreated merely to satisfy the old sketch.
+The shipped source uses flat TypeScript `.mts` modules and emits flat `.mjs`
+modules rather than this tree. The enduring boundary is that numeric geometry
+remains DOM-independent and unit-testable; this file layout must not be
+recreated merely to satisfy the old sketch.
 
 ## Author declaration transport
 
-Unsupported properties can be discarded by the target engine's CSS parser, so a runtime CSSOM scanner cannot reliably recover the author's `corner-shape` or `border-shape` declaration. Cross-origin stylesheets add another barrier because their rules are not readable without CORS.
-
-A possible future general solution is a build transform that duplicates
-supported declarations into durable custom-property carriers adjacent to the
-original declarations. No such build transform ships today:
+Unsupported properties can be discarded by the target engine's CSS parser, so
+a runtime CSSOM scanner cannot reliably recover the author's `corner-shape`
+declaration. Cross-origin stylesheets add another barrier because their rules
+are not readable without CORS. The recommended package path therefore uses
+`cornerfill/postcss` to duplicate the supported shape state into durable private
+carriers adjacent to the original declaration:
 
 ```css
 .card {
@@ -89,39 +92,30 @@ original declarations. No such build transform ships today:
 }
 ```
 
-For image ownership:
+The real carrier ABI is structured per corner rather than the simplified
+example above. It also transports `all` resets, emits a versioned candidate and
+invalidation manifest, and rewrites only supported `corner-shape` feature
+tests. Authors never write those private declarations.
 
-```css
-@property --cornerfill-background-image {
-  syntax: "<image>";
-  inherits: false;
-  initial-value: linear-gradient(transparent, transparent);
-}
+The transform preserves the native declaration, source order, importance,
+variables, media/supports/layer/scope context, and source locations. The browser
+therefore resolves the actual cascade before the compiled runtime reads computed
+carriers. The plugin must run after `@import` expansion and nesting transforms;
+it rejects conditions or selectors the runtime cannot observe instead of
+silently weakening them.
 
-.face {
-  background-image: url("texels.webp");
-  --cornerfill-background-image: url("texels.webp");
-}
-```
+The package root qualifies native support first. Only an unqualified browser
+loads `compiled-runtime.mjs`; that runtime reads compiler manifests and computed
+state but never fetches CSS, reconstructs imports or layers, or ships PostCSS to
+the browser. CSS not processed by the plugin is intentionally not claimed.
 
-If implemented later, the transform must preserve cascade order, importance,
-custom properties, media/supports/layer context, and URL base. It must not remove
-the native declaration. Supporting browsers continue to use native CSS.
+`cornerfill/auto` retains the previous best-effort source interpreter as an
+explicitly experimental no-build mode. Its accessible-source, CSP, CSSOM,
+import, and shadow-root limits do not define the compiled contract.
 
-The current default import instead reads accessible author CSS once and creates
-a companion stylesheet containing shape carriers. It cannot recover inaccessible
-cross-origin/imported rules, constructed/adopted sheets, closed roots, or
-authored `corner-shape` declarations inside `@keyframes`; those cases require
-explicit carriers or the direct API.
-
-Runtime-only adoption can be best-effort:
-
-- explicit `data-cornerfill`/custom properties;
-- same-origin readable stylesheets;
-- inline styles intercepted through a narrow Cornerfill API;
-- direct prepared state for renderers such as PolyCSS.
-
-Do not promise recovery of an unknown declaration already dropped by a foreign parser.
+`cornerfill/runtime` remains the explicit path for generated or prepared state.
+Do not promise recovery of an unknown declaration already dropped by a foreign
+parser.
 
 ## Direct prepared-state path
 
@@ -179,7 +173,7 @@ Before applying overrides:
 3. build and decode the paint graph;
 4. allocate/resize the surface;
 5. paint a complete first frame;
-6. atomically switch the element to the live CSS image;
+6. atomically switch the element to the Canvas-backed CSS image;
 7. make the original owned background/border paint transparent or otherwise inert without changing layout.
 
 The override must avoid recursive capture. Once `background-image` is the live surface, reading computed `background-image` would return Cornerfill's output rather than the source. Store the authored/resolved source separately and expose refresh hooks when author state changes.

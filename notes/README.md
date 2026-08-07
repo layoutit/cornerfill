@@ -10,28 +10,33 @@ labelled future work behind those contracts.
 Cornerfill is the no-`clip-path`, no-CSS-mask paint polyfill for CSS
 `corner-shape`. `border-shape` is specification context and possible separately
 authorized research, not an implied follow-on phase. The target is not a baked
-Mario asset trick: it is a reusable painter that computes shape from CSS values
-and places a live transparent CSS image on the original element.
+asset trick: it is a reusable painter that computes shape from CSS values and
+places a transparent Canvas-backed image on the original element.
 
 ## Verdict
 
 The central route is feasible:
 
-1. Resolve `border-radius`, `corner-shape`, the element's paint inputs, and its untransformed border-box size.
-2. Build the CSS Borders 4 contour in JavaScript.
-3. Paint the background and border through that contour into a transparent canvas-backed image.
-4. Expose the canvas as the element's live CSS image:
+1. Preserve authored CSS and compile unsupported shape declarations into private adjacent carriers so the browser resolves the cascade.
+2. Resolve `border-radius`, `corner-shape`, the element's paint inputs, and its untransformed border-box size.
+3. Build the CSS Borders 4 contour in JavaScript.
+4. Paint the background and border through that contour into a transparent canvas-backed image.
+5. Expose the canvas as the element's CSS background image:
    - `-webkit-canvas(name)` on WebKit;
    - `-moz-element(#name)` on Firefox;
    - an opt-in static data URL only when a live bridge is unavailable.
-5. Leave `transform`, including `matrix3d()`, on the original element. The browser compositor rotates the finished image with the element.
+6. Leave `transform`, including `matrix3d()`, on the original element. The browser compositor rotates the finished image with the element.
 
 A native `paint()` backend remains an unimplemented future option. It is not a
 current Cornerfill package path or release gate.
 
-That route was proven locally with a dynamically repainted transparent triangle under compound 3D rotation in Playwright's WebKit and Firefox engine builds. It used no `clip-path`, CSS mask, font, SVG layer, extra clipping element, or baked sprite alpha. See [the evidence record](evidence/README.md).
+That route was proven locally with a transparent triangle under compound 3D
+rotation in Playwright's WebKit and Firefox engine builds. The surface remained
+unchanged while the compositor transformed the original element. It used no
+`clip-path`, CSS mask, font, SVG layer, extra clipping element, or baked sprite
+alpha. See [the evidence record](evidence/README.md).
 
-There is one non-negotiable carrier boundary: the generated CSS image occupies
+There is one non-negotiable paint boundary: the generated background image occupies
 the host's border box and changes only pixels Cornerfill owns inside that box.
 It cannot paint external shadow/outline outsets, install the browser's descendant
 overflow clip or hit-test geometry, clip replaced content, represent multiple
@@ -76,7 +81,7 @@ overflow clipping, replaced-element clipping, multi-fragment boxes, shaped
 | [00 — Verdict and scope](00-verdict-and-scope.md) | Current contract synthesis | Exact product promise, feasibility matrix, and hard boundary |
 | [01 — Spec contract](01-spec-contract.md) | Current semantic synthesis | Normative geometry, property semantics, and recorded spec defects |
 | [02 — Engine implementations](02-engine-implementations.md) | Point-in-time support snapshot | Chromium, WebKit, Firefox, support state, and source-level clues |
-| [03 — Live CSS image breakthrough](03-live-css-image-backends.md) | Implemented WebKit/Gecko transport plus historical research | Why the live output rotates safely; future paths are labelled |
+| [03 — Canvas-backed CSS image backends](03-live-css-image-backends.md) | Implemented WebKit/Gecko transport plus historical research | Why the painted output rotates safely; future paths are labelled |
 | [04 — Architecture](04-architecture.md) | Implemented flow plus superseded/future sketches | Current ownership and the status of earlier module/backend proposals |
 | [05 — Geometry and painting](05-geometry-and-painting.md) | Implemented core plus qualified limits | Contours, raster boolean operations, borders, images, and contained effects |
 | [06 — Capture and invalidation](06-capture-and-invalidation.md) | Implemented lifecycle plus labelled proposals | CSS capture, observers, animation sampling, caching, and teardown |

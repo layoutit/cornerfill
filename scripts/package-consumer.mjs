@@ -38,27 +38,34 @@ async function browserImport() {
   const playwrightModule = await import(pathToFileURL(playwrightPath).href);
   const playwright = playwrightModule.default ?? playwrightModule;
   const packageRoot = join(consumerRoot, "node_modules", "cornerfill");
+  const compiledCss = readFileSync(join(consumerRoot, "compiled.css"), "utf8");
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html>
-        <style>
-          #fixture { width: 20px; height: 16px; border-radius: 8px; corner-shape: bevel; background: red }
-        </style>
+        <style>${compiledCss}</style>
         <div id="fixture"></div>
-        <script type="importmap">{"imports":{"cornerfill":"/package/dist/auto.mjs"}}</script>
+        <script type="importmap">{"imports":{"cornerfill":"/package/dist/index.mjs"}}</script>
         <script type="module">
           try {
             const cornerfill = (await import("cornerfill")).default;
             const report = await cornerfill?.ready;
             const entry = cornerfill?.explain(document.querySelector("#fixture"));
+            const rawStyle = document.createElement("style");
+            rawStyle.textContent = "#unprocessed{width:20px;height:16px;border-radius:8px;corner-shape:bevel;background:red}";
+            const unprocessed = document.createElement("div");
+            unprocessed.id = "unprocessed";
+            document.head.append(rawStyle);
+            document.body.append(unprocessed);
+            await cornerfill?.refresh();
             globalThis.__cornerfillPackage = {
               controller: Boolean(cornerfill),
               entryBackend: entry?.backend ?? null,
               entryStatus: entry?.status ?? null,
               fallbackLoaded: report?.fallbackLoaded,
               mode: report?.mode,
+              unprocessedEntry: cornerfill?.explain(unprocessed) ?? null,
             };
             document.documentElement.dataset.packageTest = "pass";
           } catch (error) {
@@ -91,8 +98,8 @@ async function browserImport() {
     const origin = `http://127.0.0.1:${address.port}`;
     for (const [name, browserType, expectedMode, expectedBackend] of [
       ["Chromium", playwright.chromium, "native", null],
-      ["WebKit", playwright.webkit, "fallback", "webkit-canvas"],
-      ["Firefox", playwright.firefox, "fallback", "moz-element"],
+      ["WebKit", playwright.webkit, "compiled", "webkit-canvas"],
+      ["Firefox", playwright.firefox, "compiled", "moz-element"],
     ]) {
       let browser = null;
       let context = null;
@@ -123,9 +130,15 @@ async function browserImport() {
         if (expectedBackend && (status.result?.entryStatus !== "active" || status.result?.entryBackend !== expectedBackend)) {
           throw new Error(`${name} packed fallback did not paint the fixture: ${JSON.stringify(status.result)}`);
         }
-        const fallbackRequested = requested.some((url) => /\/(?:auto-runtime|runtime)\.mjs(?:$|\?)/u.test(url));
-        if ((expectedMode === "fallback") !== fallbackRequested) {
+        if (status.result?.unprocessedEntry !== null) {
+          throw new Error(`${name} packed root silently claimed unprocessed CSS`);
+        }
+        const fallbackRequested = requested.some((url) => /\/(?:compiled-runtime|runtime)\.mjs(?:$|\?)/u.test(url));
+        if ((expectedMode === "compiled") !== fallbackRequested) {
           throw new Error(`${name} packed browser loaded the wrong module closure`);
+        }
+        if (requested.some((url) => /\/(?:auto-runtime|postcss)\.mjs(?:$|\?)/u.test(url))) {
+          throw new Error(`${name} packed browser loaded automatic or Node-only compiler code`);
         }
       }, [
         () => closePlaywrightSession(context, browser, `packed-consumer ${name} session`),
@@ -161,27 +174,31 @@ await runWithCleanup(async () => {
     "--no-package-lock",
     archive,
   ], consumerRoot);
+  writeFileSync(join(consumerRoot, "compile-css.mjs"), `
+    import { writeFileSync } from "node:fs";
+    import postcss from "postcss";
+    import cornerfillPostcss from "cornerfill/postcss";
+    const input = "#fixture{width:120px;height:100px;border-radius:50% 50% 0 0 / 100% 100% 0 0;corner-shape:bevel bevel round round;background:#f05a47}";
+    const result = await postcss([cornerfillPostcss()]).process(input, { from: "consumer.css" });
+    writeFileSync(new URL("./compiled.css", import.meta.url), result.css);
+  `);
+  run(process.execPath, ["compile-css.mjs"], consumerRoot);
   writeFileSync(join(consumerRoot, "node-consumer.mjs"), `
     import assert from "node:assert/strict";
     const root = await import("cornerfill");
     assert.equal(root.default, null);
-    assert.equal(root.cornerfill, null);
     for (const specifier of [
       "cornerfill/auto",
+      "cornerfill/postcss",
       "cornerfill/runtime",
-      "cornerfill/geometry",
-      "cornerfill/values",
-      "cornerfill/spec",
     ]) await import(specifier);
   `);
   run(process.execPath, ["node-consumer.mjs"], consumerRoot);
   writeFileSync(join(consumerRoot, "index.mts"), `
     import cornerfill from "cornerfill";
-    import { installCornerfillAuto } from "cornerfill/auto";
+    import automatic from "cornerfill/auto";
+    import cornerfillPostcss from "cornerfill/postcss";
     import { installCornerfill } from "cornerfill/runtime";
-    import { buildCornerGeometry } from "cornerfill/geometry";
-    import { parseCornerShape } from "cornerfill/values";
-    import { CORNERFILL_SPEC_REVISION } from "cornerfill/spec";
     declare const element: HTMLElement;
     declare const shadowRoot: ShadowRoot;
     declare const runtime: ReturnType<typeof installCornerfill>;
@@ -203,10 +220,8 @@ await runWithCleanup(async () => {
     prepared.interpolateCornerShape("round", "bevel", 0.5);
     // @ts-expect-error prepared direct updates do not accept geometry fields.
     prepared.update({ cornerShape: "scoop" });
-    // @ts-expect-error open roots must be registered through the document controller.
-    installCornerfillAuto({ root: shadowRoot });
-    void [cornerfill, installCornerfillAuto, installCornerfill, buildCornerGeometry,
-      parseCornerShape, CORNERFILL_SPEC_REVISION, attached, prepared];
+    cornerfill?.registerRoot(shadowRoot);
+    void [cornerfill, automatic, cornerfillPostcss, installCornerfill, attached, prepared];
   `);
   writeFileSync(join(consumerRoot, "tsconfig.json"), `${JSON.stringify({
     compilerOptions: {

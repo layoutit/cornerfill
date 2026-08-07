@@ -11,12 +11,13 @@ test("native qualification has no fallback import closure", () => {
   }
 });
 
-test("the package root statically imports only pure contracts, native qualification, and oracle qualification", () => {
-  const source = readFileSync(new URL("../dist/auto.mjs", import.meta.url), "utf8");
+test("the package root statically imports only native and oracle qualification", () => {
+  const source = readFileSync(new URL("../dist/index.mjs", import.meta.url), "utf8");
   const staticImports = [...source.matchAll(/^\s*import\s+[^;]+?from\s+["']([^"']+)["']/gmu)]
     .map((match) => match[1]);
-  assert.deepEqual(staticImports, ["./auto-contract.mjs", "./native.mjs", "./qualification.mjs"]);
-  assert.match(source, /await import\("\.\/auto-runtime\.mjs"\)/u);
+  assert.deepEqual(staticImports, ["./native.mjs", "./qualification.mjs"]);
+  assert.match(source, /await import\("\.\/compiled-runtime\.mjs"\)/u);
+  assert.doesNotMatch(source, /auto-runtime|postcss/u);
   assert.doesNotMatch(source, /getCSSCanvasContext|mozSetImageElement|fullNativeQualified/u);
 });
 

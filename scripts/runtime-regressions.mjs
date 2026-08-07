@@ -14,6 +14,8 @@ import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import postcss from "postcss";
+import cornerfillPostcss from "../dist/postcss.mjs";
 import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,6 +54,134 @@ const MIME = Object.freeze({
   ".mjs": "text/javascript; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
 });
+const COMPILED_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-fixture {
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    corner-shape: bevel;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-reset {
+    all: unset;
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-important-shape { corner-shape: bevel !important; }
+  .cornerfill-compiled-important-reset {
+    all: unset !important;
+    display: block !important;
+    width: 36px !important;
+    height: 28px !important;
+    border-radius: 14px !important;
+    background: rgb(220, 40, 40) !important;
+  }
+  .cornerfill-compiled-round { corner-shape: initial; }
+  .cornerfill-compiled-fixture.cornerfill-compiled-scoop { corner-shape: scoop; }
+  .cornerfill-compiled-logical { corner-start-start-shape: scoop; }
+  .cornerfill-compiled-variable-reset {
+    --compiled-reset: unset;
+    all: var(--compiled-reset);
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-parent,
+  .cornerfill-compiled-child,
+  .cornerfill-compiled-layer {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-parent { corner-shape: scoop; }
+  .cornerfill-compiled-child { corner-shape: inherit; }
+  .cornerfill-compiled-child-reset { corner-shape: unset; }
+  @layer cornerfill-compiled-base, cornerfill-compiled-override;
+  @layer cornerfill-compiled-base {
+    .cornerfill-compiled-layer { corner-shape: bevel; }
+  }
+  @layer cornerfill-compiled-override {
+    .cornerfill-compiled-layer { corner-shape: initial; }
+    .cornerfill-compiled-layer.cornerfill-compiled-revert { corner-shape: revert-layer; }
+  }
+  .cornerfill-compiled-supports {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  @supports (corner-shape: bevel) {
+    .cornerfill-compiled-supports {
+      corner-shape: bevel;
+      color: rgb(1, 2, 3);
+      --cornerfill-compiled-branch: positive;
+    }
+  }
+  @supports not (corner-shape: bevel) {
+    .cornerfill-compiled-supports {
+      color: rgb(4, 5, 6);
+      --cornerfill-compiled-branch: negative;
+    }
+  }
+  @supports ((corner-shape: scoop) and (display: grid)) {
+    .cornerfill-compiled-supports { --cornerfill-compiled-mixed: active; }
+  }
+  @supports not ((corner-shape: notch) and (display: __cornerfill_invalid__)) {
+    .cornerfill-compiled-supports { --cornerfill-compiled-nested: active; }
+  }
+  @supports (corner-shape: superellipse(pow(2, 2))) {
+    .cornerfill-compiled-supports { --cornerfill-compiled-native-test: active; }
+  }
+  @supports not (corner-shape: superellipse(pow(2, 2))) {
+    .cornerfill-compiled-supports { --cornerfill-compiled-native-test: inactive; }
+  }
+  .cornerfill-compiled-dynamic,
+  .cornerfill-compiled-hover,
+  .cornerfill-compiled-media {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-dynamic.active { corner-shape: bevel; }
+  .cornerfill-compiled-dynamic[data-compiled-shape="on"] { corner-shape: scoop; }
+  #cornerfill-compiled-dynamic-id { corner-shape: notch; }
+  .cornerfill-compiled-hover:hover { corner-shape: bevel; }
+  @media (prefers-color-scheme: dark) {
+    .cornerfill-compiled-media { corner-shape: bevel; }
+  }
+`, { from: "compiled-fixture.css" })).css;
+const COMPILED_SHADOW_FIXTURE_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-shadow,
+  .cornerfill-compiled-shadow-host-child,
+  .cornerfill-compiled-shadow-context {
+    display: block;
+    width: 36px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgb(220, 40, 40);
+  }
+  .cornerfill-compiled-shadow { corner-shape: bevel; }
+  :host { corner-shape: notch; }
+  :host(.cornerfill-compiled-shadow-active) .cornerfill-compiled-shadow-host-child {
+    corner-shape: scoop;
+  }
+  :host-context(.cornerfill-compiled-shadow-theme) .cornerfill-compiled-shadow-context {
+    corner-shape: bevel;
+  }
+`, { from: "compiled-shadow-fixture.css" })).css;
+const COMPILED_SHADOW_RESET_CSS = (await postcss([cornerfillPostcss()]).process(`
+  .cornerfill-compiled-shadow { corner-shape: initial; }
+`, { from: "compiled-shadow-reset.css" })).css;
 
 function locatePlaywrightModule() {
   const explicit = process.env.CORNERFILL_PLAYWRIGHT_MODULE;
@@ -87,6 +217,21 @@ function within(root, path) {
 async function startServer() {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/bench/compiled-fixture.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_FIXTURE_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-shadow-fixture.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_SHADOW_FIXTURE_CSS);
+      return;
+    }
+    if (url.pathname === "/bench/compiled-shadow-reset.css") {
+      response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
+      response.end(COMPILED_SHADOW_RESET_CSS);
+      return;
+    }
     if (url.pathname === "/bench/imports/delayed-runtime.css") {
       const css = url.searchParams.get("css") ?? "";
       const browserStyleRequest = request.headers["sec-fetch-dest"] === "style"
@@ -202,6 +347,14 @@ async function driveBrowserStates(page) {
       await page.locator(".cornerfill-auto-hover").hover();
       stage = "hover-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "hover-driven"; });
+    } else if (stage === "compiled-hover-ready") {
+      await page.locator(".cornerfill-compiled-hover").hover();
+      stage = "compiled-hover-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-hover-driven"; });
+    } else if (stage === "compiled-hover-out-ready") {
+      await page.locator("#status").hover({ force: true });
+      stage = "compiled-hover-out-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-hover-out-driven"; });
     } else if (stage === "media-dark-ready") {
       await page.emulateMedia({ colorScheme: "dark" });
       stage = "media-dark-driven";
@@ -210,6 +363,14 @@ async function driveBrowserStates(page) {
       await page.emulateMedia({ colorScheme: "light" });
       stage = "media-light-driven";
       await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "media-light-driven"; });
+    } else if (stage === "compiled-media-dark-ready") {
+      await page.emulateMedia({ colorScheme: "dark" });
+      stage = "compiled-media-dark-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-media-dark-driven"; });
+    } else if (stage === "compiled-media-light-ready") {
+      await page.emulateMedia({ colorScheme: "light" });
+      stage = "compiled-media-light-driven";
+      await page.evaluate(() => { globalThis.__CORNERFILL_POINTER_DRIVER__.stage = "compiled-media-light-driven"; });
     } else if (/^keyboard-tab-\d+-ready$/u.test(stage)) {
       await page.keyboard.press("Tab");
       const driven = stage.replace(/-ready$/u, "-driven");
@@ -239,7 +400,13 @@ await runWithCleanup(async () => {
       browser = await browserType.launch({ headless: true });
       context = await browser.newContext({ viewport: { width: 800, height: 600 } });
       const page = await context.newPage();
-      page.on("pageerror", (error) => errors.push(error));
+      page.on("pageerror", (error) => {
+        errors.push(error);
+        void page.evaluate((message) => {
+          document.querySelector("#status").textContent = message;
+          document.documentElement.dataset.runtimeRegressions = "fail";
+        }, error.message).catch(() => undefined);
+      });
       page.on("console", (message) => {
         if (message.type() === "error") errors.push(new Error(message.text()));
       });

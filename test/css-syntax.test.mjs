@@ -112,8 +112,12 @@ test("selector observation ignores selector text inside comments and attribute v
     characterData: false,
     conservative: false,
     events: ["pointerout", "pointerover"],
+    invalidation: "self",
     unobservableStates: [],
   });
+  assert.equal(selectorObservation([".theme .card"]).invalidation, "subtree");
+  assert.equal(selectorObservation([".toggle + .card"]).invalidation, "parent");
+  assert.equal(selectorObservation([".card:has(.active)"]).invalidation, "root");
 });
 
 test("import URLs require browser-valid string or url tokens", () => {
@@ -173,4 +177,16 @@ test("escaped all resets and support keywords use decoded CSS tokens", () => {
   const revertRule = carrierSupportsCondition(String.raw`(corner-shape: r\65vert-rule)`);
   assert.match(revertRule, /\(all:/u);
   assert(revertRule.includes(String.raw`r\65vert-rule`));
+});
+
+test("escaped important annotations participate in the transported cascade", () => {
+  const transformed = canonicalizeCornerShapeDeclarations(String.raw`
+    .shape { corner-shape: bevel !/**/im\70ortant/**/; corner-shape: scoop }
+    .reset { corner-shape: bevel; all: unset !im\70ortant }
+  `);
+  assert.match(
+    transformed,
+    /--cornerfill-corner-top-left-shape:bevel !important;[\s\S]*--cornerfill-corner-top-left-shape:scoop;/u,
+  );
+  assert.match(transformed, /--cornerfill-auto-physical-shape:__cornerfill_unset__ !important/u);
 });

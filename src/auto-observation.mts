@@ -4,7 +4,7 @@ import {
   isStylesheetSourceElement,
   mutationTouchesStylesheetSource,
   nodeContainsStylesheetSource,
-} from "./auto-contract.mjs";
+} from "./stylesheet-elements.mjs";
 
 export interface AutomaticMutationPlan {
   readonly attachments: boolean;
@@ -66,9 +66,24 @@ function trackedElement(element: Element, context: Readonly<AutomaticMutationCon
       && (context.inline.has(element) || context.handles.has(element)));
 }
 
+function *descendantElements(root: Element): Generator<Element, void, unknown> {
+  let element = root.firstElementChild;
+  while (element) {
+    yield element;
+    if (element.firstElementChild) {
+      element = element.firstElementChild;
+      continue;
+    }
+    while (element && element !== root && !element.nextElementSibling) {
+      element = element.parentElement;
+    }
+    element = element === root ? null : element?.nextElementSibling ?? null;
+  }
+}
+
 function trackedSubtree(root: Element, context: Readonly<AutomaticMutationContext>): boolean {
   if (trackedElement(root, context)) return true;
-  for (const element of root.querySelectorAll("*")) {
+  for (const element of descendantElements(root)) {
     if (trackedElement(element, context)) return true;
   }
   return false;
@@ -80,7 +95,7 @@ function addedSubtreeMayContainCandidate(
   context: Readonly<AutomaticMutationContext>,
 ): boolean {
   if (context.hasAuthoredInlineShape(root)) return true;
-  for (const element of root.querySelectorAll("[style]")) {
+  for (const element of descendantElements(root)) {
     if (context.hasAuthoredInlineShape(element)) return true;
   }
   if (!selectorList) return false;

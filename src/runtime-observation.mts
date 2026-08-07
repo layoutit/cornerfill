@@ -5,7 +5,7 @@ import { ALL_CARRIERS } from "./style.mjs";
 import {
   isStylesheetSourceElement,
   mutationTouchesStylesheetSource,
-} from "./auto-contract.mjs";
+} from "./stylesheet-elements.mjs";
 import { propertyAffectsOwnedPaint } from "./paint-properties.mjs";
 
 interface RuntimeAnimationEvent extends Event {

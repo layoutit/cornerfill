@@ -31,10 +31,17 @@ const require = createRequire(import.meta.url);
 const VALID_BROWSERS = new Set(["chrome", "webkit", "firefox"]);
 const BROWSER_TYPES = Object.freeze({ chrome: chromium, webkit, firefox });
 const MANIFEST_SCHEMA = "cornerfill-oracle-run@2";
+const COMPILED_FIXTURE_INPUT = join(PROJECT_ROOT, "oracle", "compiled-fixture.css");
 
 function paintUsesMarioAsset(paint) {
   return paint?.url === "/__mario/texels.webp"
     || paint?.layers?.some(paintUsesMarioAsset) === true;
+}
+
+function caseRequiresCompiledSurface(oracleCase) {
+  return oracleCase.shapeParameters.some((shape, index) => (
+    shape !== 1 && oracleCase.radii[index].rx > 0 && oracleCase.radii[index].ry > 0
+  ));
 }
 
 function usage() {
@@ -135,6 +142,7 @@ function topLevelFiles(directory, predicate) {
 }
 
 const MIME_TYPES = Object.freeze({
+  ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
@@ -150,11 +158,19 @@ function sendFile(response, path) {
   createReadStream(path).pipe(response);
 }
 
-async function startFixtureServer(marioTexels) {
+async function startFixtureServer(marioTexels, compiledCss) {
   const rootWithSeparator = `${PROJECT_ROOT}${sep}`;
   const server = createServer((request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/__cornerfill/compiled.css") {
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": MIME_TYPES[".css"],
+        });
+        response.end(compiledCss);
+        return;
+      }
       if (url.pathname === "/__mario/texels.webp") {
         if (!marioTexels || !existsSync(marioTexels)) {
           response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -194,6 +210,19 @@ async function startFixtureServer(marioTexels) {
       server.close((error) => error ? reject(error) : resolvePromise());
     }),
   });
+}
+
+async function compileFixtureCss() {
+  const [{ default: postcss }, { default: cornerfillPostcss }] = await Promise.all([
+    import("postcss"),
+    import("../dist/postcss.mjs"),
+  ]);
+  const source = readFileSync(COMPILED_FIXTURE_INPUT, "utf8");
+  const result = await postcss([cornerfillPostcss()]).process(source, {
+    from: COMPILED_FIXTURE_INPUT,
+    to: "cornerfill-oracle-compiled.css",
+  });
+  return Object.freeze({ input: source, output: result.css });
 }
 
 async function nextPaint(page) {
@@ -310,8 +339,6 @@ async function captureBrowser({
     mkdirSync(nativeBDirectory, { recursive: true });
   }
   const records = [];
-  const firstMode = browser === "chrome" ? "native" : "candidate";
-  const firstUrl = fixtureUrl(origin, selectedCases[0].id, firstMode);
   const errors = [];
   let instance = null;
   let context = null;
@@ -324,7 +351,6 @@ async function captureBrowser({
     page.on("console", (message) => {
       if (message.type() === "error") errors.push(new Error(message.text()));
     });
-    await page.goto(firstUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     for (let index = 0; index < selectedCases.length; index += 1) {
       const oracleCase = selectedCases[index];
       const frame = `frame_${String(index).padStart(4, "0")}.png`;
@@ -373,16 +399,35 @@ async function captureBrowser({
         ? [opaquePairPaths(candidatePath, compositeDirectory)]
         : null;
       const metadata = await captureFixture(page, [candidatePath], { opaquePairs });
-      const expectedBackend = browser === "chrome"
-        ? "static-data-url"
-        : browser === "webkit"
-          ? "webkit-canvas"
-          : "moz-element";
-      if (metadata.candidate?.runtime !== "cornerfill-runtime@2"
-        || metadata.backend !== expectedBackend) {
+      const prepared = oracleCase.id === "mario-texel-face";
+      const explicit = prepared || oracleCase.id === "background-blend-multiply";
+      const expectedRoute = prepared
+        ? "explicit-prepared"
+        : explicit
+          ? "explicit-runtime"
+          : browser === "chrome"
+            ? "compiled-forced-calibration"
+            : "package-root-compiled";
+      const requiresSurface = explicit || caseRequiresCompiledSurface(oracleCase);
+      const expectedBackend = requiresSurface
+        ? browser === "chrome"
+          ? "static-data-url"
+          : browser === "webkit"
+            ? "webkit-canvas"
+            : "moz-element"
+        : "browser-paint-inert";
+      if (metadata.candidate?.schema !== "cornerfill-oracle-candidate@2"
+        || metadata.candidate?.runtime !== "cornerfill-runtime@2"
+        || metadata.candidate?.route !== expectedRoute
+        || metadata.candidate?.mode !== (explicit ? "explicit" : "compiled")
+        || metadata.backend !== expectedBackend
+        || (requiresSurface && metadata.candidate?.entry?.status !== "active")
+        || (!requiresSurface && metadata.candidate?.entry !== null)) {
         throw new Error(
-          `production candidate did not use the required ${browser} adapter for ${oracleCase.id}; `
-          + `runtime=${metadata.candidate?.runtime ?? "missing"} backend=${metadata.backend ?? "missing"}`,
+          `production candidate did not use the required ${browser} route for ${oracleCase.id}; `
+          + `route=${metadata.candidate?.route ?? "missing"} `
+          + `runtime=${metadata.candidate?.runtime ?? "missing"} `
+          + `backend=${metadata.backend ?? "missing"}`,
         );
       }
       if (oracleCase.id === "bevel" && metadata.lifecycle?.passed !== true) {
@@ -449,8 +494,15 @@ async function runOracle(options) {
   const framesRoot = join(runDirectory, "frames");
   const compositesRoot = join(runDirectory, "composites");
   const reportsRoot = join(runDirectory, "reports");
+  const artifactsRoot = join(runDirectory, "artifacts");
   mkdirSync(framesRoot, { recursive: true });
   mkdirSync(reportsRoot, { recursive: true });
+  mkdirSync(artifactsRoot, { recursive: true });
+  const compiledCss = await compileFixtureCss();
+  const compiledInputPath = join(artifactsRoot, "compiled-input.css");
+  const compiledOutputPath = join(artifactsRoot, "compiled-output.css");
+  writeFileSync(compiledInputPath, compiledCss.input);
+  writeFileSync(compiledOutputPath, compiledCss.output);
 
   const sourceFiles = [
     "package.json",
@@ -462,7 +514,7 @@ async function runOracle(options) {
     "scripts/generate-qualification.mjs",
     "scripts/oracle.mjs",
     "scripts/png.mjs",
-    ...topLevelFiles("oracle", (name) => /\.(?:html|json|mjs)$/u.test(name)),
+    ...topLevelFiles("oracle", (name) => /\.(?:css|html|json|mjs)$/u.test(name)),
     ...topLevelFiles("src", (name) => name.endsWith(".mts")),
     ...topLevelFiles("dist", (name) => name.endsWith(".mjs")),
   ].sort();
@@ -487,6 +539,10 @@ async function runOracle(options) {
     configuration,
     playwright: sourceIdentity(require.resolve("playwright/package.json")),
     sources,
+    compiledCss: Object.freeze({
+      input: sourceIdentity(compiledInputPath),
+      output: sourceIdentity(compiledOutputPath),
+    }),
     assets: Object.freeze({ marioTexels: marioSource }),
     cases: Object.freeze(selectedCases.map((entry, index) => Object.freeze({
       frame: `frame_${String(index).padStart(4, "0")}.png`,
@@ -500,7 +556,7 @@ async function runOracle(options) {
   };
   writeJson(join(runDirectory, "manifest.partial.json"), manifest);
 
-  const server = await startFixtureServer(options.marioTexels);
+  const server = await startFixtureServer(options.marioTexels, compiledCss.output);
   try {
     for (const browser of options.browsers) {
       console.log(`capture ${browser}: ${selectedCases.length} case(s), one session`);

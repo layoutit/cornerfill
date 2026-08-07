@@ -396,10 +396,10 @@ export function parseBackgroundPosition(input: unknown): BackgroundPositionSpec 
     const trailingPair = parseEdgePair(lower[1]!, tokens[2]);
     const pair = leadingPair ?? trailingPair;
     const otherToken = (leadingPair ? lower[2] : lower[0])!;
-    if (!pair || (otherToken !== "center" && positionAxisForEdge(otherToken) === pair.axis)) {
+    const otherAxis = pair?.axis === "x" ? "y" : "x";
+    if (!pair || (otherToken !== "center" && positionAxisForEdge(otherToken) !== otherAxis)) {
       throw new SyntaxError(`invalid three-value background-position: ${input}`);
     }
-    const otherAxis = pair.axis === "x" ? "y" : "x";
     const other = component(otherToken, otherAxis);
     return Object.freeze({
       kind: "components",

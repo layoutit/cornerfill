@@ -183,7 +183,7 @@ async function automaticController(): Promise<CornerfillAutoControllerHandle | n
   });
 }
 
-export const cornerfill: CornerfillAutoControllerHandle | null = await automaticController();
+const cornerfill: CornerfillAutoControllerHandle | null = await automaticController();
 
 cornerfill?.ready.catch((error) => {
   console.error("Cornerfill automatic installation failed", error);

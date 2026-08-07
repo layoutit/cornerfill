@@ -105,6 +105,477 @@ await test("native qualification is isolated from top-layer interception", async
   equal(obstructed.unresolved, unobstructed.unresolved, "top-layer UI changed native requirements");
 });
 
+await test("compiled CSS drives the production runtime without source reconstruction", async () => {
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = "/bench/compiled-fixture.css";
+  const loaded = new Promise((resolve, reject) => {
+    link.addEventListener("load", resolve, { once: true });
+    link.addEventListener("error", () => reject(new Error("compiled fixture stylesheet failed")), { once: true });
+  });
+  document.head.append(link);
+  await loaded;
+  const element = document.createElement("div");
+  element.className = "cornerfill-compiled-fixture";
+  document.body.append(element);
+  const beforeResources = performance.getEntriesByType("resource").length;
+  const nativeCssSupports = CSS.supports;
+  const { installCornerfillCompiled } = await import("../dist/compiled-runtime.mjs");
+  const compiled = installCornerfillCompiled({
+    document,
+    backend,
+    staticFallback: backend === "static-data-url",
+  });
+  const report = await compiled.ready;
+  const entry = compiled.explain(element);
+  const expectedBackend = backend === "static-data-url" ? "native-corner-shape" : backend;
+  assert(report.manifests === 1, `compiled manifest count was ${report.manifests}`);
+  assert(report.candidates === 1, `compiled candidate count was ${report.candidates}`);
+  assert(report.attached === 1, `compiled attachment count was ${report.attached}`);
+  assert(entry?.status === "active", `compiled entry was not active: ${JSON.stringify(entry)}`);
+  assert(entry.backend === expectedBackend, `compiled entry selected ${entry.backend}, expected ${expectedBackend}`);
+
+  element.classList.add("cornerfill-compiled-reset");
+  let changed = await compiled.refresh();
+  assert(changed.attached === 0, "compiled all: unset retained paint ownership");
+  assert(compiled.explain(element) === null, "compiled all: unset retained a runtime entry");
+  element.classList.remove("cornerfill-compiled-reset");
+  changed = await compiled.refresh();
+  assert(changed.attached === 1, "compiled shape did not reattach after all reset removal");
+
+  element.classList.add("cornerfill-compiled-round");
+  changed = await compiled.refresh();
+  assert(changed.attached === 0, "compiled corner-shape: initial retained paint ownership");
+  element.classList.remove("cornerfill-compiled-round");
+  await compiled.refresh();
+
+  element.classList.add("cornerfill-compiled-important-shape", "cornerfill-compiled-reset");
+  changed = await compiled.refresh();
+  assert(changed.attached === 1, "normal all reset overrode an important shape");
+  element.classList.add("cornerfill-compiled-important-reset");
+  changed = await compiled.refresh();
+  assert(changed.attached === 0, "important all reset did not override an important shape");
+  element.classList.remove(
+    "cornerfill-compiled-important-shape",
+    "cornerfill-compiled-important-reset",
+    "cornerfill-compiled-reset",
+  );
+  await compiled.refresh();
+
+  element.classList.add("cornerfill-compiled-variable-reset");
+  changed = await compiled.refresh();
+  assert(changed.attached === 0, "safe all: var(...unset) retained paint ownership");
+  assert(changed.errors.length === 0, `safe all substitution failed: ${JSON.stringify(changed.errors)}`);
+  element.classList.remove("cornerfill-compiled-variable-reset");
+  await compiled.refresh();
+
+  element.classList.add("cornerfill-compiled-logical");
+  changed = await compiled.refresh();
+  assert(changed.attached === 0, "mixed physical/logical shape retained ambiguous ownership");
+  assert(changed.errors.some((message) => message.includes("physical and logical")),
+    `mixed physical/logical shape was not diagnosed: ${JSON.stringify(changed.errors)}`);
+  element.classList.remove("cornerfill-compiled-logical");
+  await compiled.refresh();
+
+  const parent = document.createElement("div");
+  parent.className = "cornerfill-compiled-parent";
+  const child = document.createElement("div");
+  child.className = "cornerfill-compiled-child";
+  parent.append(child);
+  document.body.append(parent);
+  changed = await compiled.refresh();
+  assert(compiled.explain(parent)?.status === "active", "compiled parent shape did not attach");
+  assert(compiled.explain(child)?.status === "active", "compiled inherited shape did not attach");
+  child.classList.add("cornerfill-compiled-child-reset");
+  await compiled.refresh();
+  assert(compiled.explain(child) === null, "compiled unset child falsely inherited its parent shape");
+
+  const layered = document.createElement("div");
+  layered.className = "cornerfill-compiled-layer";
+  document.body.append(layered);
+  await compiled.refresh();
+  assert(compiled.explain(layered) === null, "compiled override-layer initial value retained ownership");
+  layered.classList.add("cornerfill-compiled-revert");
+  await compiled.refresh();
+  assert(compiled.explain(layered)?.status === "active", "compiled revert-layer did not reveal base shape");
+
+  const supported = document.createElement("div");
+  supported.className = "cornerfill-compiled-supports";
+  document.body.append(supported);
+  await compiled.refresh();
+  const supportedStyle = getComputedStyle(supported);
+  assert(compiled.explain(supported)?.status === "active", "compiled positive support branch did not attach");
+  assert(supportedStyle.color === "rgb(1, 2, 3)", "compiled support branch lost an ordinary declaration");
+  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-branch").trim() === "positive",
+    "compiled support condition selected its negative branch");
+  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-mixed").trim() === "active",
+    "compiled mixed support condition did not preserve the unrelated test");
+  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-nested").trim() === "active",
+    "compiled nested Boolean support condition selected the wrong branch");
+  const nativeMathSupport = CSS.supports("corner-shape", "superellipse(pow(2, 2))");
+  assert(
+    supportedStyle.getPropertyValue("--cornerfill-compiled-native-test").trim()
+      === (nativeMathSupport ? "active" : "inactive"),
+    "compiled unsupported shape test did not preserve native behavior",
+  );
+  assert(CSS.supports === nativeCssSupports, "compiled mode patched CSS.supports()");
+
+  const dynamic = document.createElement("div");
+  dynamic.className = "cornerfill-compiled-dynamic";
+  document.body.append(dynamic);
+  await new Promise(requestAnimationFrame);
+  assert(compiled.explain(dynamic) === null, "dormant compiled class rule created paint ownership");
+  const beforeDynamic = compiled.explain().counters;
+  dynamic.classList.add("active");
+  await waitFor(() => compiled.explain(dynamic)?.status === "active", "compiled class attachment");
+  const afterDynamic = compiled.explain().counters;
+  assert(afterDynamic.scannedElements - beforeDynamic.scannedElements === 1,
+    "compiled class invalidation scanned outside the changed element");
+  dynamic.classList.remove("active");
+  await waitFor(() => compiled.explain(dynamic) === null, "compiled class detachment");
+  dynamic.setAttribute("data-compiled-shape", "on");
+  await waitFor(() => compiled.explain(dynamic)?.status === "active", "compiled attribute attachment");
+  dynamic.removeAttribute("data-compiled-shape");
+  await waitFor(() => compiled.explain(dynamic) === null, "compiled attribute detachment");
+  dynamic.id = "cornerfill-compiled-dynamic-id";
+  await waitFor(() => compiled.explain(dynamic)?.status === "active", "compiled id attachment");
+  dynamic.removeAttribute("id");
+  await waitFor(() => compiled.explain(dynamic) === null, "compiled id detachment");
+
+  const hoverState = document.createElement("div");
+  hoverState.className = "cornerfill-compiled-hover";
+  document.body.append(hoverState);
+  const hoverDriver = { stage: "compiled-hover-ready" };
+  globalThis.__CORNERFILL_POINTER_DRIVER__ = hoverDriver;
+  await waitFor(() => hoverDriver.stage === "compiled-hover-driven", "compiled hover driver");
+  await waitFor(() => compiled.explain(hoverState)?.status === "active", "compiled hover attachment");
+  hoverDriver.stage = "compiled-hover-out-ready";
+  await waitFor(() => hoverDriver.stage === "compiled-hover-out-driven", "compiled hover-out driver");
+  await waitFor(() => compiled.explain(hoverState) === null, "compiled hover detachment");
+
+  const added = document.createElement("div");
+  added.className = "cornerfill-compiled-dynamic active";
+  const addedTree = document.createElement("section");
+  addedTree.append(added);
+  document.body.append(addedTree);
+  await waitFor(() => compiled.explain(added)?.status === "active", "compiled added-subtree attachment");
+  addedTree.remove();
+  await waitFor(() => compiled.explain(added) === null, "compiled removed-subtree detachment");
+
+  const media = document.createElement("div");
+  media.className = "cornerfill-compiled-media";
+  document.body.append(media);
+  await new Promise(requestAnimationFrame);
+  assert(compiled.explain(media) === null, "dormant compiled media rule created paint ownership");
+  const mediaScans = compiled.explain().counters.scannedElements;
+  const mediaDriver = { stage: "compiled-media-dark-ready" };
+  globalThis.__CORNERFILL_POINTER_DRIVER__ = mediaDriver;
+  await waitFor(() => mediaDriver.stage === "compiled-media-dark-driven", "compiled dark media driver");
+  await waitFor(() => compiled.explain(media)?.status === "active", "compiled media attachment");
+  mediaDriver.stage = "compiled-media-light-ready";
+  await waitFor(() => mediaDriver.stage === "compiled-media-light-driven", "compiled light media driver");
+  await waitFor(() => compiled.explain(media) === null, "compiled media detachment");
+  assert(compiled.explain().counters.scannedElements === mediaScans,
+    "compiled media invalidation rescanned the DOM");
+  assert(compiled.explain().counters.sourceReads === 0
+    && compiled.explain().counters.sourceFetches === 0
+    && compiled.explain().counters.sourceCompiles === 0,
+  "compiled invalidation performed source work");
+
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const idleBefore = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element).counters,
+    runtime: compiled.explain().runtime.counters,
+  };
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const idleAfter = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element).counters,
+    runtime: compiled.explain().runtime.counters,
+  };
+  equal(idleAfter, idleBefore, "compiled idle frames performed runtime work");
+
+  const transformBefore = {
+    computedChecks: compiled.explain().counters.computedChecks,
+    handleRefreshes: compiled.explain().counters.handleRefreshes,
+    entry: compiled.explain(element).counters,
+    runtimePaints: compiled.explain().runtime.counters.paints,
+    runtimeStyleChecks: compiled.explain().runtime.counters.styleChecks,
+  };
+  element.style.transform = "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,7,9,0,1)";
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const transformAfter = {
+    computedChecks: compiled.explain().counters.computedChecks,
+    handleRefreshes: compiled.explain().counters.handleRefreshes,
+    entry: compiled.explain(element).counters,
+    runtimePaints: compiled.explain().runtime.counters.paints,
+    runtimeStyleChecks: compiled.explain().runtime.counters.styleChecks,
+  };
+  equal(transformAfter, transformBefore,
+    "compiled transform-only mutation performed style or paint work");
+
+  const carrierBefore = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element),
+  };
+  element.classList.add("cornerfill-compiled-scoop");
+  if (carrierBefore.entry.backend === "native-corner-shape") {
+    await waitFor(() => (
+      compiled.explain().counters.handleRefreshes === carrierBefore.compiled.handleRefreshes + 1
+    ), "single compiled carrier refresh");
+  } else {
+    await waitFor(() => compiled.explain(element)?.geometry?.shapeParameters?.[0] === -1,
+      "single compiled carrier repaint");
+  }
+  const carrierAfter = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element),
+  };
+  assert(carrierAfter.compiled.computedChecks === carrierBefore.compiled.computedChecks + 1,
+    "one carrier change did not perform exactly one computed carrier check");
+  assert(carrierAfter.compiled.handleRefreshes === carrierBefore.compiled.handleRefreshes + 1,
+    "one carrier change did not perform exactly one handle refresh");
+  if (carrierAfter.entry.backend !== "native-corner-shape") {
+    assert(carrierAfter.entry.counters.paints === carrierBefore.entry.counters.paints + 1,
+      `one carrier change did not repaint exactly once: ${carrierBefore.entry.counters.paints} -> ${carrierAfter.entry.counters.paints}`);
+  }
+
+  const resizeBefore = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element),
+  };
+  element.style.width = "40px";
+  if (resizeBefore.entry.backend === "native-corner-shape") {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  } else {
+    await waitFor(() => compiled.explain(element)?.geometry?.width === 40,
+      "single compiled resize refresh");
+  }
+  const resizeAfter = {
+    compiled: compiled.explain().counters,
+    entry: compiled.explain(element),
+  };
+  assert(resizeAfter.compiled.computedChecks === resizeBefore.compiled.computedChecks,
+    "resize unnecessarily rechecked compiled carriers");
+  assert(resizeAfter.compiled.handleRefreshes === resizeBefore.compiled.handleRefreshes,
+    "resize unnecessarily invoked compiled attachment refresh");
+  if (resizeAfter.entry.backend !== "native-corner-shape") {
+    assert(resizeAfter.entry.counters.styleChecks === resizeBefore.entry.counters.styleChecks + 1,
+      "one resize did not perform exactly one runtime style check");
+    assert(resizeAfter.entry.counters.paints === resizeBefore.entry.counters.paints + 1,
+      "one resize did not repaint exactly once");
+  }
+
+  const [shadowCss, shadowResetCss] = await Promise.all([
+    fetch("/bench/compiled-shadow-fixture.css").then((response) => response.text()),
+    fetch("/bench/compiled-shadow-reset.css").then((response) => response.text()),
+  ]);
+  const theme = document.createElement("section");
+  const shadowHost = host(theme);
+  const shadow = shadowHost.attachShadow({ mode: "open" });
+  const shadowStyle = document.createElement("style");
+  shadowStyle.textContent = shadowCss;
+  const shadowElement = document.createElement("div");
+  shadowElement.className = "cornerfill-compiled-shadow";
+  const shadowHostChild = document.createElement("div");
+  shadowHostChild.className = "cornerfill-compiled-shadow-host-child";
+  const shadowContext = document.createElement("div");
+  shadowContext.className = "cornerfill-compiled-shadow-context";
+  shadow.append(shadowStyle, shadowElement, shadowHostChild, shadowContext);
+  document.body.append(theme);
+
+  const unregisteredHost = host();
+  const unregistered = unregisteredHost.attachShadow({ mode: "open" });
+  const unregisteredStyle = document.createElement("style");
+  unregisteredStyle.textContent = shadowCss;
+  const unregisteredElement = document.createElement("div");
+  unregisteredElement.className = "cornerfill-compiled-shadow";
+  unregistered.append(unregisteredStyle, unregisteredElement);
+  await new Promise(requestAnimationFrame);
+  assert(!shadowElement.hasAttribute("data-cornerfill-owned"),
+    "compiled mode entered an open shadow root before registration");
+  assert(!unregisteredElement.hasAttribute("data-cornerfill-owned"),
+    "compiled mode entered an unregistered shadow root");
+
+  let shadowScope = compiled.registerRoot(shadow);
+  let shadowReport = await shadowScope.ready;
+  assert(shadowReport.root === "shadow", "registered compiled scope did not report a shadow root");
+  assert(shadowReport.manifests === 1,
+    `registered shadow root inherited a foreign manifest: ${shadowReport.manifests}`);
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow element did not attach");
+  assert(shadowScope.explain(shadowHost)?.status === "active", "compiled :host did not attach");
+  assert(shadowScope.explain(shadowHostChild) === null, "inactive compiled :host() attached early");
+  assert(shadowScope.explain(shadowContext) === null,
+    "inactive compiled :host-context() attached early");
+  assert(!unregisteredElement.hasAttribute("data-cornerfill-owned"),
+    "registered-root discovery leaked into another shadow root");
+
+  shadowHost.classList.add("cornerfill-compiled-shadow-active");
+  await waitFor(() => shadowScope.explain(shadowHostChild)?.status === "active",
+    "compiled :host() attachment");
+  theme.classList.add("cornerfill-compiled-shadow-theme");
+  await waitFor(() => shadowScope.explain(shadowContext)?.status === "active",
+    "compiled :host-context() attachment");
+  theme.classList.remove("cornerfill-compiled-shadow-theme");
+  await waitFor(() => shadowScope.explain(shadowContext) === null,
+    "compiled :host-context() detachment");
+
+  shadowStyle.remove();
+  await waitFor(() => shadowScope.explain(shadowElement) === null
+    && shadowScope.explain(shadowHost) === null
+    && shadowScope.explain(shadowHostChild) === null,
+  "compiled shadow style removal");
+  shadow.append(shadowStyle);
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow style insertion");
+  shadowStyle.remove();
+  await waitFor(() => shadowScope.explain(shadowElement) === null,
+    "compiled shadow style teardown before link test");
+
+  const shadowLink = document.createElement("link");
+  shadowLink.rel = "stylesheet";
+  shadowLink.media = "all";
+  shadowLink.href = "/bench/compiled-shadow-fixture.css";
+  const shadowLinkLoaded = new Promise((resolve, reject) => {
+    shadowLink.addEventListener("load", resolve, { once: true });
+    shadowLink.addEventListener("error", () => reject(new Error("compiled shadow link failed")),
+      { once: true });
+  });
+  shadow.append(shadowLink);
+  await shadowLinkLoaded;
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow link insertion");
+  shadowLink.media = "not all";
+  await waitFor(() => shadowScope.explain(shadowElement) === null,
+    "compiled shadow link media deactivation");
+  shadowLink.media = "all";
+  await waitFor(() => shadowScope.explain(shadowElement)?.status === "active",
+    "compiled shadow link media activation");
+  shadowLink.remove();
+
+  const adoptedBase = new CSSStyleSheet();
+  const adoptedReset = new CSSStyleSheet();
+  adoptedBase.replaceSync(shadowCss);
+  adoptedReset.replaceSync(shadowResetCss);
+  shadow.adoptedStyleSheets = [adoptedBase];
+  shadowReport = await shadowScope.refresh();
+  assert(shadowReport.manifests === 1, "compiled adopted sheet manifest was not discovered");
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "compiled adopted sheet did not attach");
+  shadow.adoptedStyleSheets = [adoptedBase, adoptedReset];
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement) === null,
+    "compiled adopted sheet order did not apply its reset");
+  shadow.adoptedStyleSheets = [adoptedBase];
+  shadowReport = await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    `compiled adopted sheet list refresh did not restore its shape: ${JSON.stringify(shadowReport.errors)}`);
+  adoptedBase.replaceSync(".cornerfill-compiled-shadow { corner-shape: bevel }");
+  await new Promise(requestAnimationFrame);
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "unobservable CSSOM replacement refreshed without an explicit request");
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement) === null,
+    "explicit refresh retained an unprocessed CSSOM replacement");
+  adoptedBase.replaceSync(shadowCss);
+  await shadowScope.refresh();
+  assert(shadowScope.explain(shadowElement)?.status === "active",
+    "explicit refresh did not restore replaced compiled CSS");
+
+  shadowScope.destroy();
+  assert(!shadowElement.hasAttribute("data-cornerfill-owned"),
+    "compiled shadow scope destroy retained paint ownership");
+  shadowScope = compiled.registerRoot(shadow);
+  await shadowScope.ready;
+  assert(compiled.unregisterRoot(shadow), "compiled shadow root unregister was not acknowledged");
+  assert(!shadowElement.hasAttribute("data-cornerfill-owned"),
+    "compiled shadow root unregister retained paint ownership");
+  shadowScope = compiled.registerRoot(shadow);
+  await shadowScope.ready;
+
+  const closedHost = host();
+  const closedRoot = closedHost.attachShadow({ mode: "closed" });
+  let closedRootError;
+  try { compiled.registerRoot(closedRoot); } catch (error) { closedRootError = error; }
+  assert(/closed ShadowRoot/u.test(closedRootError?.message ?? ""),
+    "compiled closed-root registration did not fail explicitly");
+
+  const resources = performance.getEntriesByType("resource").slice(beforeResources)
+    .map(({ name }) => new URL(name).pathname);
+  assert(!resources.some((path) => /\/(?:auto-runtime|postcss)\.mjs$/u.test(path)),
+    `compiled browser route loaded Node or automatic code: ${JSON.stringify(resources)}`);
+  compiled.destroy();
+  assert(compiled.explain(element) === null, "compiled destroy retained a runtime entry");
+  assert(!element.hasAttribute("data-cornerfill-owned"), "compiled destroy retained paint ownership");
+  assert(!parent.hasAttribute("data-cornerfill-owned"), "compiled destroy retained inherited ownership");
+  assert(!layered.hasAttribute("data-cornerfill-owned"), "compiled destroy retained layered ownership");
+  assert(!supported.hasAttribute("data-cornerfill-owned"), "compiled destroy retained conditional ownership");
+  assert(!dynamic.hasAttribute("data-cornerfill-owned"), "compiled destroy retained dynamic ownership");
+  assert(!hoverState.hasAttribute("data-cornerfill-owned"), "compiled destroy retained state ownership");
+  assert(!media.hasAttribute("data-cornerfill-owned"), "compiled destroy retained media ownership");
+  assert(!shadowElement.hasAttribute("data-cornerfill-owned"),
+    "compiled controller destroy retained registered-root ownership");
+  assert(!shadowHost.hasAttribute("data-cornerfill-owned"),
+    "compiled controller destroy retained :host ownership");
+  assert(!unregisteredElement.hasAttribute("data-cornerfill-owned"),
+    "compiled controller destroy touched an unregistered root");
+  const destroyedCompiled = compiled.explain();
+  assert(destroyedCompiled.attached === 0 && destroyedCompiled.candidates === 0,
+    "compiled controller destroy retained candidates or handles");
+  assert(destroyedCompiled.runtime.entries === 0
+    && destroyedCompiled.runtime.surfaces === 0
+    && destroyedCompiled.runtime.surfacePixels === 0,
+  "compiled controller destroy retained runtime entries or surfaces");
+  assert(destroyedCompiled.runtime.imageCache.entries === 0
+    && destroyedCompiled.runtime.imageCache.references === 0,
+  "compiled controller destroy retained decoded images");
+  assert(destroyedCompiled.runtime.surfaceResources.firefox.registrations === 0
+    && destroyedCompiled.runtime.surfaceResources.webkit.activeCanvases === 0
+    && destroyedCompiled.runtime.surfaceResources.webkit.activePixels === 0,
+  "compiled controller destroy retained live backend resources");
+
+  const traversalLimited = installCornerfillCompiled({
+    document,
+    backend,
+    staticFallback: backend === "static-data-url",
+    maxScannedElements: 1,
+  });
+  await traversalLimited.ready.then(
+    () => { throw new Error("compiled traversal budget did not fail closed"); },
+    () => undefined,
+  );
+  assert(traversalLimited.explain().errors.some((message) => message.includes("maximum scanned")),
+    "compiled traversal budget was not diagnosed");
+  traversalLimited.destroy();
+
+  const candidateLimited = installCornerfillCompiled({
+    document,
+    backend,
+    staticFallback: backend === "static-data-url",
+    maxCandidateElements: 1,
+  });
+  await candidateLimited.ready.then(
+    () => { throw new Error("compiled candidate budget did not fail closed"); },
+    () => undefined,
+  );
+  assert(candidateLimited.explain().errors.some((message) => message.includes("maximum candidate")),
+    "compiled candidate budget was not diagnosed");
+  candidateLimited.destroy();
+  element.remove();
+  parent.remove();
+  layered.remove();
+  supported.remove();
+  dynamic.remove();
+  hoverState.remove();
+  media.remove();
+  theme.remove();
+  unregisteredHost.remove();
+  closedHost.remove();
+  link.remove();
+});
+
 await test("automatic install consumes standard corner-shape CSS and tears down", async () => {
   const link = document.createElement("link");
   link.rel = "stylesheet";
@@ -168,7 +639,7 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   escaped.className = "cornerfill:escaped";
   document.body.append(toggle);
   document.body.append(element, dynamic, inline, replacedInline, focus, paintFocus, fontFocus, media, zero, partial);
-  const { cornerfill: auto } = await import("../dist/auto.mjs");
+  const { default: auto } = await import("../dist/auto.mjs");
   await auto.ready;
   rootImportResources = Object.freeze(performance.getEntriesByType("resource")
     .map(({ name }) => new URL(name).pathname));
@@ -470,6 +941,28 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
 
 ({ installCornerfill } = await import("../dist/runtime.mjs"));
 ({ installCornerfillAuto } = await import("../dist/auto-runtime.mjs"));
+
+await test("linked-source base URLs accept URL objects from another realm", async () => {
+  const { replacementStylesheetBaseUrl } = await import("../dist/auto-contract.mjs");
+  const frame = document.createElement("iframe");
+  frame.srcdoc = "<!doctype html><title>cross-realm URL</title>";
+  const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  document.body.append(frame);
+  try {
+    await loaded;
+    const frameDocument = frame.contentDocument;
+    const link = frameDocument.createElement("link");
+    link.rel = "stylesheet";
+    const baseUrl = new URL("/redirected/main.css", location.href);
+    assert(
+      replacementStylesheetBaseUrl(link, frameDocument, { baseUrl })
+        === new URL("/redirected/main.css", location.href).href,
+      "cross-realm URL lost its serialized stylesheet base",
+    );
+  } finally {
+    frame.remove();
+  }
+});
 
 await test("non-stylesheet link churn does not invalidate fallback paint", async () => {
   const style = document.createElement("style");
@@ -2080,6 +2573,75 @@ await test("failed media branches recover and conditional layers invalidate pain
   }
 });
 
+await test("conditional property registration refreshes carrier values across scopes", async () => {
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "width:200px;height:120px;border:0";
+  frame.srcdoc = "<!doctype html><head></head><body></body>";
+  const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  document.body.append(frame);
+  await loaded;
+  const frameDocument = frame.contentDocument;
+  const frameWindow = frame.contentWindow;
+  const query = "(min-width: 300px)";
+  const style = frameDocument.createElement("style");
+  style.textContent = `
+    @media ${query} {
+      @property --cornerfill-conditional-shape {
+        syntax: "*";
+        inherits: false;
+        initial-value: scoop;
+      }
+    }
+    :root { --cornerfill-conditional-shape: bevel }
+    .cornerfill-property-document {
+      corner-shape: var(--cornerfill-conditional-shape);
+      border-radius: 5px;
+      background: red;
+    }
+  `;
+  frameDocument.head.append(style);
+  const documentElement = frameDocument.createElement("div");
+  documentElement.className = "cornerfill-property-document";
+  documentElement.style.cssText = "width:12px;height:10px";
+  const shell = frameDocument.createElement("div");
+  const root = shell.attachShadow({ mode: "open" });
+  const shadowStyle = frameDocument.createElement("style");
+  shadowStyle.textContent = `
+    .cornerfill-property-shadow {
+      corner-shape: var(--cornerfill-conditional-shape);
+      border-radius: 5px;
+      background: blue;
+    }
+  `;
+  const shadowElement = frameDocument.createElement("div");
+  shadowElement.className = "cornerfill-property-shadow";
+  shadowElement.style.cssText = "width:12px;height:10px";
+  root.append(shadowStyle, shadowElement);
+  frameDocument.body.append(documentElement, shell);
+  const auto = installCornerfillAuto(options({ document: frameDocument, autoObserve: true }));
+  const scope = auto.registerRoot(root);
+  try {
+    await Promise.all([auto.ready, scope.ready]);
+    equal(auto.explain(documentElement)?.geometry.shapeParameters, [0, 0, 0, 0], "inactive registration changed the document carrier");
+    equal(scope.explain(shadowElement)?.geometry.shapeParameters, [0, 0, 0, 0], "inactive registration changed the shadow carrier");
+    assert(
+      auto.explain().automatic.observation.mediaQueries.some((value) => value.replace(/\s+/gu, "") === "(min-width:300px)"),
+      "conditional property registration did not install its media dependency",
+    );
+    frame.style.width = "400px";
+    await waitFor(() => frameWindow.matchMedia(query).matches, "property registration media activation");
+    await waitFor(
+      () => auto.explain(documentElement)?.geometry.shapeParameters[0] === -1
+        && scope.explain(shadowElement)?.geometry.shapeParameters[0] === -1,
+      "conditional property registration refresh",
+    );
+  } finally {
+    scope.destroy();
+    auto.destroy();
+    frame.remove();
+  }
+});
+
 await test("already-loaded empty link and inline imports retain local rules", async () => {
   const importedUrl = `/bench/imports/delayed-runtime.css?css=${encodeURIComponent("/* empty */")}`;
   const source = `@import ${JSON.stringify(importedUrl)};.cornerfill-empty-import{corner-shape:bevel;border-radius:5px;background:red}`;
@@ -2202,6 +2764,7 @@ await test("automatic source budgets fail closed and deep conditional sources st
     "maxImportCount",
     "maxCandidateElements",
     "maxCompiledSelectors",
+    "maxScannedElements",
   ]) {
     let error = null;
     try {
@@ -2273,6 +2836,11 @@ await test("automatic source budgets fail closed and deep conditional sources st
     "body,.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}",
     { maxCandidateElements: 1 },
     "maximum candidate element count of 1",
+  );
+  await run(
+    ".cornerfill-never-matches{corner-shape:bevel;border-radius:5px}",
+    { maxScannedElements: 1 },
+    "maximum scanned element count of 1",
   );
   await run(
     '@import "data:text/css,.one%7Bcolor:red%7D";@import "data:text/css,.two%7Bcolor:blue%7D";.cornerfill-source-budget{corner-shape:bevel;border-radius:5px}',
@@ -3881,6 +4449,12 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     @media (min-width: 1px) { .cornerfill-media-duplicate { corner-shape: bevel } }
     @supports (corner-shape: bevel) {
       .cornerfill-supports-positive { corner-shape: bevel }
+      @media not all {
+        @layer cornerfill-dormant-layer {
+          .cornerfill-dormant-layer-never { corner-shape: notch }
+        }
+      }
+      .cornerfill-dormant-layer { corner-shape: bevel }
     }
     @supports not (corner-shape: bevel) { .cornerfill-supports-negative { corner-shape: bevel } }
     @supports not (corner-shape: unknown-shape) { .cornerfill-supports-invalid-negative { corner-shape: bevel } }
@@ -3968,6 +4542,8 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
   mediaDuplicate.className = "cornerfill-media-duplicate";
   const supportsPositive = host();
   supportsPositive.className = "cornerfill-supports-positive";
+  const dormantLayer = host();
+  dormantLayer.className = "cornerfill-dormant-layer";
   const supportsCustom = host();
   supportsCustom.className = "cornerfill-supports-custom";
   const supportsNegativeCustom = host();
@@ -4118,6 +4694,7 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
       `duplicate selector suppressed its media listener: ${JSON.stringify(auto.explain().automatic.observation.mediaQueries)}`,
     );
     assert(auto.explain(supportsPositive)?.status === "active", "positive corner-shape support condition stayed false");
+    assert(auto.explain(dormantLayer)?.status === "active", "inactive nested layer blocked a safe support branch");
     assert(auto.explain(supportsNegative) === null, "negative corner-shape support condition stayed true");
     assert(auto.explain(supportsInvalidNegative)?.status === "active", "invalid negative support condition stayed false");
     assert(
@@ -4228,7 +4805,7 @@ await test("automatic cascade contexts preserve supported CSS and refuse unsafe 
     alternate.remove();
     for (const element of [
       layerNormal, layerImportant, varParent, varFallback, varConflict, logical, media, mediaDuplicate,
-      supportsPositive, supportsCustom, supportsNegativeCustom, supportsNegative, supportsInvalidNegative,
+      supportsPositive, dormantLayer, supportsCustom, supportsNegativeCustom, supportsNegative, supportsInvalidNegative,
       supportsRevertRule,
       conditionalCrossSource, mixed,
       anonymous, nesting, nested, nestedMedia, complex, split, inert, alternateElement,

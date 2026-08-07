@@ -2,7 +2,7 @@ import { getOracleCase, ORACLE_CASE_SCHEMA } from "./cases.mjs";
 import {
   attachProductionCandidate,
   CANDIDATE_PAINTER_SCHEMA,
-  createLifecycleProof,
+  createCompiledLifecycleProof,
   createRasterUpdateProof,
   nativeBackgroundCss,
 } from "./painter.mjs";
@@ -75,12 +75,12 @@ async function render() {
     applyStyles(face, nativeBackgroundCss(oracleCase.paint));
     applyBorder(face, oracleCase.border);
     const production = await attachProductionCandidate(face, oracleCase);
-    backend = production.handle.backend;
+    backend = production.backend;
     candidate = production.metadata;
     globalThis.__cornerfillOracleController = production.controller;
     globalThis.__cornerfillOracleHandle = production.handle;
     if (caseId === "bevel") {
-      globalThis.__cornerfillOracleRunLifecycle = createLifecycleProof({
+      globalThis.__cornerfillOracleRunLifecycle = createCompiledLifecycleProof({
         ...production,
         element: face,
         oracleCase,

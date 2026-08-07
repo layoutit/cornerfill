@@ -55,6 +55,10 @@ test("background position resolves edge offsets and keyword order", () => {
   });
   assert.deepEqual(resolved.backgroundPosition, [54, 42.4]);
   assert.deepEqual(parseBackgroundPosition("center left"), parseBackgroundPosition("left center"));
+  assert.throws(() => parseBackgroundPosition("left 10px 20px"), /invalid three-value/u);
+  assert.throws(() => parseBackgroundPosition("10px top 20px"), /invalid three-value/u);
+  assert.doesNotThrow(() => parseBackgroundPosition("left 10px top"));
+  assert.doesNotThrow(() => parseBackgroundPosition("left top 20px"));
 
   const edgePosition = (backgroundPosition, backgroundSize) => resolvePaintForBox(normalizePaintDescriptor({
     kind: "image",
