@@ -119,6 +119,7 @@ test("the PostCSS plugin transports all and CSS-wide resets through the browser 
   .card.revert { corner-shape: revert-layer; }
 }
 .inherit { corner-top-left-shape: inherit; }
+.all-inherit { all: inherit; }
 .pending { all: var(--cornerfill-reset); }
 .invalid { all: bevel; }
 `;
@@ -155,19 +156,27 @@ test("the PostCSS plugin transports all and CSS-wide resets through the browser 
   const invalid = root.nodes.find((node) => node.type === "rule" && node.selector === ".invalid");
   assert.equal(invalid.nodes.length, 1);
   assert.equal(invalid.first.prop, "all");
+  const manifestDeclarations = [];
+  root.walkDecls((declaration) => {
+    if (declaration.prop.startsWith(COMPILED_MANIFEST_PROPERTY_PREFIX)) {
+      manifestDeclarations.push(declaration);
+    }
+  });
+  const manifest = parseCompiledManifestCssValue(manifestDeclarations[0].value);
+  assert(manifest.candidateSelectors.includes(".all-inherit"));
+  assert(manifest.candidateSelectors.includes(".pending"));
+  assert(!manifest.candidateSelectors.includes(".card.reset"));
 });
 
-test("the PostCSS plugin rewrites only implemented corner-shape support tests", async () => {
-  const input = String.raw`
+test("the PostCSS plugin rejects feature queries that would overstate runtime health", async () => {
+  await assert.rejects(
+    postcss([cornerfillPostcss()]).process(String.raw`
 @supports (c\6frner-shape: b\65vel) {
   .positive { color: green; corner-shape: bevel; }
-}
-@supports not ((corner-shape: scoop) and (display: grid)) {
-  .negative { color: red; }
-}
-@supports ((corner-shape: notch) or (display: __invalid__)) and (color: red) {
-  .nested { color: blue; }
-}
+}`, { from: "supports.css" }),
+    /feature query cannot represent runtime health/u,
+  );
+  const input = `
 @supports (corner-shape: superellipse(pow(2, 2))) {
   .native-only { color: purple; }
 }
@@ -180,14 +189,8 @@ test("the PostCSS plugin rewrites only implemented corner-shape support tests", 
   const conditions = root.nodes
     .filter((node) => node.type === "atrule" && node.name === "supports")
     .map(({ params }) => params);
-  assert.match(conditions[0], /--cornerfill-supports-corner-shape:\s*b\\65vel/u);
-  assert.match(conditions[1], /^not \(\(--cornerfill-supports-corner-shape:\s*scoop\) and \(display: grid\)\)$/u);
-  assert.match(conditions[2], /\(--cornerfill-supports-corner-shape:\s*notch\) or \(display: __invalid__\)/u);
-  assert.equal(conditions[3], "(corner-shape: superellipse(pow(2, 2)))");
-  assert.equal(conditions[4], 'selector([data-token="corner-shape: bevel"])');
-  const positive = root.nodes[0].nodes.find((node) => node.type === "rule");
-  assert.equal(positive.nodes[0].toString(), "color: green");
-  assert.equal(root.nodes.filter((node) => node.type === "atrule" && node.name === "supports").length, 5);
+  assert.equal(conditions[0], "(corner-shape: superellipse(pow(2, 2)))");
+  assert.equal(conditions[1], 'selector([data-token="corner-shape: bevel"])');
   const second = await postcss([cornerfillPostcss()]).process(result.css, { from: "supports.css" });
   assert.equal(second.css, result.css);
 });
@@ -286,6 +289,10 @@ test("paint-only and cross-file variable chunks emit observation metadata", asyn
     ".theme { all: initial; }",
     { from: "reset.css" },
   );
+  const alias = await postcss([cornerfillPostcss()]).process(
+    "@media (prefers-color-scheme: dark) { .face { -webkit-border-radius: 12px; } }",
+    { from: "alias.css" },
+  );
   const read = (css) => {
     const manifests = [];
     postcss.parse(css).walkDecls((declaration) => {
@@ -302,6 +309,7 @@ test("paint-only and cross-file variable chunks emit observation metadata", asyn
   assert.deepEqual(themeManifest.customProperties[0].mediaQueries, ["(prefers-color-scheme: dark)"]);
   assert(themeManifest.customProperties[0].observation.events.includes("pointerover"));
   assert.equal(read(reset.css).observation.invalidation, "subtree");
+  assert.deepEqual(read(alias.css).mediaQueries, ["(prefers-color-scheme: dark)"]);
 });
 
 test("a second pass rebuilds valid manifests and compiles newly concatenated CSS", async () => {

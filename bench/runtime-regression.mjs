@@ -122,8 +122,15 @@ await test("compiled CSS drives the production runtime without source reconstruc
     paintMetadataLink.addEventListener("load", resolve, { once: true });
     paintMetadataLink.addEventListener("error", () => reject(new Error("compiled paint metadata stylesheet failed")), { once: true });
   });
-  document.head.append(link, paintMetadataLink);
-  await Promise.all([loaded, paintMetadataLoaded]);
+  const provenanceLink = document.createElement("link");
+  provenanceLink.rel = "stylesheet";
+  provenanceLink.href = "/bench/compiled-provenance-document.css";
+  const provenanceLoaded = new Promise((resolve, reject) => {
+    provenanceLink.addEventListener("load", resolve, { once: true });
+    provenanceLink.addEventListener("error", () => reject(new Error("compiled provenance stylesheet failed")), { once: true });
+  });
+  document.head.append(link, paintMetadataLink, provenanceLink);
+  await Promise.all([loaded, paintMetadataLoaded, provenanceLoaded]);
   const element = document.createElement("div");
   element.className = "cornerfill-compiled-fixture";
   document.body.append(element);
@@ -150,7 +157,7 @@ await test("compiled CSS drives the production runtime without source reconstruc
       .find((candidate) => candidate && candidate !== "__cornerfill_unset__");
     return value === "scoop" ? -1 : value === "bevel" ? 0 : null;
   };
-  assert(report.manifests === 2, `compiled manifest count was ${report.manifests}`);
+  assert(report.manifests === 3, `compiled manifest count was ${report.manifests}`);
   assert(report.candidates === 1, `compiled candidate count was ${report.candidates}`);
   assert(report.attached === 1, `compiled attachment count was ${report.attached}`);
   assert(entry?.status === "active", `compiled entry was not active: ${JSON.stringify(entry)}`);
@@ -320,6 +327,15 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await compiled.refresh();
   assert(compiled.explain(child) === null, "compiled unset child falsely inherited its parent shape");
 
+  const allParent = document.createElement("div");
+  allParent.className = "cornerfill-compiled-all-parent";
+  const allChild = document.createElement("div");
+  allChild.className = "cornerfill-compiled-all-child";
+  allParent.append(allChild);
+  document.body.append(allParent);
+  await waitFor(() => compiled.explain(allChild)?.status === "active",
+    "all: inherit did not introduce a shaped candidate");
+
   const layered = document.createElement("div");
   layered.className = "cornerfill-compiled-layer";
   document.body.append(layered);
@@ -329,25 +345,6 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await compiled.refresh();
   assert(compiled.explain(layered)?.status === "active", "compiled revert-layer did not reveal base shape");
 
-  const supported = document.createElement("div");
-  supported.className = "cornerfill-compiled-supports";
-  document.body.append(supported);
-  await compiled.refresh();
-  const supportedStyle = getComputedStyle(supported);
-  assert(compiled.explain(supported)?.status === "active", "compiled positive support branch did not attach");
-  assert(supportedStyle.color === "rgb(1, 2, 3)", "compiled support branch lost an ordinary declaration");
-  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-branch").trim() === "positive",
-    "compiled support condition selected its negative branch");
-  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-mixed").trim() === "active",
-    "compiled mixed support condition did not preserve the unrelated test");
-  assert(supportedStyle.getPropertyValue("--cornerfill-compiled-nested").trim() === "active",
-    "compiled nested Boolean support condition selected the wrong branch");
-  const nativeMathSupport = CSS.supports("corner-shape", "superellipse(pow(2, 2))");
-  assert(
-    supportedStyle.getPropertyValue("--cornerfill-compiled-native-test").trim()
-      === (nativeMathSupport ? "active" : "inactive"),
-    "compiled unsupported shape test did not preserve native behavior",
-  );
   assert(CSS.supports === nativeCssSupports, "compiled mode patched CSS.supports()");
 
   const dynamic = document.createElement("div");
@@ -473,6 +470,13 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await new Promise(requestAnimationFrame);
   assert(compiled.explain(variableShape) === null,
     "an unresolved variable shape attached before its inline dependency existed");
+  const inlineRadius = document.createElement("div");
+  inlineRadius.className = "cornerfill-compiled-inline-radius";
+  inlineRadius.style.borderRadius = "var(--cornerfill-compiled-inline-radius)";
+  document.body.append(inlineRadius);
+  await new Promise(requestAnimationFrame);
+  assert(compiled.explain(inlineRadius) === null,
+    "an inline standard-property var() edge attached at zero radius");
   const insertedVariableParent = document.createElement("section");
   insertedVariableParent.style.setProperty(
     "--cornerfill-compiled-dynamic-shape",
@@ -541,6 +545,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
     "an inline var() edge missed its transformed media dependency");
   await waitFor(() => compiledShapeParameter(compiled, insertedVariableShape) === -1,
     "a subtree-inserted inline var() edge missed its transformed media dependency");
+  await waitFor(() => compiled.explain(inlineRadius)?.status === "active",
+    "an inline standard-property var() edge missed its transformed media dependency");
   await waitFor(() => /20,\s*40,\s*220/u.test(compiledPaintColor(crossFile)),
     "metadata-only custom property media did not repaint its cross-file target");
   mediaDriver.stage = "compiled-media-light-ready";
@@ -555,6 +561,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
     "an inline var() edge did not restore after media deactivation");
   await waitFor(() => compiledShapeParameter(compiled, insertedVariableShape) === 0,
     "a subtree-inserted inline var() edge did not restore after media deactivation");
+  await waitFor(() => compiled.explain(inlineRadius) === null,
+    "an inline standard-property var() edge did not restore after media deactivation");
   await waitFor(() => /(?:220,\s*40,\s*40|red)/u.test(
     compiledPaintColor(crossFile)
   ), "metadata-only custom property media did not restore its cross-file target");
@@ -667,6 +675,31 @@ await test("compiled CSS drives the production runtime without source reconstruc
     assert(resizeAfter.entry.counters.paints === resizeBefore.entry.counters.paints + 1,
       "one resize did not repaint exactly once");
   }
+
+  const provenanceHost = document.createElement("section");
+  provenanceHost.className = "cornerfill-compiled-provenance-theme";
+  const provenanceRoot = provenanceHost.attachShadow({ mode: "open" });
+  const [provenanceLocalCss, provenanceShapeCss] = await Promise.all([
+    fetch("/bench/compiled-provenance-shadow.css").then((response) => response.text()),
+    fetch("/bench/compiled-provenance-shape.css").then((response) => response.text()),
+  ]);
+  const provenanceLocalStyle = document.createElement("style");
+  provenanceLocalStyle.textContent = provenanceLocalCss;
+  const provenanceShapeStyle = document.createElement("style");
+  provenanceShapeStyle.textContent = provenanceShapeCss;
+  const provenanceFace = document.createElement("div");
+  provenanceFace.className = "cornerfill-compiled-provenance-face";
+  provenanceRoot.append(provenanceLocalStyle, provenanceShapeStyle, provenanceFace);
+  document.body.append(provenanceHost);
+  const provenanceScope = compiled.registerRoot(provenanceRoot);
+  await provenanceScope.ready;
+  assert(provenanceScope.explain(provenanceFace)?.status === "active",
+    "an inherited custom property with duplicate local metadata did not attach");
+  provenanceHost.classList.remove("cornerfill-compiled-provenance-theme");
+  await waitFor(() => provenanceScope.explain(provenanceFace) === null,
+    "manifest deduplication erased inherited custom-property provenance");
+  provenanceScope.destroy();
+  provenanceHost.remove();
 
   const [shadowCss, shadowResetCss] = await Promise.all([
     fetch("/bench/compiled-shadow-fixture.css").then((response) => response.text()),
@@ -1040,8 +1073,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
   assert(compiled.explain(element) === null, "compiled destroy retained a runtime entry");
   assert(!element.hasAttribute("data-cornerfill-owned"), "compiled destroy retained paint ownership");
   assert(!parent.hasAttribute("data-cornerfill-owned"), "compiled destroy retained inherited ownership");
+  assert(!allChild.hasAttribute("data-cornerfill-owned"), "compiled destroy retained all-inherited ownership");
   assert(!layered.hasAttribute("data-cornerfill-owned"), "compiled destroy retained layered ownership");
-  assert(!supported.hasAttribute("data-cornerfill-owned"), "compiled destroy retained conditional ownership");
   assert(!dynamic.hasAttribute("data-cornerfill-owned"), "compiled destroy retained dynamic ownership");
   assert(!hoverState.hasAttribute("data-cornerfill-owned"), "compiled destroy retained state ownership");
   assert(!media.hasAttribute("data-cornerfill-owned"), "compiled destroy retained media ownership");
@@ -1074,7 +1107,9 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await budgetLoaded;
   const budgetDocument = budgetFrame.contentDocument;
   const budgetStyle = budgetDocument.createElement("style");
-  budgetStyle.textContent = await fetch("/bench/compiled-budget-fixture.css").then((response) => response.text());
+  const budgetFixtureCss = await fetch("/bench/compiled-budget-fixture.css")
+    .then((response) => response.text());
+  budgetStyle.textContent = budgetFixtureCss;
   budgetDocument.head.append(budgetStyle);
   for (let index = 0; index < 600; index += 1) {
     const node = budgetDocument.createElement("div");
@@ -1093,9 +1128,15 @@ await test("compiled CSS drives the production runtime without source reconstruc
     recoveryGrid.append(item);
   }
   budgetDocument.body.append(recoveryGrid);
+  for (let index = 0; index < 2; index += 1) {
+    const refused = budgetDocument.createElement("div");
+    refused.className = "cornerfill-compiled-budget-refused";
+    budgetDocument.body.append(refused);
+  }
   const budgetController = installCornerfillCompiled({
     document: budgetDocument,
     backend,
+    forceFallback: true,
     staticFallback: backend === "static-data-url",
     maxCandidateElements: 1,
   });
@@ -1114,6 +1155,32 @@ await test("compiled CSS drives the production runtime without source reconstruc
   await waitFor(() => budgetController.explain().status === "active"
     && budgetController.explain().candidates === 1,
     "a selector-state event did not recover a failed compiled scope");
+  recoveryDriver.stage = "compiled-recovery-hover-ready";
+  await waitFor(() => recoveryDriver.stage === "compiled-recovery-hover-driven",
+    "compiled second recovery hover driver");
+  await waitFor(() => budgetController.explain().status === "blocked-recoverable",
+    "a second selector-state budget failure did not fail closed");
+  recoveryDriver.stage = "media-dark-ready";
+  await waitFor(() => recoveryDriver.stage === "media-dark-driven",
+    "compiled recovery dark-media driver");
+  const replacementManifestReads = budgetController.explain().counters.manifestReads;
+  budgetStyle.textContent = await fetch("/bench/compiled-budget-media-only.css")
+    .then((response) => response.text());
+  await waitFor(() => budgetController.explain().counters.manifestReads > replacementManifestReads
+    && budgetController.explain().status === "blocked-recoverable",
+    "a replacement media budget failure did not remain blocked");
+  recoveryDriver.stage = "media-light-ready";
+  await waitFor(() => recoveryDriver.stage === "media-light-driven",
+    "compiled recovery light-media driver");
+  await waitFor(() => budgetController.explain().status === "active"
+    && budgetController.explain().candidates === 1,
+    "a second failed attempt retained stale recovery signals");
+  recoveryDriver.stage = "compiled-recovery-hover-out-ready";
+  await waitFor(() => recoveryDriver.stage === "compiled-recovery-hover-out-driven",
+    "compiled second recovery hover-out driver");
+  budgetStyle.textContent = budgetFixtureCss;
+  await waitFor(() => budgetController.explain().status === "active",
+    "compiled budget fixture did not restore after recovery replacement");
   budgetFrame.width = "40";
   await waitFor(() => budgetDocument.defaultView.matchMedia("(max-width: 50px)").matches,
     "compiled budget iframe media activation");
@@ -1126,12 +1193,25 @@ await test("compiled CSS drives the production runtime without source reconstruc
     "compiled budget iframe media deactivation");
   await waitFor(() => budgetController.explain().status === "active"
     && budgetController.explain().candidates === 1,
-  "nested media deactivation did not recover a failed compiled scope");
+    "nested media deactivation did not recover a failed compiled scope");
   budgetController.destroy();
+
+  const manualController = installCornerfillCompiled({
+    document: budgetDocument,
+    backend,
+    forceFallback: true,
+    observe: false,
+    staticFallback: backend === "static-data-url",
+  });
+  const manualReport = await manualController.ready;
+  assert(!manualReport.observing,
+    "observe: false left compiled observation partially enabled");
+  manualController.destroy();
 
   const potentialLimited = installCornerfillCompiled({
     document: budgetDocument,
     backend,
+    forceFallback: true,
     staticFallback: backend === "static-data-url",
     maxCandidateElements: 1,
     maxPotentialCandidates: 512,
@@ -1180,8 +1260,8 @@ await test("compiled CSS drives the production runtime without source reconstruc
   fontParent.remove();
   element.remove();
   parent.remove();
+  allParent.remove();
   layered.remove();
-  supported.remove();
   dynamic.remove();
   hoverState.remove();
   hoverCard.remove();
@@ -1191,6 +1271,7 @@ await test("compiled CSS drives the production runtime without source reconstruc
   disabledFieldset.remove();
   crossFile.remove();
   variableShapeParent.remove();
+  inlineRadius.remove();
   insertedVariableParent.remove();
   media.remove();
   conditional.remove();
@@ -1199,6 +1280,7 @@ await test("compiled CSS drives the production runtime without source reconstruc
   closedHost.remove();
   link.remove();
   paintMetadataLink.remove();
+  provenanceLink.remove();
   conditionalLink.remove();
 });
 

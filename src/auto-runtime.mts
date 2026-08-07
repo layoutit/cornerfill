@@ -937,7 +937,8 @@ function automaticComputedSignature(
 }
 
 function carrierProblem(inspection: Readonly<CornerfillAuthoredStyleInspection>): string | null {
-  return compiledCarrierProblem(inspection.values, "Automatic CSS");
+  return compiledCarrierProblem(inspection.values, "Automatic CSS")
+    ?? inspection.fallbackProblem;
 }
 
 function hasShapeCarrier(inspection: Readonly<CornerfillAuthoredStyleInspection>): boolean {

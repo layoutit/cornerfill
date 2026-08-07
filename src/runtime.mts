@@ -509,6 +509,7 @@ export interface CornerfillControllerStats {
 }
 
 export interface CornerfillAuthoredStyleInspection {
+  readonly fallbackProblem: string | null;
   readonly requiresFallback: boolean;
   readonly values: Readonly<Record<string, string>>;
 }
@@ -1579,6 +1580,8 @@ interface AttachConfigSnapshot {
   readonly rasterIsOpaque?: boolean;
   readonly shadow?: Readonly<InsetShadowPaintState> | null;
 }
+
+const EMPTY_ATTACH_CONFIG: Readonly<AttachConfigSnapshot> = Object.freeze({});
 
 function snapshotAttachConfig(config: unknown): Readonly<AttachConfigSnapshot> {
   if (!isRecord(config) || Array.isArray(config)) {
@@ -4290,12 +4293,26 @@ class CornerfillController {
       propertyNames.push(property);
     }
     Object.freeze(propertyNames);
-    const inspect = (computed: CSSStyleDeclaration) => Object.freeze({
-      requiresFallback: authoredCornerRequiresFallback(element, computed),
-      values: Object.freeze(Object.fromEntries(propertyNames.map((property) => (
-        [property, computed.getPropertyValue(property)]
-      )))),
-    });
+    const inspect = (computed: CSSStyleDeclaration) => {
+      const requiresFallback = authoredCornerRequiresFallback(element, computed);
+      let fallbackProblem: string | null = null;
+      if (requiresFallback && !this._shouldUseNative(EMPTY_ATTACH_CONFIG)) {
+        try {
+          inspectFallbackHost(element, computed);
+          const sources = captureInitialSources(element, EMPTY_ATTACH_CONFIG, computed);
+          assertOutlineHost(this.view, element, sources.outlineSource);
+        } catch (error) {
+          fallbackProblem = errorFrom(error).message;
+        }
+      }
+      return Object.freeze({
+        fallbackProblem,
+        requiresFallback,
+        values: Object.freeze(Object.fromEntries(propertyNames.map((property) => (
+          [property, computed.getPropertyValue(property)]
+        )))),
+      });
+    };
     const entry = this.entryByElement.get(element);
     if (!entry) return inspect(this.view.getComputedStyle(element));
     if (entry.mode !== "native") return this.ownership.withAuthoredComputedStyle(entry, inspect);

@@ -333,7 +333,7 @@ export function compiledCarrierProblem(
   label = "Compiled CSS",
 ): string | null {
   if (resolvedCarrierValue(values, AUTO_ALL_PENDING)
-    && resolvedCarrierValue(values, AUTO_SHAPE_SOURCE)) {
+    && (hasResolvedShapeCarrier(values) || resolvedCarrierValue(values, AUTO_SHAPE_SOURCE))) {
     const resolved = resolvedCarrierValue(values, AUTO_ALL_VALUE);
     if (!SUPPORTED_ALL_VALUE.test(resolved)) {
       return `${label} cannot safely transport this all: var(...) result; use cornerfill/runtime for explicit state.`;
@@ -410,6 +410,10 @@ export interface CornerfillCompiledManifestInput {
   readonly referencedCustomProperties?: Iterable<string> | undefined;
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function normalizedHostContexts(
   values: Iterable<Readonly<CornerfillCompiledHostContext>>,
 ): readonly Readonly<CornerfillCompiledHostContext>[] {
@@ -432,7 +436,7 @@ function normalizedHostContexts(
     contexts.set(attribute, Object.freeze({ argument, attribute }));
   }
   return Object.freeze([...contexts.values()].sort((left, right) => (
-    left.attribute.localeCompare(right.attribute)
+    compareCodeUnits(left.attribute, right.attribute)
   )));
 }
 
@@ -490,7 +494,9 @@ function normalizedCustomProperties(
       problems: normalizedStrings(value.problems ?? []),
     }));
   }
-  return Object.freeze([...records.values()].sort((left, right) => left.name.localeCompare(right.name)));
+  return Object.freeze([...records.values()].sort((left, right) => (
+    compareCodeUnits(left.name, right.name)
+  )));
 }
 
 export function createCompiledManifest(

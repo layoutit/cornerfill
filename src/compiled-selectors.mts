@@ -186,7 +186,7 @@ export function compiledSelectorPlan(selectors: Iterable<string>): Readonly<Comp
     hostCandidate,
     hostContext,
     hostContexts: Object.freeze([...hostContexts.values()].sort((left, right) => (
-      left.attribute.localeCompare(right.attribute)
+      left.attribute < right.attribute ? -1 : left.attribute > right.attribute ? 1 : 0
     ))),
     hostDependent,
   });

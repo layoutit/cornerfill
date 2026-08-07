@@ -479,7 +479,7 @@ export function restoreNativeDeclarationGroup(
     const record = saved.get(property);
     return record ? [Object.freeze({ property, record })] : [];
   });
-  let changed = false;
+  const restorations: typeof records[number][] = [];
   for (const { property, record } of records) {
     const currentPresent = currentProperties.has(property);
     const stillOwned = currentPresent === record.ownedPresent
@@ -488,14 +488,30 @@ export function restoreNativeDeclarationGroup(
         && style.getPropertyPriority(property) === record.ownedPriority
       ));
     if (!stillOwned) continue;
-    changed = true;
+    restorations.push(Object.freeze({ property, record }));
     if (record.present) {
       desired.set(property, Object.freeze({ value: record.value, priority: record.priority }));
     } else {
       desired.delete(property);
     }
   }
-  if (!changed) return;
+  if (restorations.length === 0) return;
+
+  const ownedProperties = new Set(records.map(({ property }) => property));
+  if (restorations.every(({ record }) => !record.present)
+    && [...ownedProperties].every((property) => !desired.has(property))) {
+    try {
+      for (const { property } of restorations) style.removeProperty(property);
+      return;
+    } catch (error) {
+      rethrowAfterInlineRollback(
+        style,
+        inlineBefore,
+        error,
+        "Cornerfill native declaration restoration and inline-style rollback failed",
+      );
+    }
+  }
 
   const reposition = new Set(records
     .filter(({ property, record }) => record.present && desired.has(property))

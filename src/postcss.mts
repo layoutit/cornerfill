@@ -5,6 +5,7 @@ import {
   AUTO_UNSET,
   COMPILED_HOST_CONTEXT_ATTRIBUTE_PREFIX,
   COMPILED_MANIFEST_PROPERTY_PREFIX,
+  SHAPE_CARRIERS,
   compiledManifestCssValue,
   compiledManifestPropertyName,
   compileAllCarrierDeclarations,
@@ -67,6 +68,7 @@ const CONDITIONAL_SEMANTIC_AT_RULES = new Set([
 ]);
 const KEYFRAME_AT_RULES = new Set(["keyframes", "-webkit-keyframes"]);
 const SCOPE_AT_RULES = new Set(["scope"]);
+const SHAPE_CARRIER_SET: ReadonlySet<string> = new Set(SHAPE_CARRIERS);
 const LEGACY_PSEUDO_ELEMENTS = new Set(["after", "before", "first-letter", "first-line"]);
 const MANIFEST_RULE_SELECTORS = new Set([":host", ":root"]);
 const INVALIDATION_RANK: Readonly<Record<SelectorInvalidation, number>> = Object.freeze({
@@ -572,7 +574,7 @@ function reachableCustomProperties(
 
 const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
   postcssPlugin: "cornerfill",
-  Once(root) {
+  OnceExit(root) {
     removeExistingCompiledMetadata(root);
     const registered = registeredProperties(root);
     const candidateSelectors = new Set<string>();
@@ -606,7 +608,12 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
     root.walkAtRules((atRule) => {
       const name = decodeCssEscapes(atRule.name).toLowerCase();
       if (name === "import") throw atRule.error("Cornerfill must run after @import expansion");
-      if (name === "supports") atRule.params = rewriteCornerShapeSupportsCondition(atRule.params);
+      if (name === "supports"
+        && rewriteCornerShapeSupportsCondition(atRule.params) !== atRule.params) {
+        throw atRule.error(
+          "Cornerfill cannot compile corner-shape @supports because a CSS feature query cannot represent runtime health",
+        );
+      }
       if (name === "property" && ancestorAtRule(atRule, CONDITIONAL_SEMANTIC_AT_RULES)) {
         throw atRule.error("Cornerfill cannot compile conditional @property registration");
       }
@@ -702,7 +709,10 @@ const cornerfillPostcss: PluginCreator<CornerfillPostcssOptions> = () => ({
         referencedCustomProperties.add(reference);
       }
       if (!shape && !all) return;
-      if (shape) candidateSelectors.add(rule.selector);
+      const allMayIntroduceShape = all && compiled.some(({ property: carrier, value }) => (
+        SHAPE_CARRIER_SET.has(carrier) && value !== AUTO_UNSET
+      ));
+      if (shape || allMayIntroduceShape) candidateSelectors.add(rule.selector);
       for (const declaration of ensureCarrierDeclarations(authored, compiled)) {
         generatedCarriers.add(declaration);
       }

@@ -1,6 +1,4 @@
 const OWNED_PAINT_PROPERTIES = new Set([
-  "-webkit-appearance",
-  "-webkit-backdrop-filter",
   "all",
   "appearance",
   "aspect-ratio",
@@ -35,6 +33,8 @@ const OWNED_PAINT_PROPERTIES = new Set([
   "writing-mode",
 ]);
 
+const OWNED_PAINT_ALIAS_PREFIXES = Object.freeze(["-moz-", "-webkit-"]);
+
 const OWNED_PAINT_PREFIXES = Object.freeze([
   "background",
   "border",
@@ -58,18 +58,33 @@ const INHERITED_OWNED_PAINT_PROPERTIES = new Set([
   "writing-mode",
 ]);
 
+function canonicalOwnedPaintProperty(property: string): string {
+  const normalized = property.toLowerCase();
+  for (const prefix of OWNED_PAINT_ALIAS_PREFIXES) {
+    if (!normalized.startsWith(prefix)) continue;
+    const unprefixed = normalized.slice(prefix.length);
+    if (OWNED_PAINT_PROPERTIES.has(unprefixed)
+      || OWNED_PAINT_PREFIXES.some((candidate) => (
+        unprefixed === candidate || unprefixed.startsWith(`${candidate}-`)
+      ))) return unprefixed;
+  }
+  return normalized;
+}
+
 export function standardPropertyAffectsOwnedPaint(property: string): boolean {
-  return OWNED_PAINT_PROPERTIES.has(property)
+  const canonical = canonicalOwnedPaintProperty(property);
+  return OWNED_PAINT_PROPERTIES.has(canonical)
     || OWNED_PAINT_PREFIXES.some((prefix) => (
-      property === prefix || property.startsWith(`${prefix}-`)
+      canonical === prefix || canonical.startsWith(`${prefix}-`)
     ));
 }
 
 export function standardPropertyInheritsIntoOwnedPaint(property: string): boolean {
-  return property === "all"
-    || INHERITED_OWNED_PAINT_PROPERTIES.has(property)
-    || property === "font"
-    || property.startsWith("font-");
+  const canonical = canonicalOwnedPaintProperty(property);
+  return canonical === "all"
+    || INHERITED_OWNED_PAINT_PROPERTIES.has(canonical)
+    || canonical === "font"
+    || canonical.startsWith("font-");
 }
 
 export function propertyAffectsOwnedPaint(property: string): boolean {

@@ -5,6 +5,7 @@ import {
   AUTO_ALL_VALUE,
   AUTO_SHAPE_SOURCE,
   COMPILED_MANIFEST_SCHEMA,
+  SHAPE_CARRIERS,
   compileAllCarrierDeclarations,
   compileShapeCarrierDeclarations,
   compiledCarrierProblem,
@@ -25,7 +26,7 @@ const observation = Object.freeze({
 test("pending all substitutions accept reset outcomes and refuse cascade-dependent ones", () => {
   const values = {
     [AUTO_ALL_PENDING]: "1",
-    [AUTO_SHAPE_SOURCE]: "1",
+    [SHAPE_CARRIERS[0]]: "bevel",
     [AUTO_ALL_VALUE]: "__cornerfill_all__ unset",
   };
   assert.equal(compiledCarrierProblem(values), null);
@@ -33,6 +34,14 @@ test("pending all substitutions accept reset outcomes and refuse cascade-depende
     compiledCarrierProblem({
       ...values,
       [AUTO_ALL_VALUE]: "__cornerfill_all__ revert-layer",
+    }),
+    /cannot safely transport this all: var/u,
+  );
+  assert.match(
+    compiledCarrierProblem({
+      [AUTO_ALL_PENDING]: "1",
+      [AUTO_ALL_VALUE]: "__cornerfill_all__ revert-layer",
+      [AUTO_SHAPE_SOURCE]: "1",
     }),
     /cannot safely transport this all: var/u,
   );
@@ -59,6 +68,12 @@ test("compiled manifests normalize and round-trip deterministically", () => {
       name: "--tone",
       references: ["--palette", "--palette"],
       observation,
+    }, {
+      name: "--ä",
+      observation,
+    }, {
+      name: "--z",
+      observation,
     }],
     mediaQueries: ["(min-width: 10px)", ""],
     observation,
@@ -68,6 +83,7 @@ test("compiled manifests normalize and round-trip deterministically", () => {
   assert.equal(created.schema, COMPILED_MANIFEST_SCHEMA);
   assert.deepEqual(created.candidateSelectors, [".a", ".z"]);
   assert.deepEqual(created.referencedCustomProperties, ["--tone"]);
+  assert.deepEqual(created.customProperties.map(({ name }) => name), ["--tone", "--z", "--ä"]);
   assert.deepEqual(created.customProperties[0].references, ["--palette"]);
   assert.deepEqual(created.observation.attributes, ["class", "id"]);
   assert.deepEqual(parseCompiledManifest(serializeCompiledManifest(input)), created);

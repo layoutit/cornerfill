@@ -1,5 +1,6 @@
 import { installCornerfill } from "./runtime.mjs";
 import type {
+  CornerfillAuthoredStyleInspection,
   CornerfillControllerHandle,
   CornerfillControllerStats,
   CornerfillEntryExplanation,
@@ -140,10 +141,7 @@ interface ScanRoot {
 interface ScanResult {
   readonly errors: readonly string[];
   readonly inlineEdgeChanged: boolean;
-  readonly inspections: ReadonlyMap<HTMLElement, Readonly<{
-    requiresFallback: boolean;
-    values: Readonly<Record<string, string>>;
-  }>>;
+  readonly inspections: ReadonlyMap<HTMLElement, Readonly<CornerfillAuthoredStyleInspection>>;
   readonly matched: ReadonlySet<HTMLElement>;
   readonly rawMatched: ReadonlySet<HTMLElement>;
   readonly resizeMatched: ReadonlySet<HTMLElement>;
@@ -284,7 +282,9 @@ function inlineCustomPropertiesChanged(record: MutationRecord): boolean {
 
 function inlineCustomVariableSignature(source: unknown): string {
   return cssDeclarations(source)
-    .filter(({ property, value }) => property.startsWith("--")
+    .filter(({ property, value }) => (
+      property.startsWith("--") || standardPropertyAffectsOwnedPaint(property)
+    )
       && cssFunctions(value).some(({ name }) => name === "var"))
     .map(({ property, value }) => `${property}:${value}`)
     .join(";");
@@ -461,11 +461,12 @@ function manifestState(
     ...new Set(localManifests.flatMap(({ candidateSelectors }) => candidateSelectors)),
   ].sort());
   const plan = compiledSelectorPlan(authoredSelectors);
+  const effectiveManifests = [...localManifests, ...inheritedManifests];
   const serializedManifests = new Map<string, Readonly<CornerfillCompiledManifest>>();
   const encoder = new document.defaultView.TextEncoder();
   let manifestBytes = 0;
   let customPropertyDefinitions = 0;
-  for (const manifest of [...localManifests, ...inheritedManifests]) {
+  for (const manifest of effectiveManifests) {
     const serialized = serializeCompiledManifest(manifest);
     if (serializedManifests.has(serialized)) continue;
     if (serializedManifests.size >= limits.maxManifestRecords) {
@@ -487,19 +488,24 @@ function manifestState(
     }
     serializedManifests.set(serialized, manifest);
   }
-  const manifests = [...serializedManifests.values()];
-  const localManifestSet = new Set(localManifests);
   const customProperties = new Map<string, {
     readonly local: boolean;
     readonly record: CornerfillCompiledManifest["customProperties"][number];
   }[]>();
-  for (const manifest of manifests) {
-    for (const record of manifest.customProperties) {
-      const definitions = customProperties.get(record.name) ?? [];
-      definitions.push({ local: localManifestSet.has(manifest), record });
-      customProperties.set(record.name, definitions);
+  const addDefinitions = (
+    manifests: readonly Readonly<CornerfillCompiledManifest>[],
+    local: boolean,
+  ): void => {
+    for (const manifest of manifests) {
+      for (const record of manifest.customProperties) {
+        const definitions = customProperties.get(record.name) ?? [];
+        definitions.push({ local, record });
+        customProperties.set(record.name, definitions);
+      }
     }
-  }
+  };
+  addDefinitions(localManifests, true);
+  addDefinitions(inheritedManifests, false);
   const reachable = new Set<string>();
   const pending = localManifests.flatMap(({ referencedCustomProperties }) => referencedCustomProperties);
   const localDependencyObservations: Readonly<SelectorObservation>[] = [];
@@ -560,7 +566,7 @@ function manifestState(
   for (const selector of selectors) document.documentElement.matches(selector);
   const mediaQueries = Object.freeze([
     ...new Set([
-      ...manifests.flatMap(({ mediaQueries: values }) => values),
+      ...effectiveManifests.flatMap(({ mediaQueries: values }) => values),
       ...dependencyMediaQueries,
     ]),
   ].sort());
@@ -574,7 +580,7 @@ function manifestState(
     hostContexts: root === document
       ? Object.freeze([])
       : Object.freeze([...hostContexts.values()].sort((left, right) => (
-        left.attribute.localeCompare(right.attribute)
+        left.attribute < right.attribute ? -1 : left.attribute > right.attribute ? 1 : 0
       ))),
     hostDependent: root === document ? false : plan.hostDependent || hostContexts.size > 0,
     manifests: localManifests,
@@ -649,7 +655,7 @@ export function installCornerfillCompiled(
   const document = (options.document ?? globalThis.document) as RuntimeDocument | undefined;
   if (!document?.defaultView) throw new TypeError("installCornerfillCompiled() requires a browser document");
   const view = document.defaultView;
-  const autoObserve = options.autoObserve !== false;
+  const autoObserve = options.autoObserve !== false && options.observe !== false;
   const maxCandidateElements = options.maxCandidateElements
     ?? options.maxActiveEntries
     ?? DEFAULT_MAX_CANDIDATE_ELEMENTS;
@@ -668,6 +674,9 @@ export function installCornerfillCompiled(
   positiveSafeInteger(maxScannedElements, "maxScannedElements");
   if (options.autoObserve !== undefined && typeof options.autoObserve !== "boolean") {
     throw new TypeError("autoObserve must be a boolean");
+  }
+  if (options.observe !== undefined && typeof options.observe !== "boolean") {
+    throw new TypeError("observe must be a boolean");
   }
   if (options.onError !== undefined && typeof options.onError !== "function") {
     throw new TypeError("onError must be a function");
@@ -703,7 +712,7 @@ export function installCornerfillCompiled(
   const runtime: CornerfillControllerHandle = installCornerfill({
     ...runtimeOptions,
     document,
-    observe: autoObserve && options.observe !== false,
+    observe: autoObserve,
   });
   const handles = new Map<HTMLElement, Readonly<CornerfillHandle>>();
   const claims = new Map<HTMLElement, Set<CompiledScopeInternal>>();
@@ -845,18 +854,15 @@ export function installCornerfillCompiled(
 
   const syncElements = async (
     elements: Iterable<HTMLElement>,
-    inspections?: ReadonlyMap<HTMLElement, Readonly<{
-      requiresFallback: boolean;
-      values: Readonly<Record<string, string>>;
-    }>>,
+    inspections?: ReadonlyMap<HTMLElement, Readonly<CornerfillAuthoredStyleInspection>>,
   ): Promise<readonly string[]> => {
-    const nextErrors: string[] = [];
-    for (const element of new Set(elements)) {
+    const synchronize = async (element: HTMLElement): Promise<readonly string[]> => {
+      const elementErrors: string[] = [];
       const elementClaims = validClaims(element);
       for (const scope of elementClaims) scope.counters.attachmentPasses += 1;
       if (elementClaims.size === 0 || !element.isConnected || blockedFor(element)) {
-        try { detach(element); } catch (error) { nextErrors.push(errorMessage(error)); }
-        continue;
+        try { detach(element); } catch (error) { elementErrors.push(errorMessage(error)); }
+        return elementErrors;
       }
       try {
         let inspection = inspections?.get(element);
@@ -866,9 +872,10 @@ export function installCornerfillCompiled(
         }
         const problem = compiledCarrierProblem(inspection.values);
         if (problem) throw new TypeError(problem);
+        if (inspection.fallbackProblem) throw new TypeError(inspection.fallbackProblem);
         if (!hasResolvedShapeCarrier(inspection.values) || !inspection.requiresFallback) {
           detach(element);
-          continue;
+          return elementErrors;
         }
         const existing = handles.get(element);
         if (existing) {
@@ -886,11 +893,15 @@ export function installCornerfillCompiled(
           }
         }
       } catch (error) {
-        try { detach(element); } catch (cleanupError) { nextErrors.push(errorMessage(cleanupError)); }
-        nextErrors.push(errorMessage(error));
+        try { detach(element); } catch (cleanupError) {
+          elementErrors.push(errorMessage(cleanupError));
+        }
+        elementErrors.push(errorMessage(error));
       }
-    }
-    return Object.freeze(nextErrors);
+      return elementErrors;
+    };
+    const results = await Promise.all([...new Set(elements)].map(synchronize));
+    return Object.freeze(results.flat());
   };
 
   const addClaim = (scope: CompiledScopeInternal, element: HTMLElement): void => {
@@ -1110,10 +1121,7 @@ export function installCornerfillCompiled(
 
     const scan = (roots: Iterable<Readonly<ScanRoot>>, replaceAll: boolean): Readonly<ScanResult> => {
       const scanErrors = new Set<string>();
-      const inspections = new Map<HTMLElement, Readonly<{
-        requiresFallback: boolean;
-        values: Readonly<Record<string, string>>;
-      }>>();
+      const inspections = new Map<HTMLElement, Readonly<CornerfillAuthoredStyleInspection>>();
       const matched = new Set<HTMLElement>();
       const rawMatched = new Set<HTMLElement>();
       const resizeMatched = new Set<HTMLElement>();
@@ -1146,10 +1154,7 @@ export function installCornerfillCompiled(
         if (!forceHost && (!state.selectorList || !element.matches(state.selectorList))) return;
         rawMatched.add(element);
         counters.computedChecks += 1;
-        let inspection: Readonly<{
-          requiresFallback: boolean;
-          values: Readonly<Record<string, string>>;
-        }>;
+        let inspection: Readonly<CornerfillAuthoredStyleInspection>;
         try {
           inspection = inspectAuthoredStyle(element);
         } catch (error) {
@@ -1163,6 +1168,10 @@ export function installCornerfillCompiled(
         if (!hasResolvedShapeCarrier(inspection.values)) return;
         if (!inspection.requiresFallback) {
           if (carrierMayNeedShapedGeometry(inspection.values)) resizeMatched.add(element);
+          return;
+        }
+        if (inspection.fallbackProblem) {
+          scanErrors.add(inspection.fallbackProblem);
           return;
         }
         inspections.set(element, inspection);
@@ -1328,13 +1337,16 @@ export function installCornerfillCompiled(
       }
     };
 
-    const failClosed = (error: unknown): void => {
+    const failClosed = (
+      error: unknown,
+      failedState: Readonly<CompiledManifestState> | null,
+    ): void => {
       clearObservation();
-      if (status !== "blocked-recoverable") {
-        recoveryMediaQueries = state.mediaQueries;
-        recoveryObservation = state.observation;
-        recoveryExternalObservation = state.externalObservation;
-        recoveryHostDependent = state.hostDependent;
+      if (failedState) {
+        recoveryMediaQueries = failedState.mediaQueries;
+        recoveryObservation = failedState.observation;
+        recoveryExternalObservation = failedState.externalObservation;
+        recoveryHostDependent = failedState.hostDependent;
       }
       status = "blocked-recoverable";
       blockedScopes.add(scope);
@@ -1403,7 +1415,7 @@ export function installCornerfillCompiled(
         const refreshErrors = refresh.size > 0 ? await syncElements(refresh) : Object.freeze([]);
         errors = Object.freeze([...nextErrors, ...refreshErrors]);
       } catch (error) {
-        failClosed(error);
+        failClosed(error, state);
         throw error;
       }
     };
@@ -1481,7 +1493,7 @@ export function installCornerfillCompiled(
           if (attribute === "style") {
             const inlineEdgeWasActive = inlineEdgeActive();
             try { setInlineEdge(localInlineEdges, target); } catch (error) {
-              failClosed(error);
+              failClosed(error, state);
               reportAsyncError(error, "compiled inline dependency budget");
               return;
             }
@@ -1647,7 +1659,7 @@ export function installCornerfillCompiled(
             if (target === host || shadowIncludingContains(view, target, host)) {
               const inlineEdgeWasActive = inlineEdgeActive();
               try { setInlineEdge(externalInlineEdges, target); } catch (error) {
-                failClosed(error);
+                failClosed(error, state);
                 reportAsyncError(error, "compiled external inline dependency budget");
                 return;
               }
@@ -2023,6 +2035,9 @@ export function installCornerfillCompiled(
       pendingElements.clear();
       pendingSubtrees.clear();
       pendingRefresh.clear();
+      let attemptedState: Readonly<CompiledManifestState> | null = status === "active"
+        ? state
+        : null;
       try {
         clearObservation(true);
         counters.manifestReads += 1;
@@ -2038,6 +2053,7 @@ export function installCornerfillCompiled(
           inlineEdgeActive(),
           compiledLimits,
         );
+        attemptedState = state;
         localManifests = nextManifests;
         manifestCount = nextManifests.length;
         syncHostContextMarkers();
@@ -2051,6 +2067,7 @@ export function installCornerfillCompiled(
             inlineEdgeActive(),
             compiledLimits,
           );
+          attemptedState = state;
           syncHostContextMarkers();
           scanned = scan(fullScanRoots(), true);
         }
@@ -2075,7 +2092,7 @@ export function installCornerfillCompiled(
       } catch (error) {
         if (stateFrame !== null) view.cancelAnimationFrame(stateFrame);
         stateFrame = null;
-        failClosed(error);
+        failClosed(error, attemptedState);
         throw error;
       }
     };

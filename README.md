@@ -45,11 +45,11 @@ Then author standard CSS:
 }
 ```
 
-Every stylesheet that can set `corner-shape`, reset it with `all`, or affect paint on a Cornerfill target must pass through the plugin. This includes CSS for registered shadow roots and CSS generated at runtime before it is inserted. Raw inline shape declarations and other unprocessed CSS are intentionally not recovered by compiled mode; use a transformed rule or the explicit runtime.
+Every stylesheet that can set `corner-shape`, reset it with `all`, or affect paint on a Cornerfill target must pass through the plugin. Run Cornerfill after imports, nesting, CSS Modules/scoping, custom selectors/media, property renaming, and every other transform that changes selectors or dependency structure; only serialization-safe minification may follow it. This includes CSS for registered shadow roots and CSS generated at runtime before it is inserted. Raw inline shape declarations and other unprocessed CSS are intentionally not recovered by compiled mode; use a transformed rule or the explicit runtime.
 
 ## How it works
 
-The PostCSS plugin keeps each native declaration and emits private custom-property carriers beside it, in the same selector, conditional context, layer, source order, and priority. It also emits compact candidate and invalidation metadata and rewrites only implemented `corner-shape` feature tests. A cross-file dependency graph follows only custom properties reached from shape or owned-paint values; unrelated design tokens do not become Cornerfill dependencies. Authors never write or depend on the generated declarations.
+The PostCSS plugin keeps each native declaration and emits private custom-property carriers beside it, in the same selector, conditional context, layer, source order, and priority. It also emits compact candidate and invalidation metadata. Shape-sensitive `@supports` queries are rejected because a CSS feature query cannot represent whether the runtime loaded and remains healthy. A cross-file dependency graph follows only custom properties reached from shape or owned-paint values; unrelated design tokens do not become Cornerfill dependencies. Authors never write or depend on the generated declarations.
 
 The browser resolves specificity, inheritance, variables, media queries, scopes, layers, CSS-wide values, and `!important`. Cornerfill reads the resolved carriers; it does not fetch or interpret stylesheet source in compiled mode.
 
@@ -68,7 +68,7 @@ Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, extra clip
 
 Compiled mode automatically handles initial transformed CSS and common component mutations: transformed style/link lifecycle (including owner media and `CSSStyleSheet.disabled`); relevant attributes and inline paint; inherited paint, language and direction across registered roots; observable selector state; media, viewport and size changes; subtree insertion/removal; and open shadow roots registered with the controller. Non-measurable targets stay local and pending instead of blocking their root. A root that fails closed retains the media and selector-state signals needed to retry after the failed condition becomes inactive.
 
-Automatic synchronization ends where browsers expose no dependable mutation or lifecycle signal. Call `refresh()` after changing an `adoptedStyleSheets` list, a paint-only CSSOM declaration, `CSSStyleSheet.media.mediaText`, or another application-driven computed-style dependency that does not change observed DOM state. A CSSOM replacement that changes shape declarations must contain plugin-transformed CSS because `refresh()` does not compile authored CSS in the browser. Controller-wide refresh attempts every registered scope and rejects with an aggregate if any scope fails.
+Automatic synchronization ends where browsers expose no dependable mutation or lifecycle signal. Call `refresh()` after changing an `adoptedStyleSheets` list, a paint-only CSSOM declaration, `CSSStyleSheet.media.mediaText`, or another application-driven computed-style dependency that does not change observed DOM state. Refresh can reread values only when selector and custom-property dependency metadata remain unchanged. Dependency-changing CSSOM edits require complete plugin-transformed stylesheet replacement or the explicit runtime; missing graph edges cannot be reconstructed in the browser. Controller-wide refresh attempts every registered scope and rejects with an aggregate if any scope fails.
 
 When lifecycle control is needed:
 
@@ -98,7 +98,9 @@ const cornerfill = installCornerfillCompiled({ nonce: window.cspNonce });
 await cornerfill.ready;
 ```
 
-Register every open shadow root in a nested containing-root chain. That registration graph carries inherited standard paint and custom-property dependencies, conditional invalidation, connection changes, and fail-close influence across shadow boundaries. Inline custom-property `var()` edges are indexed during the bounded candidate traversal; while at least one exists, the scope conservatively subscribes to all transformed custom-property metadata in its registered ancestor chain.
+Setting either `observe: false` or `autoObserve: false` disables both compiled discovery observation and the underlying painter observation; manual `refresh()` then owns synchronization.
+
+Register every open shadow root in a nested containing-root chain. That registration graph carries inherited standard paint and custom-property dependencies, conditional invalidation, connection changes, and fail-close influence across shadow boundaries. Relevant inline standard-property and custom-property `var()` edges are indexed during the bounded candidate traversal; while at least one exists, the scope conservatively subscribes to all transformed custom-property metadata in its registered ancestor chain.
 
 ## Implemented paint subset
 
@@ -115,13 +117,14 @@ Unsupported syntax is rejected at build time or reported before paint ownership 
 - Outer shadows/outlines, `border-image`, per-side border colors, non-solid borders, animated CSS images, repeating gradients, and general background blending are unsupported. Compiled mode cannot infer that a CSS raster is fully opaque, so its `multiply` case requires explicit runtime state. A contained outline requires an empty paint-owned host.
 - Canvas raster sampling and gradient color interpolation can differ from native CSS. Native-versus-candidate pixel tolerances remain deliberately `UNQUALIFIED`.
 - Cross-origin raster images require CORS. Explicit colors using `attr()` are refused.
-- Fallback-relevant declarations in keyframes, dynamic `@container` activation, pseudo-element targets, namespace-qualified selectors, `:focus-visible`, and other selector states the runtime cannot observe are rejected by the compiler. Run Cornerfill after `@import` expansion and nesting transforms.
+- Fallback-relevant declarations in keyframes, shape-sensitive `@supports`, dynamic `@container` activation, pseudo-element targets, namespace-qualified selectors, `:focus-visible`, and other selector states the runtime cannot observe are rejected by the compiler.
 - Shape or paint animation is not native-timing parity. Fallback-relevant keyframes are rejected. If a transition can activate a previously inactive fallback target after its triggering DOM mutation, call `refresh()` when the transition completes. Other value-driven changes with no DOM, media or registered-root signal also require explicit `refresh()`. Direct CSSOM shape edits are unprocessed CSS; replace them with transformed output or use the explicit runtime.
 - Scoped rules require an explicit observable scope-start selector. Relative scoped selectors and top-level or scoped `:scope` semantics are rejected in `0.0.1`.
 - A conditional named layer is accepted only when the complete layer name was established earlier and unconditionally in the same transformed stylesheet; conditional first establishment is rejected. Conditional `@property` registrations are rejected. Authored registrations for private Cornerfill carriers must exactly match the generated non-inheriting token contract.
 - If a reachable custom property has any definition whose selector or condition cannot be observed, compiled mode refuses that dependency instead of trying to prove the definition irrelevant to a particular element. Split the token or use the explicit runtime. Definitions absent from transformed CSS cannot be recovered by `refresh()`.
 - Closed shadow roots cannot use compiled discovery. In a shadow root, host pseudos must lead their selector branch; `:host-context()` accepts one compound selector, and nested host pseudos or complex relative host chains are refused.
-- Default per-root compiled limits are 512 active candidates, 100,000 potential candidates, 100,000 incrementally scanned or inline-dependency elements, 1 MiB of effective local-plus-inherited manifest values, 512 effective manifest records, and 100,000 effective custom-property definition records. The painter separately bounds surfaces and decoded-image pixels. Exceeding a limit fails closed and remains recoverable when its inputs or activation conditions change.
+- Registered scopes subscribe to each containing root in `0.0.1`; total observer and listener subscriptions can grow quadratically with maximum nesting depth, so keep deeply nested registered-root chains shallow.
+- Default per-root compiled limits are 512 admitted active candidates, 100,000 potential or locally refused candidates, 100,000 incrementally scanned or inline-dependency elements, 1 MiB of effective local-plus-inherited manifest values, 512 effective manifest records, and 100,000 effective custom-property definition records. The painter separately bounds surfaces and decoded-image pixels. Exceeding a limit fails closed and remains recoverable when its inputs or activation conditions change.
 - The experimental `cornerfill/auto` mode has additional source-access, CSP `connect-src`, CSSOM, import, layer, and selector boundaries. Use compiled mode when the CSS build is controlled.
 
 ## Development
