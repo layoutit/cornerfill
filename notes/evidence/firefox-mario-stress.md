@@ -1,6 +1,9 @@
 # Firefox Mario stress evidence
 
-Captured 2026-08-04 with Firefox 152.0.4 in eight fresh, headless sessions:
+Captured 2026-08-04 with Firefox 152.0.4 in eight fresh, headless sessions.
+This is a record from the local Cornerfill + sibling `cssGraphics` workspace:
+the trace harness and source-backed fixture depend on ignored local files and are
+not reproducible from the published Cornerfill repository alone.
 
 ```sh
 node scripts/trace-firefox-mario.mjs --mode=both --frames=820 --warmup=60 --trials=1 --pairs=2 --headless

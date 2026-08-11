@@ -877,6 +877,7 @@ function paintContourRing(
     appendClosedPoints(context, outerContour);
     if (innerContour.length > 1) appendClosedPoints(context, innerContour);
     context.fillStyle = color;
+    // Inset contours are not normalized to the outer contour's winding.
     context.fill("evenodd");
   } finally {
     context.restore();

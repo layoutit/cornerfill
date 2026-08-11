@@ -16,6 +16,7 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import postcss from "postcss";
 import cornerfillPostcss from "../dist/postcss.mjs";
+import { encodePng } from "./png.mjs";
 import { closePlaywrightSession, runWithCleanup } from "./run-with-cleanup.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,11 +44,17 @@ const SOURCE_FILES = Object.freeze([
   "bench/imports/root.css",
   "bench/imports/unsafe-semantics.css",
   "bench/imports/unsafe-supports.css",
+  "scripts/png.mjs",
   "scripts/run-with-cleanup.mjs",
   "scripts/runtime-regressions.mjs",
   ...moduleFiles("src", ".mts"),
   ...moduleFiles("dist", ".mjs"),
 ].sort());
+const CORS_REDIRECT_PNG = encodePng({
+  width: 1,
+  height: 1,
+  pixels: Buffer.from([255, 0, 0, 255]),
+});
 const MIME = Object.freeze({
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -412,6 +419,25 @@ async function startServer() {
     if (url.pathname === "/cornerfill-missing-image.png") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "image/png" });
       response.end("not-an-image");
+      return;
+    }
+    if (url.pathname === "/cornerfill-cors-redirect.png") {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("runtime server address is unavailable");
+      response.writeHead(302, {
+        "cache-control": "no-store",
+        location: `http://localhost:${address.port}/cornerfill-cors-target.png`,
+      });
+      response.end();
+      return;
+    }
+    if (url.pathname === "/cornerfill-cors-target.png") {
+      response.writeHead(200, {
+        "access-control-allow-origin": "*",
+        "cache-control": "no-store",
+        "content-type": "image/png",
+      });
+      response.end(CORS_REDIRECT_PNG);
       return;
     }
     if (url.pathname === "/bench/compiled-fixture.css") {

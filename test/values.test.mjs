@@ -16,6 +16,7 @@ import {
   resolveLengthPercentage,
   serializeShapeParameter,
   shapeParameterToDiagonal,
+  splitTopLevelWhitespace,
 } from "../dist/values.mjs";
 
 test("border-radius expands one through four values and slash axes", () => {
@@ -52,6 +53,11 @@ test("CSS comments form token boundaries in supported values", () => {
     2,
     -1,
   ]);
+});
+
+test("top-level CSS strings remain opaque whitespace-list tokens", () => {
+  assert.deepEqual(splitTopLevelWhitespace('"a b" red'), ['"a b"', "red"]);
+  assert.deepEqual(splitTopLevelWhitespace("red 'a b'"), ["red", "'a b'"]);
 });
 
 test("browser-computed corner radii resolve min, max, and clamp", () => {

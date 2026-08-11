@@ -18,6 +18,12 @@ function equal(actual, expected, message) {
   }
 }
 
+function assertThrows(operation, pattern, message) {
+  let error = null;
+  try { operation(); } catch (caught) { error = caught; }
+  assert(pattern.test(error?.message ?? ""), message);
+}
+
 function options(extra = {}) {
   return {
     document,
@@ -5737,6 +5743,42 @@ await test("automatic CSP nonce keeps every generated stylesheet active", async 
   }
 });
 
+await test("automatic nonce discovery ignores inert stylesheet owners", async () => {
+  const frame = document.createElement("iframe");
+  frame.srcdoc = `
+    <meta http-equiv="Content-Security-Policy" content="style-src 'nonce-cornerfill-live'">
+    <link id="cornerfill-inert-nonce" rel="stylesheet" media="not all" nonce="cornerfill-stale">
+    <style nonce="cornerfill-live">
+      .cornerfill-discovered-nonce{width:12px;height:10px;background:red;border-radius:5px;corner-shape:bevel}
+    </style>
+    <div class="cornerfill-discovered-nonce"></div>
+  `;
+  const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  document.body.append(frame);
+  await loaded;
+  const frameDocument = frame.contentDocument;
+  const inert = frameDocument.querySelector("#cornerfill-inert-nonce");
+  Object.defineProperty(inert, "sheet", { configurable: true, value: null });
+  const element = frameDocument.querySelector(".cornerfill-discovered-nonce");
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    document: frameDocument,
+    nativeQualification: qualifyNativeCornerShape(frameDocument),
+  }));
+  try {
+    await auto.ready;
+    assert(auto.explain(element)?.status === "active", "applied stylesheet nonce was not discovered");
+    const generated = [...frameDocument.querySelectorAll("style[data-cornerfill-auto-styles]")];
+    assert(
+      generated.length > 0 && generated.every((style) => style.nonce === "cornerfill-live" && style.sheet),
+      "an inert stylesheet owner supplied the generated nonce",
+    );
+  } finally {
+    auto.destroy();
+    frame.remove();
+  }
+});
+
 await test("failed carrier registration does not poison a later controller", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLStyleElement.prototype, "sheet");
   assert(descriptor?.get, "HTMLStyleElement.sheet getter was unavailable");
@@ -5883,6 +5925,24 @@ await test("disposed generic initialization cannot resurrect", async () => {
   element.remove();
 });
 
+await test("disposing a dynamic handle rejects its pending update", async () => {
+  const element = host();
+  const controller = installCornerfill(options());
+  const handle = controller.attach(element, {
+    borderRadius: "6px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "red" },
+  });
+  await handle.ready;
+  const pending = handle.update({ paint: { kind: "solid", color: "blue" } });
+  handle.dispose();
+  let error = null;
+  try { await pending; } catch (caught) { error = caught; }
+  assert(/disposed before its pending update/u.test(error?.message ?? ""), "disposed update resolved as successful");
+  controller.destroy();
+  element.remove();
+});
+
 await test("failed initialization releases its entry claim and budget", async () => {
   const failedElement = host();
   const recoveredElement = host();
@@ -5930,6 +5990,11 @@ await test("deferred prepared ownership failure rolls back its live surface", as
   });
   await handle.ready;
   assert(controller.stats().surfaces === 0, "deferred prepared fixture allocated early");
+  const deferred = handle.verify();
+  assert(
+    deferred.status === "active" && deferred.prepared.surfaceDeferred && deferred.surface === null,
+    "healthy deferred prepared state did not verify",
+  );
   const originalAssert = controller.ownership.assertStylesApplied;
   controller.ownership.assertStylesApplied = () => {
     throw new Error("injected deferred ownership verification failure");
@@ -6311,6 +6376,24 @@ await test("contained inset shadow and outline are owned shaped rings", async ()
     rejection = error;
   }
   assert(/cannot paint beyond the border box/u.test(rejection?.message ?? ""), "outer shadow did not fail explicitly");
+  for (const shadow of ["inset 0 0 0 4pc red", "inset 0 0 0 calc(4px) red"]) {
+    const invalidUnit = host();
+    assertThrows(() => controller.attach(invalidUnit, {
+      borderRadius: "4px",
+      cornerShape: "bevel",
+      paint: { kind: "solid", color: "#246" },
+      shadow,
+    }), /Fallback effects are limited/u, `unsupported shadow length was accepted: ${shadow}`);
+    invalidUnit.remove();
+  }
+  const invalidColor = host();
+  assertThrows(() => controller.attach(invalidColor, {
+    borderRadius: "4px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "#246" },
+    shadow: "inset 0 0 0 0 notacolor",
+  }), /invalid inset shadow color/u, "zero-spread shadow skipped color validation");
+  invalidColor.remove();
   controller.destroy();
   element.remove();
   unsupported.remove();
@@ -6356,6 +6439,42 @@ await test("overlapping animations with the same name retain independent activit
   element.remove();
 });
 
+await test("animation completion removes a token after its paint classification changes", async () => {
+  const element = host();
+  let affectsPaint = true;
+  Object.defineProperty(element, "getAnimations", {
+    configurable: true,
+    value: () => [{
+      animationName: "cornerfill-changing-animation",
+      effect: { getKeyframes: () => affectsPaint
+        ? [{ "background-color": "red" }]
+        : [{ transform: "translateX(1px)" }] },
+    }],
+  });
+  const controller = installCornerfill(options({ observe: true }));
+  const handle = controller.attach(element, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+    paint: { kind: "solid", color: "red" },
+  });
+  await handle.ready;
+  const event = (type) => {
+    const value = new Event(type, { bubbles: true });
+    Object.defineProperty(value, "animationName", { value: "cornerfill-changing-animation" });
+    return value;
+  };
+  element.dispatchEvent(event("animationstart"));
+  const entry = controller.entryByElement.get(element);
+  assert(controller.activeAnimations.has(entry), "paint animation token was not started");
+  affectsPaint = false;
+  element.dispatchEvent(event("animationend"));
+  assert(!controller.activeAnimations.has(entry), "reclassified animation token was retained");
+  await new Promise(requestAnimationFrame);
+  handle.dispose();
+  controller.destroy();
+  element.remove();
+});
+
 await test("transform-only animation completion does not repaint after engine animation eviction", async () => {
   const element = host();
   let running = true;
@@ -6385,6 +6504,30 @@ await test("transform-only animation completion does not repaint after engine an
   element.dispatchEvent(event("animationend"));
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   equal(handle.explain().counters, before, "transform-only animation lifecycle ran fallback work");
+  handle.dispose();
+  controller.destroy();
+  element.remove();
+});
+
+await test("same-origin raster redirects remain readable in the static backend", async () => {
+  if (backend !== "static-data-url") return;
+  const element = host();
+  const controller = installCornerfill(options());
+  const handle = controller.attach(element, {
+    borderRadius: "5px",
+    cornerShape: "bevel",
+    paint: {
+      kind: "image",
+      url: "/cornerfill-cors-redirect.png",
+      sourceSize: [1, 1],
+      backgroundSize: [12, 10],
+      backgroundPosition: [0, 0],
+      repeat: "no-repeat",
+    },
+  });
+  await handle.ready;
+  assert(handle.explain().status === "active", "redirected CORS raster did not commit");
+  assert(element.hasAttribute("data-cornerfill-owned"), "redirected raster did not retain ownership");
   handle.dispose();
   controller.destroy();
   element.remove();

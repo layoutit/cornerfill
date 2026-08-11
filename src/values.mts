@@ -98,6 +98,7 @@ function scanTopLevel(
     }
     if (character === "\"" || character === "'") {
       quote = character;
+      onCharacter(character, index, depth);
       continue;
     }
     if (character === "(") depth += 1;

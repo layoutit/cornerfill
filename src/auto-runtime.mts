@@ -1111,6 +1111,15 @@ function nonceValue(element: Element | null | undefined): string {
     || "";
 }
 
+function appliedStylesheetNonce(root: AutoRoot): string | null {
+  for (const owner of stylesheetElements(root)) {
+    if (owner.sheet === null) continue;
+    const nonce = nonceValue(owner);
+    if (nonce) return nonce;
+  }
+  return null;
+}
+
 function assertGeneratedStyleActive(style: HTMLStyleElement, context: string): void {
   try {
     if (!style.sheet || style.sheet.cssRules.length === 0) {
@@ -1377,9 +1386,7 @@ class CornerfillAutoController {
       throw new TypeError("onError must be a function");
     }
     this.explicitNonce = options.nonce ?? null;
-    this.discoveredNonce = stylesheetElements(this.root).map(nonceValue).find(Boolean)
-      ?? nonceValue(this.document.querySelector("script[nonce],style[nonce],link[nonce]"))
-      ?? null;
+    this.discoveredNonce = appliedStylesheetNonce(this.root);
     this.nonce = this.explicitNonce ?? this.discoveredNonce;
     this.controller = options.controller ?? installCornerfill(runtimeOptions({
       ...options,

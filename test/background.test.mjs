@@ -9,6 +9,7 @@ import {
   rasterSourceDimensions,
   resolvePaintForBox,
 } from "../dist/background.mjs";
+import { parseCssGradient } from "../dist/gradients.mjs";
 
 const image = Object.freeze({ width: 30, height: 15 });
 
@@ -70,6 +71,33 @@ test("background position resolves edge offsets and keyword order", () => {
   assert.deepEqual(edgePosition("right 10% bottom 25%", "100px 80px"), [0, 0]);
   assert.deepEqual(edgePosition("right 10% bottom 25%", "120px 100px"), [-18, -15]);
   assert.deepEqual(edgePosition("right -10% bottom -25%", "20px 10px"), [88, 87.5]);
+});
+
+test("gradient stops reject unsupported length positions instead of absorbing them into colors", () => {
+  for (const gradient of [
+    "linear-gradient(red 10px, blue 90px)",
+    "linear-gradient(red, blue 1em, green)",
+    "radial-gradient(red calc(10% + 1px), blue)",
+    "conic-gradient(red 10px, blue)",
+  ]) {
+    assert.throws(() => parseCssGradient(gradient), /gradient stop|finite angle/u, gradient);
+  }
+  assert.deepEqual(parseCssGradient("linear-gradient(red 10%, blue 90%)").stops, [
+    [0.1, "red"],
+    [0.9, "blue"],
+  ]);
+});
+
+test("top-level quoted garbage remains visible to background grammar validation", () => {
+  assert.throws(() => parseBackgroundRepeat('repeat "junk"'), /invalid background-repeat/u);
+  assert.throws(
+    () => normalizePaintDescriptor({
+      kind: "image",
+      image,
+      backgroundPosition: 'center "junk" left',
+    }),
+    /background-position/u,
+  );
 });
 
 test("repeat, round, and space produce bounded tile plans", () => {

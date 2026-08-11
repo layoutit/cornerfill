@@ -1,7 +1,9 @@
 # PolyCSS Mario case study
 
-Status: implemented workload integration with completed Firefox ABBA lifecycle
-and timing evidence. Native-to-candidate visual parity remains `UNQUALIFIED`.
+Status: implemented workload integration in the sibling `cssGraphics` checkout,
+with completed Firefox ABBA lifecycle and timing evidence. The ignored prepared
+fixture and trace harness are not shipped by Cornerfill. Native-to-candidate
+visual parity remains `UNQUALIFIED`.
 
 This is the first high-value consumer for Cornerfill. It is also an unusually clean fit for the honest paint-only boundary: Mario is a retained DOM scene made from empty polygon leaves whose visible content is an atlas image. The browser still owns every face's layout and 3D transform; Cornerfill needs to own only the leaf's local pixels.
 
@@ -146,7 +148,9 @@ The opaque atlas fast path retains the contour alpha already painted into each l
 
 ## Workload evidence
 
-The checked prepared artifact `build/generated/lean-mario-runtime-oracle-20260729/lighting-atlases.json` records:
+The locally generated artifact
+`../cssGraphics/build/generated/lean-mario-runtime-oracle-20260729/lighting-atlases.json`
+records:
 
 | Field | Value |
 | --- | ---: |

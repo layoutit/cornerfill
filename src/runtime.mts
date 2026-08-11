@@ -1033,10 +1033,17 @@ function normalizeBorder(border: unknown): Readonly<OwnedBorderPaintState> | nul
 }
 
 function effectLength(token: unknown): number | null {
-  const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(px)?$/iu.exec(String(token).trim());
+  const source = String(token).trim();
+  if (/^(?:calc|min|max|clamp)\(/iu.test(source)) {
+    throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
+  }
+  const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]+)?$/iu.exec(source);
   if (!match) return null;
   const value = Number(match[1]!);
-  if (!match[2] && value !== 0) return null;
+  const unit = match[2]?.toLowerCase();
+  if ((unit && unit !== "px") || (!unit && value !== 0)) {
+    throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
+  }
   return value;
 }
 
@@ -1067,7 +1074,6 @@ function normalizeInsetShadow(shadow: unknown): Readonly<InsetShadowPaintState> 
     if (offsetX !== 0 || offsetY !== 0 || blur !== 0 || spread < 0) {
       throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
     }
-    if (spread === 0) return null;
     return Object.freeze({
       kind: "inset-solid-ring",
       spread,
@@ -1081,7 +1087,6 @@ function normalizeInsetShadow(shadow: unknown): Readonly<InsetShadowPaintState> 
   if (!Number.isFinite(spread) || spread < 0 || !shadow.color) {
     throw new TypeError(CORNERFILL_LIMITATIONS.shadowAndOutlineGrammar.reason);
   }
-  if (spread === 0) return null;
   return Object.freeze({
     kind: "inset-solid-ring",
     spread,
@@ -1188,10 +1193,9 @@ function resolveShadowColor(
   shadow: Readonly<InsetShadowPaintState> | null,
   resolve: ContextualColorResolver,
 ): Readonly<InsetShadowPaintState> | null {
-  return shadow ? Object.freeze({
-    ...shadow,
-    color: resolve(shadow.color, "inset shadow color"),
-  }) : null;
+  if (!shadow) return null;
+  const color = resolve(shadow.color, "inset shadow color");
+  return shadow.spread === 0 ? null : Object.freeze({ ...shadow, color });
 }
 
 function resolveOutlineColor(
@@ -1741,11 +1745,8 @@ function imageRequest(
   descriptor: NormalizedImageLayer,
 ): Readonly<{ absoluteUrl: string; crossOrigin: string | null; identity: string }> {
   const parsedUrl = new URL(descriptor.url!, document.baseURI);
-  const documentUrl = new URL(document.baseURI);
   const crossOrigin = descriptor.crossOrigin ?? (
-    /^https?:$/u.test(parsedUrl.protocol) && parsedUrl.origin !== documentUrl.origin
-      ? "anonymous"
-      : null
+    /^https?:$/u.test(parsedUrl.protocol) ? "anonymous" : null
   );
   if (![null, "anonymous", "use-credentials"].includes(crossOrigin)) {
     throw new TypeError(`unsupported image crossOrigin mode: ${crossOrigin}`);
@@ -2430,14 +2431,16 @@ class CornerfillController {
       if (ignored!.size === 0) this.ignoredAnimations.delete(entry);
       return;
     }
-    if (!animationAffectsPaint(entry.element, event)) return;
     const tokens = this.activeAnimations.get(entry);
-    if (tokens) {
-      const count = tokens.get(token) ?? 0;
+    const count = tokens?.get(token) ?? 0;
+    if (tokens && count > 0) {
       if (count === 1) tokens.delete(token);
-      else if (count > 1) tokens.set(token, count - 1);
+      else tokens.set(token, count - 1);
       if (tokens.size === 0) this.activeAnimations.delete(entry);
+      this._markDirty(entry, "animation-final", true);
+      return;
     }
+    if (!animationAffectsPaint(entry.element, event)) return;
     this._markDirty(entry, "animation-final", true);
   }
 
@@ -4093,6 +4096,10 @@ class CornerfillController {
           const computed = controller.view.getComputedStyle(entry.element);
           inspectFallbackHost(entry.element, computed);
           assertOutlineHost(controller.view, entry.element, entry.outline);
+          if (entry.mode === "prepared" && entry.surfaceDeferred) {
+            if (entry.surface) throw new Error("deferred Cornerfill surface was allocated early");
+            return entryExplanation(entry);
+          }
           if (controller._reconcileEntryOwnershipRoot(entry) && entry.mode !== "prepared") {
             controller._markDirty(entry, "attachment-root-migration", true);
           }
@@ -4235,8 +4242,8 @@ class CornerfillController {
       const waiters = entry.waiters?.splice(0) ?? [];
       entry.waiters = null;
       if (waiters.length > 0) {
-        const explanation = entryExplanation(entry);
-        for (const waiter of waiters) waiter.resolve(explanation);
+        const error = new Error("Cornerfill handle was disposed before its pending update completed");
+        for (const waiter of waiters) waiter.reject(error);
       }
     }
     this.counters.detachments += 1;

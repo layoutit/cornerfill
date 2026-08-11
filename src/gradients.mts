@@ -120,10 +120,17 @@ function conicStopPosition(input: string): number {
   return angleRadians(input, "conic gradient stop") / (Math.PI * 2);
 }
 
+function positionLikeToken(value: string): boolean {
+  const token = value.trim();
+  return /^[+-]?(?:\d|\.\d)/u.test(token)
+    || /^(?:calc|min|max|clamp)\(/iu.test(token);
+}
+
 function tryPosition(parser: PositionParser, value: string): number | null {
   try {
     return parser(value);
-  } catch {
+  } catch (error) {
+    if (positionLikeToken(value)) throw error;
     return null;
   }
 }
