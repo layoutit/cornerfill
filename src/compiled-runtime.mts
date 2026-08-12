@@ -663,7 +663,6 @@ export function installCornerfillCompiled(
   const view = document.defaultView;
   const autoObserve = options.autoObserve !== false && options.observe !== false;
   const maxCandidateElements = options.maxCandidateElements
-    ?? options.maxActiveEntries
     ?? DEFAULT_MAX_CANDIDATE_ELEMENTS;
   const maxScannedElements = options.maxScannedElements ?? DEFAULT_MAX_SCANNED_ELEMENTS;
   const maxPotentialCandidates = options.maxPotentialCandidates

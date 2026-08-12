@@ -891,8 +891,9 @@ function insetShadowContours(
   border: Readonly<OwnedBorderPaintState> | null,
 ): Readonly<{ inner: readonly Point[]; outer: readonly Point[] }> | null {
   if (!shadow) return null;
+  if (shadow.kind === "inset-solid-ring" && shadow.spread === 0 && shadow.color) return null;
   if (shadow.kind !== "inset-solid-ring" || !Number.isFinite(shadow.spread)
-    || shadow.spread <= 0 || !shadow.color) {
+    || shadow.spread < 0 || !shadow.color) {
     throw new TypeError("unsupported inset shadow descriptor");
   }
   const baseInsets: Four<number> = border?.widths ?? [0, 0, 0, 0];

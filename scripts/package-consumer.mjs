@@ -200,7 +200,7 @@ await runWithCleanup(async () => {
     import automatic from "cornerfill/auto";
     import { installCornerfillCompiled } from "cornerfill/compiled";
     import cornerfillPostcss from "cornerfill/postcss";
-    import { installCornerfill } from "cornerfill/runtime";
+    import { CornerfillDetachedError, installCornerfill } from "cornerfill/runtime";
     declare const element: HTMLElement;
     declare const shadowRoot: ShadowRoot;
     declare const runtime: ReturnType<typeof installCornerfill>;
@@ -223,7 +223,7 @@ await runWithCleanup(async () => {
     // @ts-expect-error prepared direct updates do not accept geometry fields.
     prepared.update({ cornerShape: "scoop" });
     cornerfill?.registerRoot(shadowRoot);
-    void [cornerfill, automatic, cornerfillPostcss, installCornerfillCompiled, installCornerfill, attached, prepared];
+    void [cornerfill, automatic, cornerfillPostcss, installCornerfillCompiled, CornerfillDetachedError, installCornerfill, attached, prepared];
   `);
   writeFileSync(join(consumerRoot, "tsconfig.json"), `${JSON.stringify({
     compilerOptions: {

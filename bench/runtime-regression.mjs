@@ -5,6 +5,7 @@ const backend = new URL(location.href).searchParams.get("backend") ?? "static-da
 const results = [];
 let installCornerfill;
 let installCornerfillAuto;
+let CornerfillDetachedError;
 let rootImportResources = Object.freeze([]);
 let rootAutomaticReport = null;
 
@@ -1325,6 +1326,47 @@ await test("compiled CSS drives the production runtime without source reconstruc
   potentialLimited.destroy();
   budgetFrame.remove();
 
+  const initialFailureFrame = document.createElement("iframe");
+  initialFailureFrame.srcdoc = "<!doctype html><html><head></head><body></body></html>";
+  const initialFailureLoaded = new Promise((resolve) => (
+    initialFailureFrame.addEventListener("load", resolve, { once: true })
+  ));
+  document.body.append(initialFailureFrame);
+  await initialFailureLoaded;
+  const initialFailureDocument = initialFailureFrame.contentDocument;
+  const initialFailureCss = initialFailureDocument.createElement("style");
+  initialFailureCss.textContent = await fetch("/bench/compiled-fixture.css").then((response) => response.text());
+  initialFailureDocument.head.append(initialFailureCss);
+  const initialFailureElement = initialFailureDocument.createElement("div");
+  initialFailureElement.className = "cornerfill-compiled-fixture";
+  initialFailureDocument.body.append(initialFailureElement);
+  const initialRootStyle = initialFailureDocument.defaultView.getComputedStyle(initialFailureDocument.documentElement);
+  const initialManifestProperty = Array.from({ length: initialRootStyle.length },
+    (_value, index) => initialRootStyle.item(index))
+    .find((property) => property.startsWith("--cornerfill-compiled-manifest-"));
+  assert(initialManifestProperty, "initial-failure fixture could not resolve its compiled manifest");
+  const initialFailureOverride = initialFailureDocument.createElement("style");
+  initialFailureOverride.textContent = `:root{${initialManifestProperty}:"malformed"!important}`;
+  initialFailureDocument.head.append(initialFailureOverride);
+  const initialFailureController = installCornerfillCompiled({
+    document: initialFailureDocument,
+    backend,
+    forceFallback: true,
+    staticFallback: backend === "static-data-url",
+  });
+  await initialFailureController.ready.then(
+    () => { throw new Error("initial malformed manifest did not fail closed"); },
+    () => undefined,
+  );
+  assert(initialFailureController.explain().status === "blocked-recoverable",
+    "initial malformed manifest did not retain recoverable state");
+  initialFailureOverride.remove();
+  await waitFor(() => initialFailureController.explain().status === "active"
+    && initialFailureController.explain(initialFailureElement)?.status === "active",
+  "initial malformed manifest did not recover after removal");
+  initialFailureController.destroy();
+  initialFailureFrame.remove();
+
   const traversalLimited = installCornerfillCompiled({
     document,
     backend,
@@ -1751,7 +1793,7 @@ await test("automatic install consumes standard corner-shape CSS and tears down"
   link.remove();
 });
 
-({ installCornerfill } = await import("../dist/runtime.mjs"));
+({ CornerfillDetachedError, installCornerfill } = await import("../dist/runtime.mjs"));
 ({ installCornerfillAuto } = await import("../dist/auto-runtime.mjs"));
 
 await test("linked-source base URLs accept URL objects from another realm", async () => {
@@ -5779,6 +5821,42 @@ await test("automatic nonce discovery ignores inert stylesheet owners", async ()
   }
 });
 
+await test("automatic nonce discovery can bootstrap from a pending stylesheet", async () => {
+  const frame = document.createElement("iframe");
+  frame.srcdoc = `
+    <meta http-equiv="Content-Security-Policy" content="style-src 'nonce-cornerfill-pending' 'self'">
+    <div class="cornerfill-pending-nonce"></div>
+  `;
+  const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  document.body.append(frame);
+  await loaded;
+  const frameDocument = frame.contentDocument;
+  const owner = frameDocument.createElement("link");
+  owner.rel = "stylesheet";
+  owner.href = "/bench/pending-nonce.css";
+  owner.nonce = "cornerfill-pending";
+  frameDocument.head.append(owner);
+  assert(owner.sheet === null, "pending nonce fixture loaded before automatic installation");
+  const element = frameDocument.querySelector(".cornerfill-pending-nonce");
+  const auto = installCornerfillAuto(options({
+    autoObserve: false,
+    document: frameDocument,
+    nativeQualification: qualifyNativeCornerShape(frameDocument),
+  }));
+  try {
+    await auto.ready;
+    assert(auto.explain(element)?.status === "active", "pending stylesheet nonce did not authorize fallback ownership");
+    const generated = [...frameDocument.querySelectorAll("style[data-cornerfill-auto-styles]")];
+    assert(
+      generated.length > 0 && generated.every((style) => style.nonce === "cornerfill-pending" && style.sheet),
+      "pending stylesheet nonce was not preserved across generated styles",
+    );
+  } finally {
+    auto.destroy();
+    frame.remove();
+  }
+});
+
 await test("failed carrier registration does not poison a later controller", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLStyleElement.prototype, "sheet");
   assert(descriptor?.get, "HTMLStyleElement.sheet getter was unavailable");
@@ -5938,6 +6016,7 @@ await test("disposing a dynamic handle rejects its pending update", async () => 
   handle.dispose();
   let error = null;
   try { await pending; } catch (caught) { error = caught; }
+  assert(error instanceof CornerfillDetachedError, "disposed update did not expose a typed lifecycle error");
   assert(/disposed before its pending update/u.test(error?.message ?? ""), "disposed update resolved as successful");
   controller.destroy();
   element.remove();
@@ -5947,7 +6026,7 @@ await test("failed initialization releases its entry claim and budget", async ()
   const failedElement = host();
   const recoveredElement = host();
   const controller = installCornerfill(options({
-    maxActiveEntries: 1,
+    maxActiveFallbackEntries: 1,
     maxTotalSurfacePixels: 100,
   }));
   const failed = controller.attachPrepared(failedElement, {
@@ -7647,7 +7726,7 @@ await test("controllers reject conflicts and stale handles cannot detach replace
 await test("fallback entry and aggregate surface budgets refuse new work", async () => {
   const firstElement = host();
   const secondElement = host();
-  const entryController = installCornerfill(options({ maxActiveEntries: 1 }));
+  const entryController = installCornerfill(options({ maxActiveFallbackEntries: 1 }));
   const first = entryController.attachPrepared(firstElement, preparedConfig());
   await first.ready;
   let entryError = null;
@@ -7657,7 +7736,7 @@ await test("fallback entry and aggregate surface budgets refuse new work", async
   entryController.destroy();
 
   const pixelController = installCornerfill(options({
-    maxActiveEntries: 2,
+    maxActiveFallbackEntries: 2,
     maxTotalSurfacePixels: 128,
   }));
   const pixelConfig = {

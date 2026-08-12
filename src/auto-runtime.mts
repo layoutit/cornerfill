@@ -946,7 +946,7 @@ function hasShapeCarrier(inspection: Readonly<CornerfillAuthoredStyleInspection>
 }
 
 function stylesheetElements(root: AutoRoot): StylesheetOwner[] {
-  return stylesheetSourceElements(root).filter(stylesheetElementIsEligible);
+  return stylesheetSourceElements(root).filter(stylesheetElementMayBecomeApplicable);
 }
 
 function stylesheetSourceElements(root: AutoRoot): StylesheetOwner[] {
@@ -1070,12 +1070,14 @@ function inlineStylesheetMayBeLoading(owner: HTMLStyleElement): boolean {
   }
 }
 
-function stylesheetElementIsEligible(owner: StylesheetOwner): boolean {
+function stylesheetElementMayBecomeApplicable(owner: StylesheetOwner): boolean {
   if (!owner?.isConnected || owner.disabled || owner.sheet?.disabled) return false;
   if (!isAddressableStylesheetOwner(owner)) return false;
   if (owner.localName === "style") {
     return owner.sheet !== null || inlineStylesheetMayBeLoading(owner);
   }
+  // A null link sheet can still be loading. _waitForBrowserStylesheet() is the
+  // final authority and refuses fetched source the browser never applies.
   return isStylesheetLink(owner);
 }
 
@@ -1114,6 +1116,15 @@ function nonceValue(element: Element | null | undefined): string {
 function appliedStylesheetNonce(root: AutoRoot): string | null {
   for (const owner of stylesheetElements(root)) {
     if (owner.sheet === null) continue;
+    const nonce = nonceValue(owner);
+    if (nonce) return nonce;
+  }
+  return null;
+}
+
+function pendingStylesheetNonce(root: AutoRoot): string | null {
+  for (const owner of stylesheetSourceElements(root)) {
+    if (!isStylesheetLink(owner) || !stylesheetElementMayBecomeApplicable(owner)) continue;
     const nonce = nonceValue(owner);
     if (nonce) return nonce;
   }
@@ -1273,7 +1284,7 @@ function runtimeOptions(
     ...runtime
   } = options;
   return {
-    maxActiveEntries: 512,
+    maxActiveFallbackEntries: 512,
     ...runtime,
     document,
   };
@@ -1354,7 +1365,7 @@ class CornerfillAutoController {
     this.maxStylesheetBytes = options.maxStylesheetBytes ?? 1_048_576;
     this.maxImportDepth = options.maxImportDepth ?? 16;
     this.maxImportCount = options.maxImportCount ?? 64;
-    this.maxCandidateElements = options.maxCandidateElements ?? options.maxActiveEntries ?? 512;
+    this.maxCandidateElements = options.maxCandidateElements ?? 512;
     this.maxCompiledSelectors = options.maxCompiledSelectors ?? 1_024;
     this.maxScannedElements = options.maxScannedElements ?? DEFAULT_MAX_SCANNED_ELEMENTS;
     for (const [name, value] of [
@@ -1386,7 +1397,10 @@ class CornerfillAutoController {
       throw new TypeError("onError must be a function");
     }
     this.explicitNonce = options.nonce ?? null;
-    this.discoveredNonce = appliedStylesheetNonce(this.root);
+    // Prefer a browser-applied owner. A pending link is a safe bootstrap
+    // fallback: the browser still authorizes every generated style, while
+    // _waitForBrowserStylesheet() prevents its source from being laundered.
+    this.discoveredNonce = appliedStylesheetNonce(this.root) ?? pendingStylesheetNonce(this.root);
     this.nonce = this.explicitNonce ?? this.discoveredNonce;
     this.controller = options.controller ?? installCornerfill(runtimeOptions({
       ...options,
@@ -2976,7 +2990,7 @@ class CornerfillAutoController {
 
   _abortObsoleteSourceRequests(): void {
     for (const [owner, request] of this.sourceState.requests) {
-      if (!stylesheetElementIsEligible(owner) || this._stylesheetKey(owner) !== request.key) {
+      if (!stylesheetElementMayBecomeApplicable(owner) || this._stylesheetKey(owner) !== request.key) {
         this._abortSourceRequest(owner);
       }
     }
@@ -2990,7 +3004,7 @@ class CornerfillAutoController {
     return !this.destroyed
       && !request.aborted
       && this.sourceState.requests.get(owner) === request
-      && stylesheetElementIsEligible(owner)
+      && stylesheetElementMayBecomeApplicable(owner)
       && stylesheetMediaMatches(this.document.defaultView, owner)
       && this._stylesheetKey(owner) === key;
   }
@@ -3005,7 +3019,7 @@ class CornerfillAutoController {
 
   _processStylesheet(owner: StylesheetOwner, retryFailed = false): Promise<void> | undefined {
     if (this.destroyed) return;
-    if (!stylesheetElementIsEligible(owner)) {
+    if (!stylesheetElementMayBecomeApplicable(owner)) {
       this._abortSourceRequest(owner);
       this._clearErrors(owner);
       const previous = this.sourceState.stylesheets.get(owner);

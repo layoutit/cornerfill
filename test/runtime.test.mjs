@@ -87,7 +87,7 @@ test("runtime rejects non-finite resource budgets before creating state", async 
   const { installCornerfill } = await import("../dist/runtime.mjs?resource-budget-validation-test");
   const { document } = nativeDocument();
   for (const name of [
-    "maxActiveEntries",
+    "maxActiveFallbackEntries",
     "maxSurfacePixels",
     "maxTotalSurfacePixels",
     "maxGeometryCacheEntries",

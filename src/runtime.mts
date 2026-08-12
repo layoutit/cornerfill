@@ -186,7 +186,7 @@ export interface CornerfillInstallOptions {
   readonly document?: Document | undefined;
   readonly forceFallback?: boolean | undefined;
   readonly imageTimeoutMs?: number | undefined;
-  readonly maxActiveEntries?: number | undefined;
+  readonly maxActiveFallbackEntries?: number | undefined;
   readonly maxGeometryCacheEntries?: number | undefined;
   readonly maxImageCacheEntries?: number | undefined;
   readonly maxImageCachePixels?: number | undefined;
@@ -202,7 +202,7 @@ export interface ResolvedCornerfillOptions {
   readonly backend: SurfaceBackend;
   readonly forceFallback: boolean;
   readonly imageTimeoutMs: number;
-  readonly maxActiveEntries: number;
+  readonly maxActiveFallbackEntries: number;
   readonly maxGeometryCacheEntries: number;
   readonly maxImageCacheEntries: number;
   readonly maxImageCachePixels: number;
@@ -761,6 +761,13 @@ export const CORNERFILL_LIMITATIONS = Object.freeze({
 
 
 const ELEMENT_OWNER_REGISTRY = Symbol.for("layoutit.cornerfill.element-owner-registry.v1");
+
+export class CornerfillDetachedError extends Error {
+  constructor(message = "Cornerfill handle is disposed") {
+    super(message);
+    this.name = "CornerfillDetachedError";
+  }
+}
 
 class StaleEntryWorkError extends Error {
   constructor() {
@@ -1946,7 +1953,7 @@ class CornerfillController {
       staticFallback: options.staticFallback === true,
       backend: options.backend ?? "auto",
       observe: options.observe !== false,
-      maxActiveEntries: options.maxActiveEntries ?? 2048,
+      maxActiveFallbackEntries: options.maxActiveFallbackEntries ?? 2048,
       maxSurfacePixels: options.maxSurfacePixels ?? DEFAULT_MAX_SURFACE_PIXELS,
       maxTotalSurfacePixels: options.maxTotalSurfacePixels ?? DEFAULT_MAX_TOTAL_SURFACE_PIXELS,
       maxGeometryCacheEntries: options.maxGeometryCacheEntries ?? 2048,
@@ -1958,7 +1965,7 @@ class CornerfillController {
     if (!["auto", "webkit-canvas", "moz-element", "static-data-url"].includes(this.options.backend)) {
       throw new TypeError(`unknown Cornerfill surface backend: ${this.options.backend}`);
     }
-    positiveSafeInteger(this.options.maxActiveEntries, "maxActiveEntries");
+    positiveSafeInteger(this.options.maxActiveFallbackEntries, "maxActiveFallbackEntries");
     positiveSafeInteger(this.options.maxSurfacePixels, "maxSurfacePixels");
     positiveSafeInteger(this.options.maxTotalSurfacePixels, "maxTotalSurfacePixels");
     nonNegativeSafeInteger(this.options.maxGeometryCacheEntries, "maxGeometryCacheEntries");
@@ -3019,9 +3026,9 @@ class CornerfillController {
   }
 
   _assertFallbackEntryBudget(): void {
-    if (this.counters.fallbackEntries >= this.options.maxActiveEntries) {
+    if (this.counters.fallbackEntries >= this.options.maxActiveFallbackEntries) {
       throw new RangeError(
-        `active fallback entry budget ${this.options.maxActiveEntries} is exhausted`,
+        `active fallback entry budget ${this.options.maxActiveFallbackEntries} is exhausted`,
       );
     }
   }
@@ -4044,7 +4051,7 @@ class CornerfillController {
         return entry.mode === "native" ? "native-corner-shape" : entry.surface?.backend ?? entry.backend ?? "pending";
       },
       update(next: CornerfillInternalHandleUpdate = {}) {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
+        if (!controller._entryIsCurrent(entry)) throw new CornerfillDetachedError();
         if (entry.mode === "native") {
           return controller._updateNativeEntry(entry, next as CornerfillNativeHandleUpdate);
         }
@@ -4059,7 +4066,7 @@ class CornerfillController {
         progress: number,
         options: CornerWritingOptions = {},
       ) {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
+        if (!controller._entryIsCurrent(entry)) throw new CornerfillDetachedError();
         const cornerShape = interpolateCornerShapeValues(from, to, progress, options);
         if (entry.mode === "native") {
           const declarations = nativeShapeDeclarations(entry.element, cornerShape);
@@ -4076,7 +4083,7 @@ class CornerfillController {
         return controller._scheduleAndWait(entry, "corner-shape-interpolation", true);
       },
       refresh() {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
+        if (!controller._entryIsCurrent(entry)) throw new CornerfillDetachedError();
         if (entry.mode === "native") return Promise.resolve(entryExplanation(entry));
         if (entry.mode === "prepared") {
           return controller._refreshPrepared(entry);
@@ -4084,13 +4091,13 @@ class CornerfillController {
         return controller._scheduleAndWait(entry, "explicit-refresh", true);
       },
       resize(next: CornerfillPreparedResizeConfig = {}) {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
+        if (!controller._entryIsCurrent(entry)) throw new CornerfillDetachedError();
         if (entry.mode === "native") throw new TypeError("resize() is available only for attachPrepared() handles");
         if (entry.mode !== "prepared") throw new TypeError("resize() is available only for attachPrepared() handles");
         return controller._resizePrepared(entry.element, next);
       },
       verify() {
-        if (!controller._entryIsCurrent(entry)) throw new Error("Cornerfill handle is disposed");
+        if (!controller._entryIsCurrent(entry)) throw new CornerfillDetachedError();
         if (entry.error) throw entry.error;
         if (entry.mode !== "native") {
           const computed = controller.view.getComputedStyle(entry.element);
@@ -4242,7 +4249,9 @@ class CornerfillController {
       const waiters = entry.waiters?.splice(0) ?? [];
       entry.waiters = null;
       if (waiters.length > 0) {
-        const error = new Error("Cornerfill handle was disposed before its pending update completed");
+        const error = new CornerfillDetachedError(
+          "Cornerfill handle was disposed before its pending update completed",
+        );
         for (const waiter of waiters) waiter.reject(error);
       }
     }

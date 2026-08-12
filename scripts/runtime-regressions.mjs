@@ -440,6 +440,16 @@ async function startServer() {
       response.end(CORS_REDIRECT_PNG);
       return;
     }
+    if (url.pathname === "/bench/pending-nonce.css") {
+      setTimeout(() => {
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": "text/css; charset=utf-8",
+        });
+        response.end(".cornerfill-pending-nonce{width:12px;height:10px;background:red;border-radius:5px;corner-shape:bevel}");
+      }, 75);
+      return;
+    }
     if (url.pathname === "/bench/compiled-fixture.css") {
       response.writeHead(200, { "cache-control": "no-store", "content-type": "text/css; charset=utf-8" });
       response.end(COMPILED_FIXTURE_CSS);

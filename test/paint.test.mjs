@@ -8,6 +8,7 @@ import {
   paintCornerfill,
   paintOwnedLayer,
   preparePreparedOpaqueImageContext,
+  validateCornerfillTopology,
 } from "../dist/paint.mjs";
 import { buildCornerGeometry } from "../dist/geometry.mjs";
 import { normalizePaintDescriptor, resolvePaintForBox } from "../dist/background.mjs";
@@ -178,6 +179,20 @@ test("multiply uses Canvas compositing only on the admitted raster layer", () =>
     ["drawImage", image, 0, 0, 4, 4, 0, 0, 4, 4],
     ["restore"],
   ]);
+});
+
+test("zero-spread inset rings are a valid no-op at the painter boundary", () => {
+  const geometry = buildCornerGeometry({
+    width: 12,
+    height: 10,
+    borderRadius: "5px",
+    cornerShape: "bevel",
+  });
+  assert.doesNotThrow(() => validateCornerfillTopology({
+    geometry,
+    paint: { kind: "solid", color: "red" },
+    shadow: { kind: "inset-solid-ring", spread: 0, color: "blue" },
+  }));
 });
 
 function assertUnsupportedInsetPaint({ width, height, borderRadius, cornerShape, widths }) {
