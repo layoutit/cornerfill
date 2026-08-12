@@ -129,7 +129,7 @@ Unsupported syntax is rejected at build time or reported before paint ownership 
 - Anonymous layer ancestry cannot establish a named layer for a later conditional layer statement. Malformed, conditional, nested, or incompatible Cornerfill-private `@property` registrations are refused.
 - Registered scopes subscribe to each containing root in `0.0.1`; total observer and listener subscriptions can grow quadratically with maximum nesting depth, so keep deeply nested registered-root chains shallow.
 - Default per-root compiled limits are 512 admitted active candidates, 100,000 potential or locally refused candidates, 100,000 incrementally scanned or inline-dependency elements, 1 MiB of effective local-plus-inherited manifest values, 512 effective manifest records, and 100,000 effective custom-property definition records. The painter separately bounds surfaces and decoded-image pixels. Exceeding a limit fails closed and remains recoverable when its inputs or activation conditions change.
-- The experimental `cornerfill/auto` mode has additional source-access, CSP `connect-src`, CSSOM, import, layer, and selector boundaries. Use compiled mode when the CSS build is controlled.
+- The experimental `cornerfill/auto` mode has additional source-access, CSP `connect-src`, CSSOM, import, layer, and selector boundaries. It may fetch a linked stylesheet before the browser reports that `style-src` rejected it, but never commits carriers unless the browser exposes the applied stylesheet. Use compiled mode when the CSS build is controlled.
 
 ## Development
 

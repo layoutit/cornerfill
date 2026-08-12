@@ -1360,10 +1360,14 @@ await test("compiled CSS drives the production runtime without source reconstruc
   );
   assert(initialFailureController.explain().status === "blocked-recoverable",
     "initial malformed manifest did not retain recoverable state");
+  await new Promise((resolve) => initialFailureDocument.defaultView.requestAnimationFrame(resolve));
   initialFailureOverride.remove();
   await waitFor(() => initialFailureController.explain().status === "active"
     && initialFailureController.explain(initialFailureElement)?.status === "active",
-  "initial malformed manifest did not recover after removal");
+  () => `initial malformed manifest did not recover after removal: ${JSON.stringify({
+    controller: initialFailureController.explain(),
+    entry: initialFailureController.explain(initialFailureElement),
+  })}`);
   initialFailureController.destroy();
   initialFailureFrame.remove();
 
@@ -5853,6 +5857,55 @@ await test("automatic nonce discovery can bootstrap from a pending stylesheet", 
     );
   } finally {
     auto.destroy();
+    frame.remove();
+  }
+});
+
+await test("automatic nonce discovery verifies pending candidates before selection", async () => {
+  const frame = document.createElement("iframe");
+  frame.srcdoc = "<!doctype html><html><head></head><body></body></html>";
+  const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  document.body.append(frame);
+  await loaded;
+  const frameWindow = frame.contentWindow;
+  const frameDocument = frame.contentDocument;
+  const descriptor = Object.getOwnPropertyDescriptor(frameWindow.HTMLStyleElement.prototype, "sheet");
+  assert(descriptor?.get, "pending candidate fixture has no stylesheet getter");
+  Object.defineProperty(frameWindow.HTMLStyleElement.prototype, "sheet", {
+    configurable: true,
+    get() {
+      if (this.getAttribute("data-cornerfill-auto-styles") === "nonce-probe"
+        && this.nonce === "cornerfill-hostile") return null;
+      return descriptor.get.call(this);
+    },
+  });
+  const hostile = frameDocument.createElement("link");
+  hostile.rel = "stylesheet";
+  hostile.href = "/bench/pending-nonce.css?hostile";
+  hostile.nonce = "cornerfill-hostile";
+  const legitimate = frameDocument.createElement("link");
+  legitimate.rel = "stylesheet";
+  legitimate.href = "/bench/pending-nonce.css?legitimate";
+  legitimate.nonce = "cornerfill-legitimate";
+  frameDocument.head.append(hostile, legitimate);
+  assert(hostile.sheet === null && legitimate.sheet === null,
+    "pending candidate fixture loaded before automatic installation");
+  let auto = null;
+  try {
+    auto = installCornerfillAuto(options({
+      autoObserve: false,
+      document: frameDocument,
+      nativeQualification: qualifyNativeCornerShape(frameDocument),
+    }));
+    await auto.ready;
+    assert(auto.discoveredNonce === "cornerfill-legitimate",
+      `automatic nonce discovery selected ${JSON.stringify(auto.discoveredNonce)}`);
+    const generated = [...frameDocument.querySelectorAll("style[data-cornerfill-auto-styles]")];
+    assert(generated.length > 0 && generated.every((style) => style.nonce === "cornerfill-legitimate"),
+      "an unverified owner nonce reached a generated stylesheet");
+  } finally {
+    auto?.destroy();
+    Object.defineProperty(frameWindow.HTMLStyleElement.prototype, "sheet", descriptor);
     frame.remove();
   }
 });

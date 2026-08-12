@@ -2524,7 +2524,7 @@ class CornerfillController {
     reason: string,
     needsFullRefresh: boolean,
   ): Promise<CornerfillEntryExplanation> {
-    if (entry.disposed) return Promise.resolve(entryExplanation(entry));
+    if (entry.disposed) return Promise.reject(new CornerfillDetachedError());
     const revision = this._markDirty(entry, reason, needsFullRefresh);
     return new Promise((resolve, reject) => (
       (entry.waiters ??= []).push({ resolve, reject, revision })

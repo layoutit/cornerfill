@@ -1113,22 +1113,20 @@ function nonceValue(element: Element | null | undefined): string {
     || "";
 }
 
-function appliedStylesheetNonce(root: AutoRoot): string | null {
-  for (const owner of stylesheetElements(root)) {
-    if (owner.sheet === null) continue;
+function stylesheetNonceCandidates(root: AutoRoot): readonly string[] {
+  const candidates = new Set<string>();
+  const owners = stylesheetSourceElements(root);
+  for (const owner of owners) {
     const nonce = nonceValue(owner);
-    if (nonce) return nonce;
+    if (owner.sheet !== null && nonce) candidates.add(nonce);
   }
-  return null;
-}
-
-function pendingStylesheetNonce(root: AutoRoot): string | null {
-  for (const owner of stylesheetSourceElements(root)) {
-    if (!isStylesheetLink(owner) || !stylesheetElementMayBecomeApplicable(owner)) continue;
+  for (const owner of owners) {
     const nonce = nonceValue(owner);
-    if (nonce) return nonce;
+    if (isStylesheetLink(owner) && stylesheetElementMayBecomeApplicable(owner) && nonce) {
+      candidates.add(nonce);
+    }
   }
-  return null;
+  return Object.freeze([...candidates]);
 }
 
 function assertGeneratedStyleActive(style: HTMLStyleElement, context: string): void {
@@ -1144,6 +1142,25 @@ function assertGeneratedStyleActive(style: HTMLStyleElement, context: string): v
     Object.defineProperty(failure, "cornerfillOwnershipBlocking", { value: true });
     throw failure;
   }
+}
+
+function verifiedStylesheetNonce(document: RuntimeDocument, root: AutoRoot): string | null {
+  for (const nonce of stylesheetNonceCandidates(root)) {
+    const style = document.createElement("style");
+    style.setAttribute(AUTO_STYLESHEET_ATTRIBUTE, "nonce-probe");
+    style.setAttribute("nonce", nonce);
+    style.textContent = ":root{--cornerfill-nonce-probe:1}";
+    (document.head ?? document.documentElement).append(style);
+    try {
+      assertGeneratedStyleActive(style, "Cornerfill nonce probe stylesheet");
+      return nonce;
+    } catch {
+      // A nonce candidate is only authority when the browser accepts it.
+    } finally {
+      style.remove();
+    }
+  }
+  return null;
 }
 
 function activateShadowCompanion(root: AutoRoot, style: HTMLStyleElement): void {
@@ -1397,10 +1414,9 @@ class CornerfillAutoController {
       throw new TypeError("onError must be a function");
     }
     this.explicitNonce = options.nonce ?? null;
-    // Prefer a browser-applied owner. A pending link is a safe bootstrap
-    // fallback: the browser still authorizes every generated style, while
-    // _waitForBrowserStylesheet() prevents its source from being laundered.
-    this.discoveredNonce = appliedStylesheetNonce(this.root) ?? pendingStylesheetNonce(this.root);
+    this.discoveredNonce = this.explicitNonce === null
+      ? verifiedStylesheetNonce(this.document, this.root)
+      : null;
     this.nonce = this.explicitNonce ?? this.discoveredNonce;
     this.controller = options.controller ?? installCornerfill(runtimeOptions({
       ...options,
@@ -1677,9 +1693,8 @@ class CornerfillAutoController {
     });
   }
 
-  _companionNonce(owner: StylesheetOwner | null = null): string {
-    if (this.explicitNonce !== null) return this.explicitNonce;
-    return (owner ? nonceValue(owner) : "") || this.discoveredNonce || "";
+  _companionNonce(): string {
+    return this.explicitNonce ?? this.discoveredNonce ?? "";
   }
 
   _rewriteHostContextSelector(selector: string): string {
@@ -2524,7 +2539,7 @@ class CornerfillAutoController {
         applyCompanionState(
           companion,
           "",
-          this._companionNonce(owner),
+          this._companionNonce(),
           stylesheetMedia(owner),
           "",
         );
@@ -2533,7 +2548,7 @@ class CornerfillAutoController {
       applyCompanionState(
         companion,
         "",
-        this._companionNonce(owner),
+        this._companionNonce(),
         stylesheetMedia(owner),
         compiled.css,
       );
@@ -2872,7 +2887,7 @@ class CornerfillAutoController {
       applyCompanionState(
         companion,
         "",
-        this._companionNonce(owner),
+        this._companionNonce(),
         stylesheetMedia(owner),
         record.carrierCss,
       );
@@ -4353,7 +4368,7 @@ class CornerfillAutoController {
       handleRegistry: this.handleRegistry,
       parentAuto: this,
       nativeQualification: this.nativeQualification,
-      nonce: options.nonce ?? this.explicitNonce ?? undefined,
+      nonce: options.nonce ?? this.nonce ?? undefined,
       autoObserve: options.autoObserve ?? this.autoObserve,
       adoptedStyleSheets: options.adoptedStyleSheets === true,
       onError: options.onError ?? this.onError ?? undefined,
