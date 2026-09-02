@@ -55,8 +55,6 @@ The browser resolves specificity, inheritance, variables, media queries, scopes,
 
 Qualified Chrome remains fully native and does not load the painter. WebKit and Firefox generate the spec-derived contour, paint the admitted background and border into a transparent Canvas surface, and attach that surface to the original element through `-webkit-canvas()` or `-moz-element()`. Layout, stacking, opacity, filters, and transforms—including `matrix3d()`—stay on the original element. Transform-only animation does not repaint.
 
-Cornerfill does not use `clip-path`, CSS masks, SVG or font stencils, extra clipping elements, or baked-alpha assets.
-
 ## Modes
 
 | Mode | Entry | Contract |
